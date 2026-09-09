@@ -1,0 +1,61 @@
+# Build Status
+
+Honest, current-as-of-last-update record of what actually builds, runs, and
+is tested — vs. what is only present as directory structure or CMake
+plumbing. See brief section 96: never claim "fertig"/"works" beyond what
+was actually verified.
+
+Legend: **TESTED** (built and executed successfully in this environment),
+**BUILDABLE** (configures/compiles but not executed, or executed with
+caveats noted), **UNTESTED** (exists but not attempted here), **BLOCKED**
+(cannot be attempted in this environment and why).
+
+## Environment this was last verified in
+
+Linux x86_64 sandbox (this remote execution container), no GPU, no
+display server (Xvfb not installed), CMake 3.28.3, GCC 13.3.0 / Clang
+18.1.3, Ninja 1.11.1, 4 cores, 15GB RAM, 30GB disk. Outbound `git clone`
+over `https://github.com/...` works; `https://api.github.com` is blocked
+(403) by network policy but unused by the build.
+
+## Targets
+
+| Target | Status | Notes |
+|---|---|---|
+| `LcuCore` | **TESTED** | Builds, unit tests pass (`ctest`, 12/12). |
+| `LcuMath` | **TESTED** | Header-only, unit tests pass for Vec3/Mat4. |
+| `LcuPlatform` (SDL3 window) | **TESTED** | Builds against fetched SDL3 release-3.2.10. `VoxelClient` creates a real `SDL_Window` and pumps events under `SDL_VIDEODRIVER=dummy` (no real display in this sandbox) and exits cleanly. **Not** visually verified (no GPU/display here) — someone with a desktop must confirm a window actually appears on screen. |
+| `VoxelClient` | **TESTED** (headless) / **UNTESTED** (visual) | Runs end-to-end under dummy SDL driver, `LCU_MAX_FRAMES` env var bounds the loop for CI. No renderer wired up yet (bgfx integration in progress, see below) — window is currently blank/unrendered even when a real display is available. |
+| `VoxelServer` | **TESTED** | Runs standalone, parses `--world`/`--port`, ticks at 20 TPS, exits cleanly via `LCU_MAX_TICKS`. `ldd` confirms **zero** SDL/bgfx link dependency (only libc/libstdc++/libm/libgcc_s). |
+| `VoxelTests` (GoogleTest) | **TESTED** | 12/12 tests pass: `Log.*`, `Vec3.*`, `Mat4.*`. |
+| bgfx (`engine/rendering`) | **TESTED** (headless) / **UNTESTED** (real GPU backend) | Builds cleanly (`libbgfx.a`, `libbx.a`, `libbimg.a`) after installing `libgl1-mesa-dev`/`libglu1-mesa-dev`/`mesa-common-dev`/`libwayland-dev` (see `DECISIONS.md`). `engine/rendering::Renderer` wraps `bgfx::init`/`frame`/`shutdown`. `VoxelClient` built with `LCU_ENABLE_BGFX=ON`, run under `SDL_VIDEODRIVER=dummy`, initializes bgfx on the `Noop` backend (no native window handle available) and completes a 5-frame clear loop cleanly. **Not verified**: a real Vulkan/GL backend actually presenting to a screen — no GPU/display in this sandbox. Someone with a desktop must confirm `VoxelClient` shows an actual window with the clear color. |
+| Lua scripting | **NOT STARTED** | Phase 9. |
+| Networking | **NOT STARTED** | Phase 7. |
+| Android build (`CMakePresets.json` `android-arm64`) | **BLOCKED here** | No Android NDK installed in this sandbox; preset requires `ANDROID_NDK_HOME`. Untested, not un-buildable — needs a machine/CI runner with the NDK. |
+| iOS build (`CMakePresets.json` `ios`) | **BLOCKED here** | Requires Xcode on a macOS host; this sandbox is Linux. Untested. |
+| Windows (MSVC preset) | **BLOCKED here** | Requires a Windows host/toolchain; this sandbox is Linux. Untested. |
+| macOS preset | **BLOCKED here** | Requires a macOS host (Metal via bgfx); this sandbox is Linux. Untested. |
+
+## How to reproduce the verified results
+
+```sh
+# Fast, non-graphics build (no bgfx compile, minutes not tens-of-minutes):
+cmake -S . -B build/dev-nobgfx -G Ninja -DCMAKE_BUILD_TYPE=Development -DLCU_ENABLE_BGFX=OFF
+cmake --build build/dev-nobgfx -j4
+ctest --test-dir build/dev-nobgfx --output-on-failure
+SDL_VIDEODRIVER=dummy LCU_MAX_FRAMES=5 ./build/dev-nobgfx/bin/VoxelClient
+LCU_MAX_TICKS=5 ./build/dev-nobgfx/bin/VoxelServer --world TestWorld --port 25566
+ldd ./build/dev-nobgfx/bin/VoxelServer   # confirm no SDL/bgfx
+
+# Full build with bgfx (default; see BUILDING.md for required system packages):
+cmake -S . -B build/dev-bgfx -G Ninja -DCMAKE_BUILD_TYPE=Development
+cmake --build build/dev-bgfx -j4
+ctest --test-dir build/dev-bgfx --output-on-failure
+SDL_VIDEODRIVER=dummy LCU_MAX_FRAMES=5 ./build/dev-bgfx/bin/VoxelClient
+```
+
+`LCU_ENABLE_BGFX=OFF` is an escape hatch for a fast non-graphics build
+while iterating; the default and the one that must keep working going
+forward is `LCU_ENABLE_BGFX=ON`. Both configurations are currently
+verified in this sandbox (see the table above) — headlessly. Real-display
+verification of the bgfx build is still outstanding.
