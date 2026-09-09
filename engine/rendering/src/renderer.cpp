@@ -1,0 +1,74 @@
+#include "lcu/rendering/renderer.h"
+
+#include <bgfx/bgfx.h>
+
+#include "lcu/core/assert.h"
+#include "lcu/core/log.h"
+
+namespace lcu::rendering {
+
+Renderer::~Renderer() {
+    if (initialized_) {
+        bgfx::shutdown();
+    }
+}
+
+bool Renderer::init(const RendererDesc& desc) {
+    LCU_ASSERT(!initialized_);
+
+    width_ = desc.width;
+    height_ = desc.height;
+    headless_ = desc.force_headless || desc.window_handle.nwh == nullptr;
+
+    bgfx::Init init;
+    init.type = headless_ ? bgfx::RendererType::Noop : bgfx::RendererType::Count;
+    init.vendorId = BGFX_PCI_ID_NONE;
+    // This bgfx version moved the main window's nwh/ndt/size out of a flat
+    // `resolution`/`platformData` pair into `Init::swapChain` (see
+    // bgfx/bgfx.h `struct SwapChain`) so multiple windows can each own one.
+    // We only ever create the one swap chain bgfx::init makes for us here.
+    init.swapChain.nwh = desc.window_handle.nwh;
+    init.swapChain.ndt = desc.window_handle.ndt;
+    init.swapChain.width = width_;
+    init.swapChain.height = height_;
+    init.reset = BGFX_RESET_VSYNC;
+
+    if (!bgfx::init(init)) {
+        LCU_LOG_ERROR("bgfx::init failed");
+        return false;
+    }
+
+    const bgfx::RendererType::Enum active = bgfx::getRendererType();
+    LCU_LOG_INFO("bgfx initialized: backend={} headless={} resolution={}x{}",
+                 bgfx::getRendererName(active), headless_, width_, height_);
+
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
+    bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+
+    initialized_ = true;
+    return true;
+}
+
+u32 Renderer::render_clear_frame(u32 rgba) {
+    LCU_ASSERT(initialized_);
+
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, rgba, 1.0f, 0);
+    bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+    // touch(0) ensures view 0 executes its clear even though nothing has
+    // submitted a draw call to it yet - there is no geometry until Phase 2.
+    bgfx::touch(0);
+    return bgfx::frame();
+}
+
+void Renderer::resize(u32 width, u32 height) {
+    width_ = width;
+    height_ = height;
+    if (initialized_) {
+        // Resizes the main swap chain's back buffer (nullptr = the one
+        // bgfx::init created for us). Actual window resizing is SDL's job.
+        bgfx::reset(BGFX_RESET_VSYNC);
+        bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+    }
+}
+
+}  // namespace lcu::rendering

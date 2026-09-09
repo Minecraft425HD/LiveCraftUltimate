@@ -78,6 +78,55 @@ GLM or another math dependency. The project brief's dependency list
 well-scoped enough problem to own directly and keep dependency count down
 per section 66.
 
+## 2026-09-09 — bgfx.cmake build environment requirements (Linux sandbox)
+
+**Context:** First attempt to configure `LCU_ENABLE_BGFX=ON` failed CMake's
+`find_package(OpenGL)` check inside bgfx.cmake (missing dev headers), and
+after that was fixed, the final `VoxelClient` link failed with
+`cannot find -lwayland-egl`.
+
+**Decision/action:** Installed `libgl1-mesa-dev`, `libglu1-mesa-dev`,
+`mesa-common-dev` (provides OpenGL dev headers + `libGL.so` symlink for
+`FindOpenGL`) and `libwayland-dev` (provides the `libwayland-egl.so`
+unversioned symlink the linker needs; the runtime `.so.1` was already
+present as a transitive dependency) via `apt-get` in this sandbox. These
+are build-time/link-time only — bgfx still picks its actual runtime
+backend (Vulkan/GL/Noop) at `bgfx::init` time, this doesn't force GL.
+
+**Follow-up for other environments/CI:** any Linux build host building the
+client with `LCU_ENABLE_BGFX=ON` needs the same OpenGL + Wayland dev
+packages installed, even if the target renderer is Vulkan — bgfx's CMake
+still probes for GL/Wayland as part of its multi-backend build. Document
+this in a future `BUILDING.md` rather than assuming a bare toolchain image
+suffices.
+
+## 2026-09-09 — bgfx API surface at the pinned version (v1.159.9485-575)
+
+**Context:** Wrote `engine/rendering/Renderer` against the bgfx API
+documented in older tutorials/examples (`bgfx::Init::resolution`,
+`bgfx::Init::platformData.nwh/ndt`, `bgfx::reset(width, height, flags)`).
+The pinned bgfx tag has since refactored multi-window support: the native
+window handle, display type, and swap-chain width/height now live under
+`bgfx::Init::swapChain` (a `bgfx::SwapChain`), not a flat
+`resolution`/`platformData` pair; `bgfx::PlatformData` only carries
+`context`/`queue`/`type` now; and `bgfx::reset()` takes `(flags,
+swapChain*)`, not `(width, height, flags)`.
+
+**Decision:** Adapted `Renderer::init`/`resize` to the current
+`Init::swapChain` shape rather than pinning an older bgfx tag to match
+outdated examples — the newer API is the one actually shipped at our
+pinned commit and multi-window support is directly useful for Phase 1
+tooling (debug windows, etc.) later. Recorded here so nobody "fixes" this
+back to the older shape while copying an outdated bgfx example.
+
+**Verification:** `VoxelClient` built with `LCU_ENABLE_BGFX=ON`, run under
+`SDL_VIDEODRIVER=dummy` (no native window handle available -> `Renderer`
+falls back to `bgfx::RendererType::Noop` automatically) completes 5 frames
+of `bgfx::init` -> `setViewClear`/`setViewRect`/`touch`/`frame` ->
+`bgfx::shutdown` cleanly. Real GPU backend (Vulkan/GL) selection and an
+actual on-screen frame are **not** verified — no display/GPU in this
+sandbox; needs confirmation on a machine with one.
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a
