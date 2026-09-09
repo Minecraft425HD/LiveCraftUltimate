@@ -41,3 +41,19 @@ All notable changes to this project are recorded here, newest first.
   a real running loop, not just unit tests.
 - `VoxelTests` now at 18/18 passing (added `InputState.*`,
   `FrameStats.*`).
+
+### Phase 2 (in progress)
+
+- `engine/voxel::ChunkStorage<EdgeLength>`/`Chunk`: flat, contiguous
+  `BlockId` array, no per-block C++ instance, default 16^3, alternative
+  sizes proven via `ChunkStorage<8>`.
+- `engine/voxel::world_to_chunk_and_local`: correct floor-division
+  world->chunk+local coordinate splitting (handles negative coordinates
+  correctly, unlike naive truncating division).
+- `engine/voxel::BlockRegistry`/`BlockDefinition`: namespaced, datadriven
+  block definitions (`game:stone`, `example_mod:magic_stone`); air always
+  id 0.
+- `VoxelTests` now at 39/39 passing (added `Chunk.*`, `ChunkStorage.*`,
+  `ChunkCoord.*`, `BlockRegistry.*` - 27 new cases, including an
+  exhaustive chunk-volume injectivity sweep and a coordinate-math
+  round-trip sweep).

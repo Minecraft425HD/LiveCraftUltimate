@@ -127,6 +127,50 @@ of `bgfx::init` -> `setViewClear`/`setViewRect`/`touch`/`frame` ->
 actual on-screen frame are **not** verified — no display/GPU in this
 sandbox; needs confirmation on a machine with one.
 
+## 2026-09-09 — BlockRegistry lives in engine/voxel, not engine/modding
+
+**Context:** The brief's directory layout (section 7) puts "registries"
+conceptually near modding, but `BlockRegistry` is needed by
+`engine/voxel` itself (chunk storage stores `BlockId`s that only mean
+anything relative to a registry) well before Phase 9's Lua/mod-loading
+work exists.
+
+**Decision:** `BlockRegistry` and `BlockDefinition` live in
+`engine/voxel` now. `engine/modding` (Phase 9) will add mod-facing
+registration (Lua bindings, `mod.json` parsing, hot reload) on top of
+this same registry rather than owning a separate one - the registry
+itself doesn't need to move, only gain a scripting-facing API layer.
+Revisit only if that layering turns out to be awkward once Phase 9
+starts.
+
+## 2026-09-09 — Chunk storage: flat array now, no palette compression yet
+
+**Context:** Minecraft-style engines often use per-chunk palette
+compression (small run-length/indexed encoding) to cut memory for
+mostly-uniform chunks (e.g. all-stone underground).
+
+**Decision:** `ChunkStorage<EdgeLength>` starts as a flat, contiguous
+`std::array<BlockId, Volume>` - simplest correct thing, already
+cache-friendly and allocation-free. Deferred: palette compression. Brief
+section 76 requires baseline -> profile -> optimize, in that order;
+there is no baseline yet to know whether this matters, and adding
+compression now would be optimizing before measuring (brief section 98).
+Revisit once Phase 3 world streaming gives real chunk-memory numbers to
+profile.
+
+## 2026-09-09 — Block state (rotation/orientation/etc.) not encoded yet
+
+**Context:** Brief section 17 wants compact block state (rotation,
+powered, open, age, variant, waterlogged) alongside the block type.
+
+**Decision:** `Chunk` currently stores only `BlockId` per cell, no
+packed state bits. No block in the registry yet needs state (there are
+no blocks registered at all outside unit tests) - adding a state-packing
+scheme now would be speculative. When the first stateful block is
+needed (a directional block, a candidate for the Phase 9 example mod),
+extend the per-cell storage then, informed by what that block actually
+needs to encode.
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a

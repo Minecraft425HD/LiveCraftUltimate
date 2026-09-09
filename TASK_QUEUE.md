@@ -28,8 +28,9 @@ verified and how.
 
 ## Phase 2 — Voxel storage + chunk + meshing + rendering
 
-- [ ] engine/voxel: chunk storage (16x16x16 default, configurable), compact block state encoding.
-- [ ] BlockRegistry (engine/modding or engine/voxel — decide and record in DECISIONS.md when reached).
+- [x] engine/voxel: chunk storage. `ChunkStorage<EdgeLength>` template (default 16x16x16 via `Chunk = ChunkStorage<16>`), flat contiguous `BlockId` (u16) array, no per-block C++ instance. Alternative chunk sizes proven via a unit test with `ChunkStorage<8>`. Block *state* (rotation/orientation/powered/etc., brief section 17) is not encoded yet — `BlockId` alone for now; state packing is added once a block that needs it exists (e.g. a directional block in the example mod, Phase 9), not speculatively.
+- [x] engine/voxel: `world_to_chunk_and_local()` — correct floor-division coordinate splitting (`ChunkCoord` + `LocalBlockCoord`), the ARCHITECTURE.md "Coordinate spaces" piece needed before world storage/streaming can be built.
+- [x] BlockRegistry (landed in `engine/voxel` — recorded in DECISIONS.md; revisit only if `engine/modding`'s registry needs pull it elsewhere later). Namespaced ids (`game:stone`), air always id 0, datadriven `BlockDefinition` (hardness/transparency/collision/light_emission). Block *tags* and full mod-facing registration API are Phase 9 work.
 - [ ] Greedy meshing, opaque/transparent/water layers, hidden-face removal.
 - [ ] Job system (engine/jobs) — chunk generation/meshing off the main thread. Needed before meshing can be "done" per the brief (section 18).
 - [ ] Wire meshes into engine/rendering -> bgfx.
@@ -97,12 +98,18 @@ debug overlay. Mouse-look (camera control) is intentionally not built yet
 control, so a mouse-delta API would have no consumer yet (brief section
 98, no overengineering ahead of need).
 
-Next task to pick up: **Phase 2 — engine/voxel**. Start with chunk
-storage (16x16x16 default, compact block state encoding, no per-block
-C++ instance per brief section 15-16), unit test indexing math
-thoroughly (this is exactly the kind of pure-logic code this sandbox CAN
-fully verify without a GPU). BlockRegistry can follow once there's a
-block type to register.
+Phase 2 chunk storage/coordinates/BlockRegistry are done and thoroughly
+unit tested. Next task to pick up: **job system (engine/jobs)** — needed
+before meshing can be considered "done" per brief section 18 (meshing
+must not run on the main thread). Start minimal: a worker-thread pool
+with priority + simple dependency support, unit tested for correctness
+(ordering, all jobs eventually complete, cancellation) — this is,
+again, pure-logic code this sandbox can fully verify. Then greedy
+meshing (opaque/transparent/water layers, hidden-face removal) consuming
+`Chunk` + `BlockRegistry` and producing vertex/index buffers, wired into
+`engine/rendering` for an actual textured-cube-on-screen milestone
+(still only headlessly verifiable here; needs a real display to confirm
+visually).
 
 Also outstanding from Phase 1, lower priority, revisit opportunistically:
 confirm the bgfx build on a machine/CI runner with a real display and
