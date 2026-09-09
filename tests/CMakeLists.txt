@@ -20,10 +20,13 @@ add_executable(VoxelTests
     items/recipe_registry_test.cpp
     ecs/registry_test.cpp
     lighting/propagation_test.cpp
+    game/systems/ai_wander_system_test.cpp
+    game/systems/day_night_cycle_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
     Lcu::EngineCore
+    Lcu::Game
     GTest::gtest_main
 )
 

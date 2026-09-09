@@ -4,11 +4,22 @@
 #include <unordered_map>
 #include <vector>
 
+#include <algorithm>
+#include <cmath>
+#include <random>
+
+#include "game/components/ai_wander.h"
+#include "game/components/position.h"
+#include "game/systems/ai_wander_system.h"
+#include "game/systems/day_night_cycle.h"
 #include "lcu/core/log.h"
 #include "lcu/debug/frame_stats.h"
+#include "lcu/ecs/registry.h"
 #include "lcu/items/inventory.h"
 #include "lcu/items/item_registry.h"
 #include "lcu/jobs/job_system.h"
+#include "lcu/lighting/light_storage.h"
+#include "lcu/lighting/propagation.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
 #include "lcu/platform/input.h"
@@ -81,6 +92,18 @@ constexpr lcu::u64 kVerifyPlaceFrame = 6;
 // nothing reads/writes them - so isn't built speculatively (brief
 // section 98).
 constexpr lcu::usize kInventorySlotCount = 9;
+
+// A handful of wandering AI entities near spawn - a real (if minimal)
+// consumer of engine/ecs and game/systems::update_ai_wander, not just
+// unit tests (brief section 60). Fixed seed for a deterministic,
+// reproducible headless run.
+constexpr int kAiEntityCount = 3;
+constexpr lcu::u32 kAiRngSeed = 20260909;
+
+// Arbitrary (see DayNightCycle's own doc comment) - short enough that a
+// short headless verification run can actually observe the sky light
+// scale change across a handful of frames.
+constexpr lcu::f32 kDayLengthSeconds = 120.0f;
 
 lcu::physics::AABB make_player_aabb(lcu::math::Vec3 feet_position) {
     return lcu::physics::AABB{
@@ -181,6 +204,95 @@ int main() {
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_meshes;
 #endif
 
+    // Per-chunk light data (brief section 24) - CPU-side only, not
+    // rendering-gated like gpu_meshes: nothing samples this into the
+    // shader yet (the chunk shader is flat directional+ambient lit, no
+    // per-vertex/per-voxel light lookup - see DECISIONS.md), but the
+    // data itself is real and kept correct through every block edit
+    // below, ready for a renderer to consume once one exists.
+    std::unordered_map<lcu::voxel::ChunkCoord, lcu::lighting::Light> chunk_light;
+
+    // Full initial light computation for one just-loaded chunk (block
+    // light from any emitters, plus a straight top-down sky light pass -
+    // see compute_sky_light's own doc comment for the single-chunk-scope
+    // simplification this carries).
+    const auto compute_initial_light = [&](lcu::voxel::ChunkCoord coord) {
+        const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
+        if (!chunk) {
+            return;
+        }
+        lcu::lighting::Light& light = chunk_light[coord];
+        lcu::lighting::compute_block_light(*chunk, block_registry, light);
+        lcu::lighting::compute_sky_light(*chunk, block_registry, light);
+    };
+
+    // Incremental local lighting update after a single block at
+    // `local` (within `coord`) changed from `old_id` to `new_id` - the
+    // actual point of propagate_added_block_light/unpropagate_block_light
+    // existing (brief section 24 "local updates, not full recompute"):
+    // this never re-floods the whole chunk, only the region the edit
+    // actually affects.
+    const auto update_lighting_for_edit = [&](lcu::voxel::ChunkCoord coord, lcu::voxel::LocalBlockCoord local,
+                                               lcu::voxel::BlockId old_id, lcu::voxel::BlockId new_id) {
+        const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
+        auto light_it = chunk_light.find(coord);
+        if (!chunk || light_it == chunk_light.end()) {
+            return;
+        }
+        lcu::lighting::Light& light = light_it->second;
+
+        const lcu::u8 old_emission = block_registry.definition_of(old_id).light_emission;
+        const lcu::u8 new_emission = block_registry.definition_of(new_id).light_emission;
+        const bool new_is_opaque = !block_registry.definition_of(new_id).is_transparent;
+
+        if (old_emission > 0) {
+            const lcu::u8 old_level = light.block_light(local.x, local.y, local.z);
+            lcu::lighting::unpropagate_block_light(*chunk, block_registry, light, local.x, local.y, local.z,
+                                                    old_level);
+        }
+
+        if (new_emission > 0) {
+            light.set_block_light(local.x, local.y, local.z, new_emission);
+            lcu::lighting::propagate_added_block_light(*chunk, block_registry, light, local.x, local.y, local.z);
+        } else if (new_is_opaque) {
+            // The new block blocks light - retract whatever was there
+            // before (a no-op if it was already dark).
+            const lcu::u8 stale_level = light.block_light(local.x, local.y, local.z);
+            if (stale_level > 0) {
+                lcu::lighting::unpropagate_block_light(*chunk, block_registry, light, local.x, local.y, local.z,
+                                                        stale_level);
+            }
+        } else {
+            // The cell is now open (air, or another transparent block)
+            // and wasn't a light source itself - let light flow back in
+            // from whichever neighbor is currently brightest, the same
+            // way removing a wall lets a hallway's existing torchlight
+            // spill into the newly opened room.
+            lcu::u8 best_neighbor_level = 0;
+            constexpr lcu::i32 kOffsets[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            for (const auto& offset : kOffsets) {
+                const lcu::i32 nx = static_cast<lcu::i32>(local.x) + offset[0];
+                const lcu::i32 ny = static_cast<lcu::i32>(local.y) + offset[1];
+                const lcu::i32 nz = static_cast<lcu::i32>(local.z) + offset[2];
+                constexpr lcu::i32 kEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
+                if (nx < 0 || ny < 0 || nz < 0 || nx >= kEdge || ny >= kEdge || nz >= kEdge) {
+                    continue;
+                }
+                best_neighbor_level = std::max(
+                    best_neighbor_level,
+                    light.block_light(static_cast<lcu::u32>(nx), static_cast<lcu::u32>(ny), static_cast<lcu::u32>(nz)));
+            }
+            if (best_neighbor_level > 1) {
+                light.set_block_light(local.x, local.y, local.z, static_cast<lcu::u8>(best_neighbor_level - 1));
+                lcu::lighting::propagate_added_block_light(*chunk, block_registry, light, local.x, local.y, local.z);
+            }
+        }
+
+        // Sky light is genuinely local to its own (x,z) column - no
+        // whole-chunk work needed here either.
+        lcu::lighting::compute_sky_light_column(*chunk, block_registry, light, local.x, local.z);
+    };
+
     // Meshes (and, under bgfx, uploads) one loaded chunk's current block
     // data. Called once per chunk at startup, and again for any chunk
     // touched by a block mutation - there is no "dirty chunk" queue yet
@@ -216,11 +328,25 @@ int main() {
             for (lcu::i32 cy = kMinChunkY; cy <= kMaxChunkY; ++cy) {
                 const lcu::voxel::ChunkCoord coord{cx, cy, cz};
                 world.load_chunk(coord);
+                compute_initial_light(coord);
                 remesh_and_upload(coord);
             }
         }
     }
     LCU_LOG_INFO("Loaded {} chunks", world.loaded_chunk_count());
+    {
+        // A concrete, observable confirmation that lighting actually ran
+        // (not just "no crash"): a point well above the terrain surface
+        // (guaranteed open air, regardless of the terrain height's exact
+        // solid/air boundary convention) should read full sky light.
+        const auto open_air_split = lcu::voxel::world_to_chunk_and_local(
+            {0, lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 5, 0}, lcu::voxel::Chunk::kEdgeLength);
+        if (const auto it = chunk_light.find(open_air_split.chunk); it != chunk_light.end()) {
+            LCU_LOG_INFO(
+                "Sky light 5 blocks above spawn column: {}",
+                it->second.sky_light(open_air_split.local.x, open_air_split.local.y, open_air_split.local.z));
+        }
+    }
 
 #if defined(LCU_ENABLE_BGFX)
     // Only present when LCU_BUILD_SHADER_TOOLS compiled shaders into
@@ -237,7 +363,11 @@ int main() {
 #endif
 
     // --- Player: spawns resting on the terrain surface at world (0, *, 0) ---
-    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0);
+    // terrain_height() returns the topmost *solid* block's Y (worldgen.cpp:
+    // world_y <= height is solid) - the first open-air cell to stand in is
+    // one above that, not terrain_height() itself (an off-by-one that would
+    // otherwise spawn the player embedded in the top layer of solid ground).
+    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
     lcu::physics::PlayerPhysicsState player;
     player.aabb = make_player_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
     lcu::physics::PlayerPhysicsConfig physics_config;
@@ -249,6 +379,30 @@ int main() {
     // slice exercises has a guaranteed target (the ground right below
     // spawn) without needing any look input first - see DECISIONS.md.
     camera.pitch = -1.4f;
+
+    // A handful of wandering AI entities (brief section 60) - a real
+    // engine/ecs + game/systems consumer, not just a unit test. Spawned
+    // in a ring around the player's spawn column so they start on solid
+    // ground (the same terrain height sampled for the player).
+    lcu::ecs::Registry entity_registry;
+    std::mt19937 ai_rng(kAiRngSeed);
+    for (int i = 0; i < kAiEntityCount; ++i) {
+        const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
+        const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
+                                         4.0f * std::sin(angle)};
+        const lcu::ecs::EntityId entity = entity_registry.create_entity();
+        entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
+        entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+    }
+    game::systems::AIWanderConfig ai_wander_config;
+    LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());
+
+    // Day/night cycle (brief section 60) - a real, ticking, tested
+    // system. Nothing renders it yet (no sky/lighting shader input - see
+    // DECISIONS.md), so its output is only observed via log lines below,
+    // same honesty as every other "logic verified, visuals not" system
+    // in this sandbox.
+    game::systems::DayNightCycle day_night_cycle(kDayLengthSeconds);
 
     lcu::platform::KeyboardInputBackend keyboard;
     lcu::platform::InputState input;
@@ -272,6 +426,9 @@ int main() {
         const auto now = std::chrono::steady_clock::now();
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
+
+        game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
+        day_night_cycle.update(delta_seconds);
 
         if (input.is_down(lcu::platform::Action::LookLeft)) {
             camera.add_yaw_pitch(-kLookSpeed * delta_seconds, 0.0f);
@@ -308,7 +465,9 @@ int main() {
             LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
             const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
             if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
                 target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
+                update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
                 remesh_and_upload(split.chunk);
                 for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
                     remesh_and_upload(neighbor);
@@ -342,7 +501,9 @@ int main() {
                          place_pos.z, player_inventory.count_item(stone_item_id));
             const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
             if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
                 target->set_block(split.local.x, split.local.y, split.local.z, stone_id);
+                update_lighting_for_edit(split.chunk, split.local, old_id, stone_id);
                 remesh_and_upload(split.chunk);
                 for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
                     remesh_and_upload(neighbor);
@@ -391,6 +552,13 @@ int main() {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
     }
 #endif
+
+    LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),
+                 day_night_cycle.sky_light_scale());
+    for (const lcu::ecs::EntityId& entity : entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
+        const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
+        LCU_LOG_INFO("AI entity (index={}) at ({:.2f}, {:.2f}, {:.2f})", entity.index, pos.x, pos.y, pos.z);
+    }
 
     LCU_LOG_INFO("LiveCraftUltimate client shutting down after {} frames", frame);
     return 0;
