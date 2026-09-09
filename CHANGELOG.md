@@ -2,7 +2,52 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12
+
+### Phase 12
+
+- `engine/audio::AudioEngine`: RAII wrapper around one `SDL_AudioStream`
+  (`SDL_OpenAudioDeviceStream`, 44.1kHz stereo float). Only
+  `audio_engine.cpp` includes `<SDL3/SDL_audio.h>`, mirroring
+  `engine/scripting`'s Lua-header confinement. Initializes its own
+  `SDL_INIT_AUDIO` subsystem (reference-counted by SDL, same pattern
+  `engine/platform::Window` uses for `SDL_INIT_VIDEO`). A failed
+  `init()` (no device - most CI, this sandbox without
+  `SDL_AUDIODRIVER=dummy`) is logged and non-fatal; `play()` becomes a
+  silent no-op.
+- `engine/audio::generate_sine_wave`: real, own-created procedural PCM
+  tone content - no WAV/asset-loading pipeline exists yet, and any
+  checked-in audio asset would need to be this project's own work
+  anyway (GPL-3.0/own-IP-only, brief section 12).
+- `engine/audio::{compute_stereo_pan, distance_attenuation}`: pure-math
+  positional audio - pan by lateral angle to the listener, linear
+  distance falloff. No SDL dependency, fully unit tested.
+- `VoxelClient`: breaking/placing a block now plays a real synthesized,
+  positionally-panned/attenuated tone through `AudioEngine`.
+- `engine/ui::draw_debug_overlay`: a real on-screen HUD via bgfx's
+  built-in VGA-style debug-text buffer - `Renderer` gained
+  `draw_debug_text`/`clear_debug_text` (wrapping
+  `bgfx::dbgTextPrintf`/`dbgTextClear`, `BGFX_DEBUG_TEXT` enabled in
+  `Renderer::init`), keeping bgfx access confined to
+  `engine/rendering` per ARCHITECTURE.md. Draws live FPS and a legend
+  for every mobile touch-control button, at the exact positions
+  `TouchInputBackend` hit-tests against.
+- Promoted the touch-control button layout out of `touch_input.cpp`'s
+  private `constexpr` array into `lcu::platform::kTouchButtonLayout`
+  (`touch_control_layout.h`), a shared source of truth both hit-testing
+  and on-screen drawing read from - closes the Phase 10 "a player would
+  currently be dragging/tapping blind" limitation and the long-standing
+  "debug overlay is a log line, not on-screen" limitation, both for
+  real.
+- Verified via real runs: `AudioEngine initialized: 44100 Hz, stereo
+  float` under `SDL_AUDIODRIVER=dummy` with the break/place round trip
+  completing with no crash; a full bgfx (`Noop` backend) `VoxelClient`
+  run from startup to shutdown with `draw_debug_overlay` executing
+  every frame, no assert/crash.
+- `ctest` 308/308 passing (bgfx build) / 305/305 (non-bgfx build), up
+  from 291/291 / 288/288 - 15 new tests (`GenerateSineWave`,
+  `ComputeStereoPan`, `DistanceAttenuation`).
+- This closes the entire 12-phase queue from the project brief.
 
 ### Phase 11
 

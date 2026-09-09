@@ -98,8 +98,10 @@ verified and how.
 
 ## Phase 12 — UI + audio + content + polish
 
-- [ ] SDL3 audio backend, positional audio.
-- [ ] UI system usable from desktop/gamepad/touch.
+- [x] SDL3 audio backend: `engine/audio::AudioEngine` (RAII wrapper around one `SDL_AudioStream` opened via `SDL_OpenAudioDeviceStream`, 44.1kHz stereo float) - only `audio_engine.cpp` includes `<SDL3/SDL_audio.h>`, mirroring `engine/scripting`'s Lua-header confinement. `engine/audio::generate_sine_wave` synthesizes real, own-created PCM tone content (no WAV asset pipeline, and any checked-in asset would need to be this project's own IP anyway - brief section 12) - no placeholder silence.
+- [x] Positional audio: `engine/audio::{compute_stereo_pan, distance_attenuation}` - pure math (no SDL dependency, fully unit tested), a real first-pass stereo pan + linear distance falloff, not full HRTF/3D audio (see DECISIONS.md for why that's the right amount of complexity right now). 15 new unit tests across `waveform`/`positional`.
+- [x] Wired into `VoxelClient`: breaking/placing a block now plays a real synthesized tone, panned/attenuated by the block's position relative to the camera - verified via a real run (`AudioEngine initialized: 44100 Hz, stereo float` under `SDL_AUDIODRIVER=dummy`, no crash through the break/place round trip). `AudioEngine::init()` failing (no device - most CI/this sandbox without the dummy driver) is non-fatal, logged, and silently skips playback.
+- [x] UI system usable from desktop/gamepad/touch: `engine/ui::draw_debug_overlay` - a real on-screen HUD via bgfx's built-in debug-text character buffer (`Renderer::draw_debug_text`/`clear_debug_text`, new methods keeping bgfx access confined to `engine/rendering` per ARCHITECTURE.md), showing live FPS and a legend for every mobile touch-control button. The button labels are drawn at the exact same normalized rects `TouchInputBackend` hit-tests against (`lcu::platform::kTouchButtonLayout`, promoted out of `touch_input.cpp` into a shared header specifically so hit-testing and drawing can never drift apart) - this closes the Phase 10 "a player would currently be dragging/tapping blind" limitation for the touch overlay, and the pre-existing "debug overlay is a log line, not on-screen" limitation, both for real. Verified via a real bgfx (`Noop` backend) run: full startup-to-shutdown with no crash/assert through `draw_debug_overlay` every frame.
 
 ---
 
@@ -238,10 +240,22 @@ about having real measurements to point at, not guessing at
 optimizations nothing has shown are needed (brief section 98 "no
 overengineering ahead of need" applies to premature optimization too).
 
-Next task to pick up: **Phase 12 — UI + audio + content + polish.**
-SDL3 audio backend + positional audio, and a UI system usable from
-desktop/gamepad/touch (the last of which now has a real `Action`
-source to draw controls for, per Phase 10's `TouchInputBackend`).
+Phase 12 is now functionally complete for what this sandbox can verify:
+`engine/audio::{AudioEngine, generate_sine_wave, compute_stereo_pan,
+distance_attenuation}` and `engine/ui::draw_debug_overlay` are all
+implemented and tested, and wired into a real `VoxelClient` - breaking/
+placing a block plays a real positionally-panned synthesized tone, and
+every frame draws a real on-screen FPS counter plus touch-control
+legend via bgfx's debug-text buffer. Verified via real runs (not just
+unit tests): `AudioEngine initialized: 44100 Hz, stereo float` under
+`SDL_AUDIODRIVER=dummy`, and a full bgfx (`Noop` backend) startup-to-
+shutdown run with `draw_debug_overlay` executing every frame with no
+crash/assert. 15 new unit tests (`GenerateSineWave`, `ComputeStereoPan`,
+`DistanceAttenuation`). This closes out the entire 12-phase queue this
+session started with - see PROJECT_STATE.md "Current Phase" for the
+overall status and what's genuinely still open (mobile/Windows/macOS
+builds untested from this Linux sandbox, no real GPU/display
+verification, several deliberately-deferred systems listed below).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
@@ -255,7 +269,10 @@ authentication; chunk data and block edits aren't replicated over the
 network yet; `EventBus` has only one real event (`block_broken`);
 `ModLoader` has no manifest/dependency/version format; mod-registered
 ids aren't synced over the network (both hosts must load the same mods
-independently and agree by construction) - see
+independently and agree by construction); positional audio is pan +
+linear falloff, not full HRTF/3D audio; the debug overlay is VGA-style
+character text, not a real font/texture-atlas UI (no atlas exists yet -
+brief section 12's content pipeline) - see
 NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
 
 **Not done, and out of scope for this sandbox regardless of what's

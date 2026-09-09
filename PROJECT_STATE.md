@@ -10,18 +10,22 @@ commands).
 
 ## Current Phase
 
-Phase 0 through 10 complete/functionally complete for what this
-headless sandbox can verify. Phase 11 (optimization + profiling) is
-also functionally complete: `tools/benchmark`'s `VoxelBenchmarks` (real
-Google Benchmark micro-benchmarks against actual engine code) exists,
-builds, and was run for real numbers in both a Development and a
-Release configuration.
+All 12 phases from the original queue are complete/functionally
+complete for what this headless sandbox can verify. Phase 12 (UI +
+audio + content + polish), the last one, added `engine/audio`
+(SDL3-backed `AudioEngine`, procedural tone synthesis, positional
+pan/attenuation) and `engine/ui` (a real on-screen bgfx debug-text HUD:
+live FPS + the mobile touch-control legend), both wired into
+`VoxelClient` and verified via real runs.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 12 — UI + audio +
-content + polish.** SDL3 audio backend + positional audio, and a UI
-system usable from desktop/gamepad/touch.
+None in flight. The 12-phase queue this session started with is done.
+See "Known Limitations" below and `TASK_QUEUE.md`'s per-phase notes for
+everything genuinely still open (mobile/Windows/macOS builds untested
+here, no real GPU/display verification, several deliberately-deferred
+systems) - none of it blocks calling the queue complete, all of it is
+honestly documented rather than silently skipped.
 
 ## Last Completed Task
 
@@ -110,6 +114,47 @@ abstraction).
 `VoxelBenchmarks` is a separate opt-in executable; `ctest` counts are
 unchanged by this phase, still 291/291 / 288/288).
 
+Phase 12 (the last phase in the original queue): `engine/audio` -
+`AudioEngine` (RAII wrapper around one `SDL_AudioStream` from
+`SDL_OpenAudioDeviceStream`, 44.1kHz stereo float; only `audio_engine.cpp`
+includes `<SDL3/SDL_audio.h>`, mirroring `engine/scripting`'s Lua-header
+confinement), `generate_sine_wave` (real, own-created procedural PCM tone
+content - no WAV pipeline exists and any checked-in asset would need to
+be this project's own IP anyway, brief section 12), and
+`compute_stereo_pan`/`distance_attenuation` (pure-math positional audio:
+pan by lateral angle to the listener, linear distance falloff - a real
+first pass, not full HRTF/3D audio). Wired into `VoxelClient`: breaking/
+placing a block now plays a real synthesized, positionally-panned tone.
+`AudioEngine::init()` failing (no device - most CI, this sandbox without
+`SDL_AUDIODRIVER=dummy`) is logged and non-fatal; `play()` becomes a
+silent no-op.
+
+`engine/ui::draw_debug_overlay` - a real on-screen HUD using bgfx's
+built-in VGA-style debug-text buffer (`Renderer` gained
+`draw_debug_text`/`clear_debug_text` wrapping `bgfx::dbgTextPrintf`/
+`dbgTextClear`, keeping bgfx access confined to `engine/rendering` per
+ARCHITECTURE.md), showing live FPS and a legend for every mobile
+touch-control button - drawn at the exact same normalized rects
+`TouchInputBackend` hit-tests against. Promoted the touch button layout
+out of `touch_input.cpp`'s private `constexpr` array into a shared
+`lcu::platform::kTouchButtonLayout` (`touch_control_layout.h`)
+specifically so hit-testing and on-screen drawing read from one
+definition and can never drift apart - a real, motivated refactor, not
+speculative. This closes two `PROJECT_STATE.md` Known Limitations for
+real: Phase 10's "a player would currently be dragging/tapping blind"
+(the touch overlay now has an actual visual) and the long-standing
+"Debug overlay is a log line, not an on-screen overlay."
+
+Verified via real runs, not just unit tests: `AudioEngine initialized:
+44100 Hz, stereo float` under `SDL_AUDIODRIVER=dummy`, with the
+break/place round trip completing with no crash; a full bgfx (`Noop`
+backend) `VoxelClient` run from startup to `LCU_MAX_FRAMES` shutdown
+with `draw_debug_overlay` executing every frame, no assert/crash.
+
+15 new unit tests (`GenerateSineWave`, `ComputeStereoPan`,
+`DistanceAttenuation` - all pure logic, no real audio device needed).
+`ctest` 308/308 passing (bgfx build) / 305/305 (non-bgfx build).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -122,11 +167,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 291/291 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 308/308 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 288/288 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 305/305 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -137,7 +182,8 @@ Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
 AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
 UdpSocket, Address, LoopbackIntegration, PositionInterpolator,
 PredictionBuffer, ReplicationProtocol, LuaState, EventBus,
-RegistryBindings, ModLoader. JobSystem
+RegistryBindings, ModLoader, GenerateSineWave, ComputeStereoPan,
+DistanceAttenuation. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
@@ -373,15 +419,49 @@ None currently tracked.
   across chunk fill ratios/entity counts/world sizes — broader coverage
   is added if a specific scenario ever needs profiling, not
   speculatively now.
+- Positional audio is pan (lateral angle to the listener) + linear
+  distance falloff, not full HRTF/3D audio, occlusion, or reverb — a
+  real, working first pass; more elaborate audio DSP is deferred until
+  actual game content (multiple simultaneous sound sources, indoor/
+  outdoor acoustics) gives a reason to tune it, not guessed at now.
+- `AudioEngine` plays one-shot tones only — no looping/streaming
+  playback, no per-sound volume/priority mixing beyond the stereo gain
+  `play()` already takes, no music/ambience layer. Only two sounds
+  exist anywhere (`break_sound`/`place_sound` in `VoxelClient`), both
+  procedurally generated sine tones — no real sound-effect content
+  pipeline (loading/authoring actual game audio) exists yet.
+- `engine/ui::draw_debug_overlay` uses bgfx's built-in VGA-style
+  debug-text character buffer, not a real font/texture-atlas text
+  renderer — no texture atlas exists yet (brief section 12's content
+  pipeline is separate, larger work with no player-facing text to
+  justify it before this). Text is monospace ASCII only, fixed 8x16 (or
+  8x8) character cells, no styling beyond the VGA 16-color palette.
+- The on-screen touch-control legend has no interactive elements of its
+  own (no buttons a mouse/gamepad can click) — it draws where
+  `TouchInputBackend`'s real touch-button rects are, for a player to
+  see, but a desktop/gamepad player can't interact with it as a menu;
+  `engine/ui` is presentation-only so far, not an input-routing/focus
+  system for non-touch input devices.
+- No content pipeline exists for models/textures/sounds beyond what's
+  procedurally generated in code (worldgen's terrain, the greedy
+  mesher's geometry, `generate_sine_wave`'s tones) — "content" in brief
+  section 96's Phase 12 sense (imported/authored game assets) is still
+  entirely absent; every visual/audio element in this project today is
+  generated, not loaded.
 
 ## Next Task
 
-1. Phase 12: UI + audio + content + polish. SDL3 audio backend +
-   positional audio; a UI system usable from desktop/gamepad/touch (the
-   last of which now has a real input source via Phase 10's
-   `TouchInputBackend`).
-2. Update state docs and commit after each step, same as every prior
-   one.
+None queued from the original brief - all 12 phases (0 through 12) are
+functionally complete for what this headless sandbox can verify. Real,
+concrete follow-on work that exists but wasn't part of this queue:
+visual/audio verification on a machine with a real display and
+speakers (nothing in this sandbox can confirm what any of it actually
+looks/sounds like); building and testing the Windows/macOS/Android/iOS
+presets on their native toolchains; and any of the many items listed
+under "Known Limitations" above, each already scoped and reasoned
+about, waiting on an actual need before being built further. Update
+state docs and commit for any of the above, same discipline as every
+phase before it.
 
 ## Current Architecture
 

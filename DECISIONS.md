@@ -919,3 +919,91 @@ iteration/debuggability, not speed), so Google Benchmark's own "Library
 was built as DEBUG" warning on that run is correct and expected, not a
 bug - the `Release` numbers are the ones worth comparing future changes
 against, and both are recorded in `BUILD_STATUS.md` for that reason.
+
+## 2026-09-09 — Procedurally generated audio content instead of a WAV pipeline
+
+**Context:** Phase 12 needs `engine/audio` to actually play something, not
+just prove an `SDL_AudioStream` can be opened. This project has no
+audio-asset loading pipeline (no WAV/OGG decoder, no asset directory
+convention for sounds), and brief section 12 requires GPL-3.0/own-IP
+content only - no Minecraft or other third-party assets, checked in or
+otherwise.
+
+**Decision:** `engine/audio::generate_sine_wave` synthesizes a pure tone
+in code at runtime instead. This is real, immediately playable audio
+content - not a placeholder silence buffer standing in for a future
+asset - and it is trivially this project's own work, sidestepping both
+gaps at once (no decoder needed, no licensing question to resolve).
+`VoxelClient` uses two fixed tones (220Hz/330Hz for break/place) as a
+real, working demonstration, mirroring how `example_mod` (Phase 9) is a
+real working mod rather than loader infrastructure with nothing loaded
+into it. A real sound-effect content pipeline (loading authored audio
+files) is a separate, larger piece of work, deferred until actual game
+content creates a reason for it - seen the same way as the texture
+atlas gap noted throughout Phase 2-6's decisions.
+
+## 2026-09-09 — Positional audio is pan + linear falloff, not HRTF/3D audio
+
+**Context:** "Positional audio" (brief section 96, Phase 12) covers a
+huge range of real techniques, from a simple stereo pan up through full
+head-related-transfer-function binaural rendering, reverb zones, and
+occlusion. This project has exactly two sound-emitting moments (a block
+break, a block place) and no simultaneous multi-source mixing scenario
+yet to design against.
+
+**Decision:** `compute_stereo_pan` (lateral angle to the listener's
+right vector, mapped to a left/right gain pair) and
+`distance_attenuation` (linear falloff to silence at a fixed max
+distance) - both plain, hand-verifiable math, fully unit tested with
+exact expected gains at cardinal angles (directly ahead, fully left/
+right, 45 degrees) rather than approximate/fuzzy assertions. This is a
+real, working positional cue (a sound left of the player is audibly
+quieter in the right ear) without inventing HRTF filters, reverb
+convolution, or an audio-occlusion raycast against the voxel world -
+none of which has a concrete use case yet (no multiple simultaneous
+sources, no indoor/outdoor acoustic distinction in any existing
+content). Revisit once real gameplay content needs more than "which
+direction and how far."
+
+## 2026-09-09 — Touch button layout promoted to a shared header for engine/ui
+
+**Context:** Phase 10's `TouchInputBackend` defined its six on-screen
+button hit-regions (`Jump`/`Interact`/`PlaceBlock`/`Sprint`/`Crouch`/
+`Inventory`) as a private `constexpr` array inside `touch_input.cpp`.
+Phase 12 needs to actually draw those buttons on screen (closing the
+"a player would currently be dragging/tapping blind" limitation
+recorded when `TouchInputBackend` was built) - which needs the same
+rects and labels `TouchInputBackend` hit-tests against.
+
+**Decision:** Promoted the array to `lcu::platform::kTouchButtonLayout`
+in a new public header, `touch_control_layout.h`, alongside
+`touch_input.h` in `engine/platform`. `TouchInputBackend::update()` and
+`engine/ui::draw_debug_overlay` both read from this single definition -
+there is no way for a button's hit-test rect and its drawn position to
+independently drift apart, since there is only one rect. This mirrors
+the project's established "one authoritative definition" pattern for
+anything two independently-evolving pieces of code both need to agree
+on exactly (e.g. `game::systems::protocol`'s shared wire messages,
+Phase 8 - see that phase's `DECISIONS.md`/`CHANGELOG.md` entries for the
+same reasoning applied to client/server message encoding).
+
+## 2026-09-09 — engine/ui draws through Renderer, never bgfx directly
+
+**Context:** ARCHITECTURE.md restricts bgfx-header inclusion to
+`engine/rendering` (mirrored by `engine/scripting`'s Lua-header rule and
+`engine/audio`'s SDL-audio-header rule, both established earlier).
+`engine/ui::draw_debug_overlay` needs to put text on screen, and bgfx's
+own debug-text API (`bgfx::dbgTextPrintf`/`dbgTextClear`) is the
+mechanism available without building a font/texture-atlas renderer from
+scratch (no atlas exists yet - see the "procedurally generated audio
+content" decision above for the same reasoning applied to sound).
+
+**Decision:** Added `Renderer::draw_debug_text`/`clear_debug_text` -
+thin wrappers, not a new abstraction layer - and `engine/ui` calls
+those instead of touching `<bgfx/bgfx.h>` itself. `draw_debug_text`
+takes the text as `const std::string&` and passes it to
+`bgfx::dbgTextPrintf` via a fixed `"%s"` format string, not the caller's
+string as the format argument directly - text can come from data this
+codebase doesn't fully control (e.g. a future mod-registered label), and
+printf-family functions treat their format argument as executable-ish
+(a stray `%s`/`%n` embedded in it would misbehave or crash).
