@@ -38,11 +38,11 @@ verified and how.
 
 ## Phase 3 — World generation + streaming + save
 
-- [ ] Deterministic worldgen pipeline (seed -> continental -> terrain -> climate -> biome -> caves -> ores -> structures -> vegetation -> decoration). Start with continental+terrain only, extend.
-- [ ] Chunk lifecycle state machine (engine/world) matching ARCHITECTURE.md.
-- [ ] World streaming by player position/view direction/distance priority.
-- [ ] Save/load: engine/serialization, versioned format, corruption detection (no silent overwrite).
-- [ ] Add a compression library dependency (decision recorded in DECISIONS.md when this task starts).
+- [x] Deterministic worldgen pipeline: continental+terrain stages only (`engine/world::worldgen::terrain_height`, seeded 4-octave value noise; same seed+coord always same height, different seeds differ, adjacent columns smooth not random - all three properties unit tested). Climate/biome/caves/ores/structures/vegetation/decoration deferred - no biome/structure types registered anywhere to drive them yet (see DECISIONS.md).
+- [x] Chunk lifecycle state machine (`engine/world::World`, `ChunkLifecycleState`) matching ARCHITECTURE.md: Unloaded -> Requested -> Generating -> Generated driven directly; Lighting/Meshing/GpuUpload/Ready/Visible states declared but not yet driven by World itself (Lighting is Phase 6; meshing/GPU upload already exist in `engine/voxel`/`engine/rendering` but aren't wired through World's state machine yet - that's client-side bookkeeping once more than one chunk streams).
+- [x] World streaming by distance (`World::update_streaming`, Chebyshev radius with load/unload hysteresis). **Not yet** by view direction/movement direction/player position specifically - no camera/player exists yet to supply those signals (Phase 4); known simplification recorded in DECISIONS.md (streams a 3D cube, not a horizontal disc).
+- [x] Save/load: `engine/serialization::chunk_serializer`, versioned format (`kChunkFormatVersion`), corruption detection via zstd's content checksum, version-mismatch detection - all with dedicated tests, not just a happy-path round-trip. No silent overwrite: a failed load leaves the caller's chunk untouched (tested).
+- [x] Compression library: zstd (decision + rationale in DECISIONS.md, dependency table in third_party/README.md).
 
 ## Phase 4 — Player + physics + interaction
 
@@ -117,25 +117,29 @@ Dawn-Tint, ~700 extra build steps, see DECISIONS.md), compiles
 program valid=true"` followed by 3 clean frames with the draw call
 actually submitted, under bgfx's `Noop` backend (no GPU/display here).
 
-Next task to pick up: **Phase 2 is functionally complete for what this
-sandbox can verify.** The vertical slice (brief section 80) needs a
-player/camera to look through and a raycast/break/place loop next -
-that's Phase 4 territory, but doing it well wants at least a minimal
-Phase 3 (a world holding more than one hardcoded chunk, even if world
-*generation* proper waits) so there's something for a camera to move
-around in. Reasonable next steps, pick one and record the choice:
-(a) Phase 3 world: a `World` owning a sparse map of `ChunkCoord ->
-Chunk`, chunk lifecycle state machine (ARCHITECTURE.md), load/unload by
-distance from a point - all pure logic, thoroughly testable here; or
-(b) Phase 4 physics/camera: AABB collision, voxel DDA raycaster, a
-first-person camera - also pure logic, testable without a display. Both
-are legitimate next moves; world streaming is probably the more
-foundational one since physics/raycast need something to raycast
-*against* beyond one hardcoded chunk.
+Phase 2 and Phase 3 are both functionally complete for what this
+sandbox can verify: chunk storage, meshing, GPU upload, real draw
+calls, multi-chunk `World` with streaming, deterministic terrain
+generation, and versioned/corruption-checked save/load are all done
+and tested (see the phase sections above for specifics).
 
-**Not done, and out of scope for this sandbox regardless of order
-chosen**: confirming what any of this actually looks like on a real
-GPU/display, since none exists here.
+Next task to pick up: **Phase 4 — Player + physics + interaction.**
+(a) AABB + voxel collision (a moving AABB against `World`'s block
+data), gravity, jump/crouch/swim/step - pure logic, thoroughly
+testable. (b) Voxel DDA raycaster against `World` (brief section 25) -
+also pure logic. (c) First-person camera + block break/place, wiring
+the raycaster's hit result into `World::chunk_at_mutable()` to actually
+remove/place a block. This is the last piece of brief section 80's
+vertical slice before save/load closes the loop (already done). Order:
+raycaster and collision first (both independently testable against a
+hand-built `World`), camera/input wiring last (ties into the existing
+`InputState`/`Action` abstraction from Phase 1).
+
+**Not done, and out of scope for this sandbox regardless of what's
+built next**: confirming what any of this actually looks like on a real
+GPU/display, since none exists here. Every claim about rendering,
+camera behavior, etc. is about the logic/API being correct, not about
+visual appearance.
 
 Also outstanding from Phase 1, lower priority, revisit opportunistically:
 confirm the bgfx build on a machine/CI runner with a real display and

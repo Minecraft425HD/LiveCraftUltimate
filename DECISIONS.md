@@ -276,6 +276,60 @@ build time with confusing HLSL-parser errors about unknown variables,
 not a "file not found" error. Always pass it as an absolute path (e.g.
 via `CMAKE_CURRENT_SOURCE_DIR`).
 
+## 2026-09-09 — Chunk save compression: zstd
+
+**Context:** Brief sections 6/44 want "a suitable compression library"
+for the save system. Candidates: zlib/miniz (ubiquitous, weaker
+ratio/speed), LZ4 (very fast, weaker ratio), zstd (strong ratio *and*
+speed, has a built-in per-frame content checksum - directly useful for
+corruption detection, brief section 87).
+
+**Decision:** zstd. The built-in checksum (`ZSTD_c_checksumFlag`) is
+what actually detects corrupted chunk files in
+`load_chunk_from_file` - not a bespoke CRC we'd have had to write and
+verify ourselves. BSD-3-Clause licensed (Facebook dual-licenses it
+BSD/GPLv2; using the BSD terms), actively maintained, and its CMake
+lives at `build/cmake` in the repo (not the root), so
+`FetchContent_Declare` needs `SOURCE_SUBDIR build/cmake` - recorded here
+since it's an easy thing to omit and get a confusing "no CMakeLists.txt"
+error instead. Static-lib-only build (`ZSTD_BUILD_PROGRAMS`/`_TESTS`/
+`_SHARED` all off) - nothing here needs the zstd CLI or its own test
+suite. The CMake target it exposes is `libzstd_static` (not `zstd::libzstd`
+or similar - verified by building it, not assumed).
+
+## 2026-09-09 — World streams a 3D cube, not yet a horizontal disc
+
+**Context:** Real voxel games typically stream a horizontal disc/square
+around the player plus a bounded vertical range (you don't need chunks
+far above/below you even at long render distance), not a full 3D sphere/
+cube by Euclidean/Chebyshev distance.
+
+**Decision:** `World::update_streaming` streams a full 3D cube by
+Chebyshev distance for now - simpler, and correct as far as it goes
+(brief section 22's actual requirement, "never load the whole world",
+is satisfied either way). There is no camera/player yet to supply a
+meaningful "horizontal" plane or view direction to weight against
+(brief section 22's priority list: player position, view direction,
+movement direction, visibility, distance - only the last is implemented
+today). Revisit once Phase 4 gives `World` a real caller with an actual
+camera/movement vector to stream against; building the disc-shaped
+version now would be guessing at parameters (world height bounds, disc
+vs. cube) with nothing to validate them against.
+
+## 2026-09-09 — Worldgen: own value-noise implementation, no library
+
+**Decision:** `engine/world::worldgen::terrain_height` implements a
+small seeded hash + 4-octave value noise directly rather than adding a
+noise library (e.g. FastNoise2, libnoise). The brief's dependency list
+doesn't include one, and a deterministic, testable noise function is a
+small, well-scoped, self-contained problem - same reasoning as `engine/math`
+not depending on GLM (see the "own minimal math library" entry above).
+Only continental+terrain (brief section 21's first two pipeline stages)
+are implemented; climate/biome/caves/ores/structures/vegetation/
+decoration are later stages with no consumer yet (no biomes or
+structure types registered anywhere), so building them now would be
+speculative rather than driven by an actual need.
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a

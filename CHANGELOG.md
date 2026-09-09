@@ -2,7 +2,27 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3
+
+### Phase 3
+
+- `engine/world::World`: sparse chunk table keyed by `ChunkCoord`,
+  lifecycle state machine (Unloaded -> Requested -> Generating ->
+  Generated, matching ARCHITECTURE.md), distance-based streaming with
+  load/unload radius hysteresis.
+- `engine/world::worldgen`: deterministic seeded value-noise terrain
+  height (continental+terrain pipeline stage only). Same seed+coord
+  always produces the same height; different seeds differ; adjacent
+  columns change smoothly.
+- `engine/serialization::chunk_serializer`: versioned, zstd-compressed
+  chunk save/load with corruption detection (zstd content checksum) and
+  version-mismatch detection - new dependency, zstd v1.5.7 (see
+  DECISIONS.md/third_party/README.md).
+- `std::hash<ChunkCoord>` added so it can key `World`'s chunk table.
+- 27 new unit tests across `World`/`worldgen`/`chunk_serializer`,
+  including exhaustive round-trip and corruption-detection coverage for
+  save/load. `VoxelTests` now at 88/88 passing (bgfx build) / 85/85
+  (non-bgfx build).
 
 ### Phase 0
 
