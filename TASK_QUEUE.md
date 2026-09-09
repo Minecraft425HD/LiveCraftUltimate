@@ -32,7 +32,7 @@ verified and how.
 - [x] engine/voxel: `world_to_chunk_and_local()` — correct floor-division coordinate splitting (`ChunkCoord` + `LocalBlockCoord`), the ARCHITECTURE.md "Coordinate spaces" piece needed before world storage/streaming can be built.
 - [x] BlockRegistry (landed in `engine/voxel` — recorded in DECISIONS.md; revisit only if `engine/modding`'s registry needs pull it elsewhere later). Namespaced ids (`game:stone`), air always id 0, datadriven `BlockDefinition` (hardness/transparency/collision/light_emission). Block *tags* and full mod-facing registration API are Phase 9 work.
 - [ ] Greedy meshing, opaque/transparent/water layers, hidden-face removal.
-- [ ] Job system (engine/jobs) — chunk generation/meshing off the main thread. Needed before meshing can be "done" per the brief (section 18).
+- [x] Job system (engine/jobs) — `JobSystem`: worker pool, priority scheduling, dependency graphs with cascading cancellation, cancellation of not-yet-started jobs. Correctness-first (one mutex+condvar), not yet lock-free/work-stealing — revisit only if Phase 11 profiling shows it matters (see DECISIONS.md). 12 unit tests covering ordering/dependencies/cancellation/priority, plus 200 repeated runs and 50 runs under ThreadSanitizer with zero failures/races. Nothing submits real jobs to it yet (meshing, chunk gen, etc. don't exist) — it's exercised only by its own tests so far.
 - [ ] Wire meshes into engine/rendering -> bgfx.
 
 ## Phase 3 — World generation + streaming + save
@@ -98,18 +98,18 @@ debug overlay. Mouse-look (camera control) is intentionally not built yet
 control, so a mouse-delta API would have no consumer yet (brief section
 98, no overengineering ahead of need).
 
-Phase 2 chunk storage/coordinates/BlockRegistry are done and thoroughly
-unit tested. Next task to pick up: **job system (engine/jobs)** — needed
-before meshing can be considered "done" per brief section 18 (meshing
-must not run on the main thread). Start minimal: a worker-thread pool
-with priority + simple dependency support, unit tested for correctness
-(ordering, all jobs eventually complete, cancellation) — this is,
-again, pure-logic code this sandbox can fully verify. Then greedy
-meshing (opaque/transparent/water layers, hidden-face removal) consuming
-`Chunk` + `BlockRegistry` and producing vertex/index buffers, wired into
-`engine/rendering` for an actual textured-cube-on-screen milestone
-(still only headlessly verifiable here; needs a real display to confirm
-visually).
+Phase 2 chunk storage/coordinates/BlockRegistry/job system are done and
+thoroughly unit tested (job system additionally stress-tested: 200
+repeated runs + 50 runs under ThreadSanitizer, zero failures/races).
+Next task to pick up: **greedy meshing** (opaque/transparent/water
+layers, hidden-face removal) consuming `Chunk` + `BlockRegistry`,
+dispatched through `engine/jobs::JobSystem` (its first real consumer —
+so far it's only been exercised by its own tests), producing
+vertex/index buffers wired into `engine/rendering` for an actual
+textured-cube-on-screen milestone. Needs at least one real
+`BlockDefinition` registered to mesh against — a trivial "game:stone"
+placeholder is enough, real content isn't the point yet. Still only
+headlessly verifiable here; needs a real display to confirm visually.
 
 Also outstanding from Phase 1, lower priority, revisit opportunistically:
 confirm the bgfx build on a machine/CI runner with a real display and

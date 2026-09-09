@@ -57,3 +57,9 @@ All notable changes to this project are recorded here, newest first.
   `ChunkCoord.*`, `BlockRegistry.*` - 27 new cases, including an
   exhaustive chunk-volume injectivity sweep and a coordinate-math
   round-trip sweep).
+- `engine/jobs::JobSystem`: worker-thread pool with priority scheduling,
+  dependency graphs (with cascading cancellation), and cancellation of
+  not-yet-started jobs. Required before greedy meshing can run off the
+  main thread. 12 new unit tests; `VoxelTests` now at 51/51 passing.
+  Additionally verified via 200 repeated test-suite runs and 50 runs
+  under ThreadSanitizer, zero failures/data races either way.

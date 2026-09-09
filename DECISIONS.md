@@ -171,6 +171,44 @@ needed (a directional block, a candidate for the Phase 9 example mod),
 extend the per-cell storage then, informed by what that block actually
 needs to encode.
 
+## 2026-09-09 — Job system: single mutex+condvar, correctness first
+
+**Context:** Brief section 19 asks for a job system with priority,
+dependencies, cancellation, worker threads - needed (section 18) before
+chunk meshing can run off the main thread. Job systems are a classic
+place to over-engineer prematurely (lock-free queues, work-stealing
+per-thread deques, etc.).
+
+**Decision:** `engine/jobs::JobSystem` uses one `std::mutex` +
+`std::condition_variable` guarding all scheduling bookkeeping (the
+job/dependency graph, the ready queue). Job *bodies* run unlocked - only
+scheduling decisions are serialized, not the work itself. This is not
+the fastest possible design (a lock-free MPMC queue or per-worker
+work-stealing deques would scale better under heavy contention), but it
+is straightforward to reason about and verify correct, which matters
+more when nothing depends on its throughput yet (brief section 76:
+baseline -> profile -> optimize, in that order; section 98: no
+overengineering). Revisit only once Phase 11 profiling on real workloads
+(chunk generation/meshing at actual world-streaming volumes) shows
+scheduling contention is an actual bottleneck.
+
+**Cancellation semantics:** `cancel()` only prevents jobs that haven't
+started (`Pending`/`Ready`) from running, and cascades to their
+dependents (a job whose dependency is cancelled can never satisfy its
+precondition, so it's cancelled too). It cannot preempt a `Running` job -
+no consumer has needed that yet, and cooperative-preemption support
+(checking a cancellation flag inside long-running job bodies) is easy to
+add later for whichever job type first needs it (likely worldgen/chunk
+generation when a player moves away before generation finishes).
+
+**Verification approach:** unit tests alone are not strong evidence for
+concurrent code (a data race can pass every run and still be UB). Ran
+the job-system test suite 200x in the normal build and 50x under GCC
+ThreadSanitizer (`-fsanitize=thread`, Clang's TSan runtime wasn't
+installed in this sandbox) - zero failures, zero race reports either
+way. See `BUILDING.md` "Testing under ThreadSanitizer" for the exact
+commands; re-run this whenever `engine/jobs` changes.
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a

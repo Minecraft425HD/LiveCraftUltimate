@@ -59,6 +59,28 @@ handle, which makes `engine/rendering::Renderer` fall back to bgfx's
 `Noop` backend automatically (or force it explicitly with
 `LCU_FORCE_HEADLESS_RENDERER=1`).
 
+## Testing under ThreadSanitizer
+
+Concurrent code (currently `engine/jobs::JobSystem`) is additionally
+verified under ThreadSanitizer, since a normal test run can pass while
+still harboring a data race that only manifests under different
+scheduling. Clang's TSan runtime wasn't installed in this sandbox; GCC's
+was and works fine:
+
+```sh
+cmake -S . -B build/tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DLCU_BUILD_CLIENT=OFF -DLCU_BUILD_SERVER=OFF \
+  -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+cmake --build build/tsan -j$(nproc)
+./build/tsan/bin/VoxelTests --gtest_filter="JobSystem.*" --gtest_repeat=50
+```
+
+`build/tsan` is not checked in (covered by `.gitignore` like every other
+`build*` directory) — recreate it with the commands above whenever
+touching `engine/jobs` or other concurrent code.
+
 ## Platform status
 
 See `BUILD_STATUS.md` for the up-to-date, verified-vs-untested matrix.
