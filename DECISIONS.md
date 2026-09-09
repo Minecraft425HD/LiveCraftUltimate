@@ -592,3 +592,69 @@ the log shifted but the round-trip property held) and all existing
 Phase 4/5 tests still pass unchanged - this was a `VoxelClient`
 integration bug, not a defect in `engine/physics`/`engine/world`
 themselves, which is why no engine-level test caught it.
+
+## 2026-09-09 — UDP transport with a hand-rolled channel protocol, not TCP or a third-party library
+
+**Context:** Phase 7 needed `engine/network` to deliver on
+`ARCHITECTURE.md`'s four committed channel semantics
+(`RELIABLE_ORDERED`, `RELIABLE_UNORDERED`, `UNRELIABLE`,
+`UNRELIABLE_SEQUENCED`). Real options: (a) TCP for the reliable case and
+raw UDP for the unreliable case, bolted together as two separate
+transports; (b) a third-party reliable-UDP library (ENet,
+GameNetworkingSockets, yojimbo); (c) a small hand-rolled ack/retransmit
+protocol on top of one UDP socket per peer.
+
+**Decision:** (c). (a) was rejected because TCP's own in-order,
+head-of-line-blocking byte stream can't actually express "unreliable"
+or "reliable but unordered" - layering two unrelated transports per
+peer is also just more moving parts (two sockets, two failure modes)
+for a game that has no reliable-vs-unreliable traffic split motivating
+it yet. (b) was rejected for the same reason this project already
+avoids GLM/a noise library/spdlog where a small, well-scoped
+implementation is tractable and testable on its own: none of those
+libraries are in the brief's dependency list, and the actual algorithm
+(sequence numbers + an ack/retransmit loop + a reorder buffer) is
+well-documented, bounded in scope, and - critically - fully verifiable
+without any external dependency, including under real simulated packet
+loss over real loopback sockets (see
+`tests/network/loopback_integration_test.cpp`). A production MMO-scale
+server might reasonably reach for (b) once profiling or real
+multi-hundred-player traffic demands optimizations (congestion control,
+bandwidth-aware packet coalescing) this hand-rolled version doesn't
+have - see the next entry.
+
+## 2026-09-09 — Reliable channel has no RTT estimation or congestion control yet
+
+**Context:** `Connection`'s reliable channels (`ReliableOrdered`/
+`ReliableUnordered`) retransmit an unacknowledged packet on a fixed
+timer (`kDefaultRetransmitInterval`, 200ms) rather than an RTT-adaptive
+one, and have no congestion control, bandwidth shaping, or maximum
+resend count - a permanently unreachable peer's reliable packets are
+retried forever.
+
+**Decision:** Ship the simple, fixed-interval version now; it is
+provably correct under real (tested) packet loss, which is the actual
+Phase 7 requirement. RTT-adaptive timing and congestion control are
+real optimizations with no real traffic pattern to tune them against
+yet - brief section 76's "revisit only if profiling shows need" applies
+directly here, same reasoning as `JobSystem`'s single mutex+condvar
+design. A max-resend cutoff (eventually treating an unresponsive peer as
+disconnected) is a real gap worth closing before Phase 8 needs to reason
+about connection lifecycle/timeout, not before.
+
+## 2026-09-09 — VoxelServer's connection model has no authentication
+
+**Context:** `VoxelServer` treats the first UDP datagram it ever
+receives from a given `Address` as a new client connecting - there is
+no handshake secret, token, or any other proof of identity involved.
+
+**Decision:** Acceptable for this phase's actual scope (proving real
+client-server messages flow over the transport, in a sandbox with no
+real network exposure) but explicitly not something to carry into any
+real deployment - flagged here and in `PROJECT_STATE.md`/`NETWORKING.md`
+so it isn't mistaken for a finished feature later. A real system needs
+this addressed before Phase 9's mod/server-browser work, if not sooner;
+revisit once player identity (an account/profile system) exists to
+authenticate against at all - there's nothing to check credentials
+against yet, so building an auth handshake now would be securing a door
+with nothing behind it.

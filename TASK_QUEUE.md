@@ -66,8 +66,8 @@ verified and how.
 
 ## Phase 7 — Networking + dedicated server
 
-- [ ] engine/network transport (reliable/unreliable channels).
-- [ ] Server-authoritative state, VoxelServer real simulation loop (replacing the Phase 0 tick-loop placeholder).
+- [x] `engine/network` transport - all four channels ARCHITECTURE.md commits to (`UnreliableUnordered`, `UnreliableSequenced`, `ReliableUnordered`, `ReliableOrdered`) over a hand-rolled ack/retransmit protocol on UDP (`UdpSocket`, `Connection`, `PacketHeader`, `sequence_greater_than`). See `NETWORKING.md` for the wire format. 46 unit tests, including two full loopback integration tests over real sockets (one deliberately drops a real datagram and verifies retransmission recovers it).
+- [x] Server-authoritative state, `VoxelServer` real simulation loop. Replaced the Phase 0 sleep-only placeholder: `VoxelServer` now generates/loads a real `World`, runs the same wandering-AI simulation (`engine/ecs` + `game::systems::update_ai_wander`) as `VoxelClient`, and listens for real UDP connections - a peer is "connected" on its first datagram, gets a real `ReliableOrdered` Welcome (world seed + tick rate), and receives a per-tick `UnreliableSequenced` Heartbeat. Verified via a real two-process test: a standalone Python UDP client connects to a running `VoxelServer` and receives the real handshake + live heartbeats. `ldd` reconfirmed zero SDL/bgfx dependency.
 
 ## Phase 8 — Replication + prediction + interpolation
 
@@ -169,21 +169,33 @@ column: 15", AI entities logging real (deterministic, seeded) positions,
 and "Day/night: time_of_day=0.000 sky_light_scale=0.550" alongside the
 still-passing `LCU_VERIFY_BREAK_PLACE` round-trip.
 
-Next task to pick up: **Phase 7 — Networking + dedicated server.**
-`engine/network` transport (reliable/unreliable channels), and
-`VoxelServer`'s real simulation loop (replacing the Phase 0 tick-loop
-placeholder that just sleeps at 20 TPS). This is the first phase that
-needs a genuinely new kind of decision (transport library or hand-rolled
-protocol, see DECISIONS.md once that's picked) rather than extending an
-existing pattern.
+Phase 7 is now functionally complete for what this sandbox can verify:
+`engine/network` implements all four committed channel semantics over a
+hand-rolled ack/retransmit UDP protocol (see `NETWORKING.md` for the
+wire format), and `VoxelServer` runs a real `World` + AI simulation and
+a real UDP handshake instead of the Phase 0 sleep-only placeholder.
+Verified via 46 new unit/integration tests (including real loopback
+sockets with deliberately simulated packet loss) and a real two-process
+run: a standalone Python UDP client received a genuine Welcome message
+and live Heartbeats from a running `VoxelServer`.
+
+Next task to pick up: **Phase 8 — Replication + prediction +
+interpolation.** Client-side prediction + reconciliation, remote entity
+interpolation, interest management, chunk network streaming +
+compression. This is the phase that finally connects `VoxelClient` to
+`VoxelServer` over the transport Phase 7 built - `VoxelClient` still
+runs entirely single-player/local today, with no network code of its
+own at all.
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
 crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
 a loot-table system; lighting is single-chunk scoped (no cross-chunk
 bleed); `World::update_streaming` still isn't called by `VoxelClient`
-(a static area is loaded once at startup) - see
-DECISIONS.md/PROJECT_STATE.md for each.
+(a static area is loaded once at startup); `engine/network`'s reliable
+channel has no RTT estimation/congestion control, and its server
+connection model has no authentication - see
+NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real

@@ -1,66 +1,60 @@
 # Project State
 
 Read this file first in every new session, then `TASK_QUEUE.md`,
-`ROADMAP.md`, `BUILD_STATUS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, in that
-order, before touching code. The repository is the source of truth, not
-this file's prose if the two disagree — if in doubt, run the build and
-tests and trust what actually happens (see `BUILD_STATUS.md` for the exact
+`ROADMAP.md`, `BUILD_STATUS.md`, `ARCHITECTURE.md`, `DECISIONS.md`, and
+`NETWORKING.md` once networking is relevant, in that order, before
+touching code. The repository is the source of truth, not this file's
+prose if the two disagree — if in doubt, run the build and tests and
+trust what actually happens (see `BUILD_STATUS.md` for the exact
 commands).
 
 ## Current Phase
 
-Phase 0, 1, 2, 3, 4, 5 complete/functionally complete for what this
-headless sandbox can verify. Phase 6 (entities + AI + lighting +
-day/night) is also functionally complete: `engine/ecs`,
-`engine/lighting`, wandering AI, a day/night cycle, and `VoxelClient`
-running all of it together (real per-chunk lighting kept correct
-through every block edit, 3 AI entities, a ticking day/night cycle) are
-all done and tested.
+Phase 0, 1, 2, 3, 4, 5, 6 complete/functionally complete for what this
+headless sandbox can verify. Phase 7 (networking + dedicated server) is
+also functionally complete: `engine/network`'s four-channel transport
+and `VoxelServer`'s real world/AI simulation + network handshake are
+done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 7 — Networking +
-dedicated server.** `engine/network` transport, and `VoxelServer`'s real
-simulation loop (replacing the Phase 0 placeholder that just sleeps at
-20 TPS).
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 8 — Replication +
+prediction + interpolation.** Client-side prediction/reconciliation,
+remote entity interpolation, interest management, chunk network
+streaming/compression - the phase that finally connects `VoxelClient` to
+`VoxelServer` over the Phase 7 transport (`VoxelClient` still has no
+network code of its own today).
 
 ## Last Completed Task
 
-Phase 6: added `engine/ecs::Registry` (generation-checked `EntityId`
-handles - a stale handle from a destroyed entity never aliases whatever
-later reuses its slot; sparse-set `ComponentPool<T>` per component type
-for cache-friendly dense iteration; `create`/`destroy_entity`,
-`add`/`get`/`has`/`remove_component`, `pool_for<T>()`), and
-`engine/lighting::{LightStorage, compute_block_light, compute_sky_light,
-propagate_added_block_light, unpropagate_block_light}` (packed 4-bit
-sky + 4-bit block light per voxel; the last two are true incremental
-local updates for a single block add/remove - the standard two-phase
-BFS removal algorithm - not a full per-edit recompute, satisfying brief
-section 24's "local updates, not full recompute" directly). Single-chunk
-scope for now (no cross-chunk light bleed) - see DECISIONS.md.
+Phase 7: added `engine/network` - a UDP transport (`UdpSocket`,
+cross-platform POSIX/Winsock, non-blocking) with a hand-rolled
+ack/retransmit protocol (`Connection`) implementing all four channel
+semantics `ARCHITECTURE.md` commits to (`UnreliableUnordered`,
+`UnreliableSequenced`, `ReliableUnordered`, `ReliableOrdered`) - see the
+new `NETWORKING.md` for the wire format. `Connection` never touches a
+socket directly (it only produces/consumes raw byte packets), so the
+protocol logic - ordering, deduplication, retransmission timing - is
+fully unit-tested with zero real I/O, on top of real loopback-socket
+integration tests, including one that deliberately drops the first real
+UDP datagram sent and confirms retransmission recovers it.
 
-Added `game::components::{Position, AIWander}` and
-`game::systems::update_ai_wander` (idle-then-walk-to-target loop, new
-target picked on arrival, explicit `std::mt19937` for determinism - no
-hidden global RNG state) and `game::systems::DayNightCycle` (cosine
-sky-light-scale curve: full brightness at noon, a dim nonzero floor at
-midnight). `VoxelClient` now spawns 3 wandering AI entities and a
-`DayNightCycle`, updates both every frame, computes real per-chunk
-block+sky light at load time, and keeps it correct through every
-break/place edit via the incremental primitives instead of re-flooding
-the whole chunk. Also fixed a real off-by-one surfaced while verifying
-this: `terrain_height()` returns the topmost *solid* block's Y, so the
-player (and now AI) previously spawned with feet embedded one block
-into the ground rather than resting on the surface as documented -
-spawn Y is now `terrain_height() + 1`.
+`VoxelServer` was rewritten from the Phase 0 sleep-only placeholder to a
+real simulation loop: generates/loads a real `World`, runs the same
+wandering-AI simulation as `VoxelClient` (`engine/ecs` +
+`game::systems::update_ai_wander`), and listens for real UDP
+connections - a peer is "connected" the moment the server receives any
+datagram from its address, receives a real `ReliableOrdered` Welcome
+message (world seed + tick rate), and gets a per-tick
+`UnreliableSequenced` Heartbeat (tick number + live entity count) from
+then on. Verified via a real two-process test: a standalone Python UDP
+client connects to a running `VoxelServer` and receives a genuine
+Welcome (`world_seed=1337 tick_rate=20`) followed by live heartbeats
+(`tick=8 entity_count=3`) - the server's own log corroborates. `ldd`
+reconfirmed `VoxelServer` still carries zero SDL/bgfx dependency.
 
-38 new unit tests (`Registry`, block/sky light propagation,
-`AIWanderSystem`, `DayNightCycle`). `ctest` 187/187 passing (bgfx
-build) / 184/184 (non-bgfx build). Verified via a real headless run:
-"Sky light 5 blocks above spawn column: 15", real AI entity positions
-logged, "Day/night: time_of_day=0.000 sky_light_scale=0.550", and the
-`LCU_VERIFY_BREAK_PLACE` break-then-place round-trip still holds after
-the spawn-height fix.
+46 new unit/integration tests. `ctest` 221/221 passing (bgfx build) /
+218/218 (non-bgfx build).
 
 ## Build Status
 
@@ -74,27 +68,30 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 187/187 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 221/221 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 184/184 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 218/218 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
 ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
-AIWanderSystem, DayNightCycle. JobSystem
+AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
+UdpSocket, Address, LoopbackIntegration. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
 winding is verified via a geometric cross-product check, not just
-vertex counts. No integration tests yet (no networking exists to
-integration-test; save/load is unit-tested but not yet exercised
-through a full server-save/client-load cycle since there's no
-server-side world-save trigger yet either, and `VoxelClient` doesn't
-call it either - see Known Limitations).
+vertex counts. Real integration tests now exist for networking
+(`LoopbackIntegration.*`: two `Connection`s over real loopback UDP
+sockets, one deliberately dropping the first real datagram sent);
+save/load is still unit-tested only, not yet exercised through a full
+server-save/client-load cycle since there's no server-side world-save
+trigger yet, and `VoxelClient`/`VoxelServer` don't call it either - see
+Known Limitations.
 
 ## Known Bugs
 
@@ -166,8 +163,28 @@ None currently tracked.
   target pick), no combat/interaction. The 3 spawned entities in
   `VoxelClient` have no visual representation (no mesh/model system for
   entities yet) - only logged positions.
-- `VoxelServer`'s tick loop is a placeholder (sleeps at 20 TPS, no actual
-  simulation) until Phase 7.
+- `VoxelClient` has no network code at all - it still runs entirely
+  single-player/local, never connecting to a `VoxelServer`. Replication,
+  client-side prediction, and interpolation are Phase 8's job.
+- `engine/network::Connection`'s reliable channels have no RTT
+  estimation, congestion control, or max-resend cutoff - a fixed
+  retransmit interval, forever. Correct (tested, including under real
+  simulated loss) but not tuned for real-world network conditions - see
+  NETWORKING.md/DECISIONS.md.
+- `VoxelServer`'s connection model has no authentication - any UDP
+  datagram from a new address is treated as a new client connection, no
+  questions asked. Fine for this vertical slice, not for any real
+  deployment - see NETWORKING.md.
+- `Connection`'s reorder buffer and duplicate-detection set for the two
+  reliable channels use raw `u16` sequence values in
+  ordered/hash containers, whose numeric ordering doesn't account for
+  wraparound the way `sequence_greater_than` does - only matters past
+  65536 messages on a single channel of one connection, far beyond this
+  vertical slice's traffic volume. See NETWORKING.md.
+- `VoxelServer`'s AI/world simulation runs identically whether or not
+  any client is connected, but nothing is actually replicated to a
+  connected client beyond the Welcome/Heartbeat handshake messages -
+  entity positions, block edits, etc. aren't sent anywhere yet (Phase 8).
 - bgfx's real GPU backend (Vulkan/GL/Metal/D3D) selection is untested —
   only the `Noop` headless fallback has been exercised, since this sandbox
   has no GPU/display.
@@ -216,21 +233,25 @@ None currently tracked.
 
 ## Next Task
 
-1. Phase 7: `engine/network` transport - decide and record in
-   DECISIONS.md whether this is a chosen library (e.g. ENet, GameNetworkingSockets)
-   or a hand-rolled UDP protocol, with reliable and unreliable channels
-   (brief section 63's requirement - not everything needs guaranteed
-   delivery/ordering, e.g. frequent position updates).
-2. `VoxelServer`'s real simulation loop - replacing the Phase 0
-   placeholder (sleeps at 20 TPS, no actual simulation) with one that
-   actually ticks `World`/physics/entities, now that `engine/ecs`,
-   `engine/physics`, and `engine/world` all exist and are usable from
-   the headless `Lcu::EngineCore` `VoxelServer` already links.
-3. Server-authoritative state: decide what the server owns vs. what
-   clients predict (brief section 63/64) - this phase doesn't need to
-   solve replication/prediction (that's Phase 8), just get real client-
-   server messages flowing over the transport from (1).
-4. Update state docs and commit after each step, same as every prior
+1. Phase 8: give `VoxelClient` real network code for the first time -
+   connect to a `VoxelServer` over `engine/network`, parse the Welcome
+   message it already sends (world seed, tick rate - currently only
+   `VoxelServer` speaks this protocol; nothing on the client side reads
+   it back yet).
+2. Server-authoritative state replication: decide (and record in
+   DECISIONS.md) what the server sends each tick and on what channel -
+   likely entity positions on `UnreliableSequenced` (matching the
+   existing Heartbeat's channel choice) and block edits on
+   `ReliableOrdered` (an edit can't be allowed to just go missing the
+   way a stale position update can).
+3. Client-side prediction + reconciliation for local player movement
+   (predict locally, correct against the server's authoritative state
+   when it disagrees) and interpolation for remote entities (smooth
+   between received position updates rather than snapping).
+4. Interest management (brief section 22/64) and chunk network
+   streaming/compression - only sending a client the chunks/entities
+   actually near it, not the whole loaded world.
+5. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture

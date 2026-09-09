@@ -89,8 +89,11 @@ never accumulated as a single unbounded double across the whole world.
 ## Networking channels
 
 `RELIABLE_ORDERED`, `RELIABLE_UNORDERED`, `UNRELIABLE`,
-`UNRELIABLE_SEQUENCED`. See `NETWORKING.md` (to be written in Phase 7) for
-wire format details once the transport is implemented.
+`UNRELIABLE_SEQUENCED` (`engine/network::Channel`'s `ReliableOrdered`/
+`ReliableUnordered`/`UnreliableUnordered`/`UnreliableSequenced`) are
+implemented over a hand-rolled ack/retransmit protocol on UDP - see
+`NETWORKING.md` for wire format details and what's verified vs.
+deferred.
 
 This file is updated whenever a structural decision changes the above; see
 `DECISIONS.md` for the reasoning behind each choice.

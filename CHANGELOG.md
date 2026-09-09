@@ -2,7 +2,56 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7
+
+### Phase 7
+
+- `engine/network::UdpSocket`: cross-platform (POSIX/Winsock, selected
+  at compile time) non-blocking IPv4 UDP socket wrapper - `bind`/
+  `send_to`/`try_receive`. Winsock startup/cleanup is reference-counted
+  so callers never have to think about it. 9 new unit tests incl. a real
+  loopback send/receive round-trip.
+- `engine/network::{Channel, PacketHeader, sequence_greater_than}`: the
+  pure, independently-tested building blocks. `Channel` names all four
+  semantics `ARCHITECTURE.md` commits to
+  (`UnreliableUnordered`/`UnreliableSequenced`/`ReliableUnordered`/
+  `ReliableOrdered`); `PacketHeader` is a 4-byte wire header
+  (type/sequence/channel) with round-trip serialization;
+  `sequence_greater_than` is the standard wraparound-correct `u16`
+  sequence comparison (the same technique TCP uses for its own
+  sequence numbers).
+- `engine/network::Connection`: implements all four channel semantics
+  over an abstract byte-packet transport - it never touches a socket
+  itself, only produces/consumes raw packets (the same
+  dependency-injection shape as `physics::raycast`'s `is_solid`
+  predicate), so the protocol logic (ordering, deduplication,
+  retransmission timing) is fully unit-tested with zero real I/O.
+  Reliable channels use per-channel sequence counters and ack-based
+  retransmission (fixed interval - see DECISIONS.md); `ReliableOrdered`
+  additionally buffers out-of-order arrivals and drains them in
+  sequence. See the new `NETWORKING.md` for the full wire format.
+- 46 new unit/integration tests, including two full loopback integration
+  tests running real `Connection` pairs over real `UdpSocket`s on
+  `127.0.0.1` - one deliberately drops the first real UDP datagram sent
+  and confirms retransmission recovers it, not a hypothetical case a
+  mock would assume away. `VoxelTests` now at 221/221 passing (bgfx
+  build) / 218/218 (non-bgfx build).
+- `VoxelServer`: replaced the Phase 0 sleep-only placeholder tick loop
+  with a real one. Generates/loads a real 36-chunk `World`, runs the
+  same wandering-AI simulation as `VoxelClient` (`engine/ecs` +
+  `game::systems::update_ai_wander`) every tick regardless of whether
+  any client is connected, and listens for real UDP connections - a
+  peer is "connected" the moment the server sees any datagram from its
+  address, and gets a real `ReliableOrdered` Welcome message (world
+  seed + tick rate) plus a per-tick `UnreliableSequenced` Heartbeat
+  (tick number + live entity count) from then on. Verified via a real
+  two-process test: a standalone Python UDP client connects to a
+  running `VoxelServer` and receives the genuine handshake and live
+  heartbeats (see `NETWORKING.md`/`BUILD_STATUS.md` for the exact
+  reproduce steps). `ldd` reconfirmed zero SDL/bgfx dependency.
+- New `NETWORKING.md`: wire format, channel semantics, ack/retransmit
+  behavior, the application-level Welcome/Heartbeat message format, and
+  what's verified vs. deferred.
 
 ### Phase 6
 
