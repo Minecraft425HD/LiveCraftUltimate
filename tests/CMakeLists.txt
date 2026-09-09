@@ -22,6 +22,7 @@ add_executable(VoxelTests
     lighting/propagation_test.cpp
     game/systems/ai_wander_system_test.cpp
     game/systems/day_night_cycle_test.cpp
+    game/systems/replication_protocol_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp
     network/connection_test.cpp

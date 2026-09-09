@@ -11,6 +11,7 @@
 add_library(LcuGame STATIC
     systems/src/ai_wander_system.cpp
     systems/src/day_night_cycle.cpp
+    systems/src/replication_protocol.cpp
 )
 add_library(Lcu::Game ALIAS LcuGame)
 
