@@ -25,6 +25,14 @@ if(TARGET Lcu::Platform)
     target_link_libraries(VoxelTests PRIVATE Lcu::Platform)
 endif()
 
+# Only built when bgfx is actually enabled (LCU_BUILD_CLIENT and
+# LCU_ENABLE_BGFX both ON) - these tests initialize a real (headless
+# Noop-backend) bgfx context to upload GPU buffers.
+if(TARGET Lcu::Rendering)
+    target_sources(VoxelTests PRIVATE rendering/chunk_mesh_upload_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Rendering)
+endif()
+
 lcu_apply_common_options(VoxelTests)
 
 gtest_discover_tests(VoxelTests)

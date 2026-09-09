@@ -4,11 +4,16 @@
 
 #include "lcu/core/log.h"
 #include "lcu/debug/frame_stats.h"
+#include "lcu/jobs/job_system.h"
 #include "lcu/platform/input.h"
 #include "lcu/platform/window.h"
+#include "lcu/voxel/block_registry.h"
+#include "lcu/voxel/chunk.h"
+#include "lcu/voxel/greedy_mesher.h"
 
 #if defined(LCU_ENABLE_BGFX)
 #include "lcu/platform/native_handle.h"
+#include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/renderer.h"
 #endif
 
@@ -25,10 +30,25 @@ std::optional<lcu::u64> max_frames_from_env() {
     return static_cast<lcu::u64>(std::strtoull(value, nullptr, 10));
 }
 
+// Builds a single flat ground slab (brief section 80's vertical slice
+// needs "a voxel chunk" - this is the smallest honest thing that
+// qualifies: real BlockRegistry, real Chunk storage, real greedy
+// meshing, not a mock). Not real world content - there is no world
+// generation yet (Phase 3).
+lcu::voxel::Chunk build_placeholder_chunk(lcu::voxel::BlockId stone) {
+    lcu::voxel::Chunk chunk;
+    for (lcu::u32 x = 0; x < lcu::voxel::Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 z = 0; z < lcu::voxel::Chunk::kEdgeLength; ++z) {
+            chunk.set_block(x, 0, z, stone);
+        }
+    }
+    return chunk;
+}
+
 }  // namespace
 
 int main() {
-    LCU_LOG_INFO("LiveCraftUltimate client starting (Phase 1: window + game loop + input)");
+    LCU_LOG_INFO("LiveCraftUltimate client starting (Phase 2: chunk -> greedy mesh -> GPU buffers)");
 
     lcu::platform::WindowDesc desc;
     desc.title = "LiveCraftUltimate";
@@ -53,6 +73,35 @@ int main() {
         LCU_LOG_ERROR("Renderer init failed, exiting");
         return 1;
     }
+#endif
+
+    // --- Chunk -> job-dispatched greedy mesh -> (bgfx) GPU upload ---
+    lcu::voxel::BlockRegistry block_registry;
+    lcu::voxel::BlockDefinition stone_def;
+    stone_def.namespaced_id = "game:stone";
+    stone_def.display_name = "Stone";
+    stone_def.is_transparent = false;
+    const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
+
+    const lcu::voxel::Chunk chunk = build_placeholder_chunk(stone_id);
+
+    lcu::jobs::JobSystem job_system;
+    lcu::voxel::ChunkMesh chunk_mesh;
+    const auto mesh_job = job_system.submit(
+        [&] { chunk_mesh = lcu::voxel::mesh_chunk_greedy(chunk, block_registry); },
+        lcu::jobs::JobPriority::High);
+    job_system.wait(mesh_job);
+
+    LCU_LOG_INFO("Meshed placeholder chunk: opaque {} vertices / {} indices", chunk_mesh.opaque.vertices.size(),
+                 chunk_mesh.opaque.indices.size());
+
+#if defined(LCU_ENABLE_BGFX)
+    lcu::rendering::GpuChunkMesh gpu_mesh = lcu::rendering::upload_chunk_mesh_layer(chunk_mesh.opaque);
+    LCU_LOG_INFO("Uploaded chunk mesh to GPU buffers: valid={} index_count={}", gpu_mesh.is_valid(),
+                 gpu_mesh.index_count);
+    // No shader/draw-call submission yet - see chunk_mesh_upload.h and
+    // TASK_QUEUE.md. The buffers exist on the GPU but nothing draws them
+    // to the screen this frame.
 #endif
 
     lcu::platform::KeyboardInputBackend keyboard;
@@ -88,6 +137,10 @@ int main() {
             break;
         }
     }
+
+#if defined(LCU_ENABLE_BGFX)
+    lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
+#endif
 
     LCU_LOG_INFO("LiveCraftUltimate client shutting down after {} frames", frame);
     return 0;
