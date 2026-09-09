@@ -2,7 +2,67 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6
+
+### Phase 6
+
+- `engine/ecs::Registry`: generation-checked `EntityId` handles (a stale
+  handle from a destroyed entity never aliases whatever later reuses its
+  slot) and sparse-set `ComponentPool<T>` per component type (dense
+  contiguous storage for cache-friendly iteration, swap-and-pop removal
+  so dense arrays never develop holes). `create`/`destroy_entity`,
+  `add`/`get`/`has`/`remove_component`, `pool_for<T>()` for dense
+  iteration over every live component of a type. No query DSL,
+  archetypes, or multithreaded system dispatch - not needed yet. 13 new
+  unit tests.
+- `engine/lighting::LightStorage<EdgeLength>`: packed 4-bit sky + 4-bit
+  block light per voxel, same flat-array layout as `ChunkStorage`.
+  `compute_block_light`/`compute_sky_light`: the one-time initial
+  per-chunk flood (from every `BlockDefinition::light_emission` source,
+  and a top-down per-column sky fill). `propagate_added_block_light`/
+  `unpropagate_block_light`: true incremental local updates for a single
+  block add/remove - the standard two-phase BFS removal algorithm
+  (darken everything strictly dimmer than the retracted source, collect
+  still-validly-lit boundary cells, re-flood from them), directly
+  satisfying brief section 24's "local updates, not full recompute"
+  rather than re-flooding the whole chunk per edit. Header-only
+  (templated on edge length, like `mesh_chunk_greedy`). Single-chunk
+  scope for now (no cross-chunk light bleed) - see DECISIONS.md. 12 new
+  unit tests, including an exact-match check between the incremental add
+  path and a full recompute, and a two-source removal test verifying the
+  refill phase correctly reproduces what a solo-source recompute would
+  give.
+- `game::components::{Position, AIWander}` and
+  `game::systems::update_ai_wander`: a real gameplay-layer `engine/ecs`
+  consumer. An entity with both components idles for a random duration,
+  then walks toward `AIWander::target` at `AIWander::speed`; on arrival,
+  picks a new target within a configurable radius and idles again. An
+  explicit `std::mt19937` (not a hidden global RNG) keeps this
+  deterministic and testable, matching `worldgen`'s "no hidden global
+  state" approach. 6 new unit tests.
+- `game::systems::DayNightCycle`: tracks elapsed time through a
+  repeating cycle and reports a cosine-curve sky light scale (1.0 at
+  noon, a dim nonzero floor at midnight, never fully black). Not yet
+  wired into any renderer or `engine/lighting` data - logged only for
+  now. 7 new unit tests.
+- `VoxelClient`: computes real per-chunk block+sky light at load time
+  (`chunk_light`, a `ChunkCoord -> Light` map alongside the existing GPU
+  mesh map) and keeps it correct through every break/place edit via the
+  incremental propagate/unpropagate primitives plus a per-column sky
+  light refresh, instead of re-flooding the whole chunk on every edit.
+  Spawns 3 wandering AI entities in a ring around spawn and a
+  `DayNightCycle`, both updated every frame. Also fixes a real
+  off-by-one found while verifying this: `terrain_height()` returns the
+  topmost *solid* block's Y (worldgen.cpp: `world_y <= height` is
+  solid), so the player (and now AI) previously spawned with feet
+  embedded one block into the ground instead of resting on top of it -
+  spawn Y is now `terrain_height() + 1`.
+- `VoxelTests` now at 187/187 passing (bgfx build) / 184/184 (non-bgfx
+  build). Verified via a real headless run: "Sky light 5 blocks above
+  spawn column: 15", real (deterministic, seeded) AI entity positions
+  logged, "Day/night: time_of_day=0.000 sky_light_scale=0.550", and the
+  existing `LCU_VERIFY_BREAK_PLACE` break-then-place round-trip still
+  holds after the spawn-height fix.
 
 ### Phase 5
 

@@ -9,44 +9,58 @@ commands).
 
 ## Current Phase
 
-Phase 0, 1, 2, 3, 4 complete/functionally complete for what this
-headless sandbox can verify. Phase 5 (items + inventory + crafting) is
-also functionally complete: `ItemRegistry`, `Inventory`,
-`RecipeRegistry`, and `VoxelClient`'s block-break/place now running on
-a real item economy are all done and tested.
+Phase 0, 1, 2, 3, 4, 5 complete/functionally complete for what this
+headless sandbox can verify. Phase 6 (entities + AI + lighting +
+day/night) is also functionally complete: `engine/ecs`,
+`engine/lighting`, wandering AI, a day/night cycle, and `VoxelClient`
+running all of it together (real per-chunk lighting kept correct
+through every block edit, 3 AI entities, a ticking day/night cycle) are
+all done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 6 — Entities + AI
-+ lighting + day/night.** `engine/ecs` entity/component storage,
-sunlight/block light propagation, simple AI, day/night cycle.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 7 — Networking +
+dedicated server.** `engine/network` transport, and `VoxelServer`'s real
+simulation loop (replacing the Phase 0 placeholder that just sleeps at
+20 TPS).
 
 ## Last Completed Task
 
-Phase 5: added `engine/items::ItemRegistry`/`ItemDefinition`
-(namespaced, datadriven, mirrors `BlockRegistry` - `kNoItemId`
-auto-registered like `kAirBlockId`), `engine/items::Inventory`
-(slot-based `ItemStack` storage; `add_item` tops up existing partial
-stacks before spilling into empty slots, respecting each item's
-`max_stack_size`; `remove_item`/`count_item`), and
-`engine/items::RecipeRegistry` (shaped recipes matched via
-bounding-box-trimming the query grid then exact cell comparison;
-shapeless recipes matched via ingredient-multiset comparison - no
-mirrored-orientation matching, a documented simplification with no
-recipe needing it yet).
+Phase 6: added `engine/ecs::Registry` (generation-checked `EntityId`
+handles - a stale handle from a destroyed entity never aliases whatever
+later reuses its slot; sparse-set `ComponentPool<T>` per component type
+for cache-friendly dense iteration; `create`/`destroy_entity`,
+`add`/`get`/`has`/`remove_component`, `pool_for<T>()`), and
+`engine/lighting::{LightStorage, compute_block_light, compute_sky_light,
+propagate_added_block_light, unpropagate_block_light}` (packed 4-bit
+sky + 4-bit block light per voxel; the last two are true incremental
+local updates for a single block add/remove - the standard two-phase
+BFS removal algorithm - not a full per-edit recompute, satisfying brief
+section 24's "local updates, not full recompute" directly). Single-chunk
+scope for now (no cross-chunk light bleed) - see DECISIONS.md.
 
-Gave block-break a real item consumer: `VoxelClient` now registers a
-"game:stone" item, spawns the player with a 9-slot `Inventory`, and
-breaking a block adds one stone item to it; placing a block now
-requires (and consumes) one stone item from the inventory instead of
-placing for free, refunding it if the placement target's chunk turns
-out not to be loaded (a real edge case caught and fixed while wiring
-this up, not just documented away). Verified end-to-end with the
-existing `LCU_VERIFY_BREAK_PLACE` headless hook: break logs "Picked up
-1 game:stone (inventory: 1)", place logs "... (inventory: 0)".
+Added `game::components::{Position, AIWander}` and
+`game::systems::update_ai_wander` (idle-then-walk-to-target loop, new
+target picked on arrival, explicit `std::mt19937` for determinism - no
+hidden global RNG state) and `game::systems::DayNightCycle` (cosine
+sky-light-scale curve: full brightness at noon, a dim nonzero floor at
+midnight). `VoxelClient` now spawns 3 wandering AI entities and a
+`DayNightCycle`, updates both every frame, computes real per-chunk
+block+sky light at load time, and keeps it correct through every
+break/place edit via the incremental primitives instead of re-flooding
+the whole chunk. Also fixed a real off-by-one surfaced while verifying
+this: `terrain_height()` returns the topmost *solid* block's Y, so the
+player (and now AI) previously spawned with feet embedded one block
+into the ground rather than resting on the surface as documented -
+spawn Y is now `terrain_height() + 1`.
 
-24 new unit tests (`ItemRegistry`/`Inventory`/`RecipeRegistry`). `ctest`
-149/149 passing (bgfx build) / 146/146 (non-bgfx build).
+38 new unit tests (`Registry`, block/sky light propagation,
+`AIWanderSystem`, `DayNightCycle`). `ctest` 187/187 passing (bgfx
+build) / 184/184 (non-bgfx build). Verified via a real headless run:
+"Sky light 5 blocks above spawn column: 15", real AI entity positions
+logged, "Day/night: time_of_day=0.000 sky_light_scale=0.550", and the
+`LCU_VERIFY_BREAK_PLACE` break-then-place round-trip still holds after
+the spawn-height fix.
 
 ## Build Status
 
@@ -60,17 +74,18 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 149/149 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 187/187 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 146/146 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 184/184 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
 ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
-Inventory, RecipeRegistry. JobSystem
+Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
+AIWanderSystem, DayNightCycle. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
@@ -131,6 +146,26 @@ None currently tracked.
   to feed it a real grid.
 - Only one block type (`game:stone`) exists anywhere outside unit tests;
   placing a block always places stone.
+- Lighting (`engine/lighting`) is single-chunk scoped - no light bleeds
+  across a chunk boundary yet (a bright torch one block from a chunk
+  edge won't light the neighboring chunk's cells, and sky light doesn't
+  know whether the chunk above it is open sky or a solid roof). Sky
+  light also doesn't spread laterally under overhangs (straight
+  top-down column fill only). See DECISIONS.md.
+- Computed light (`engine/lighting::Light`, held per-chunk in
+  `VoxelClient`'s `chunk_light`) isn't consumed by anything visual yet -
+  the chunk shader is still flat directional+ambient lit with no
+  per-voxel light sampling. Only observed via a log line
+  ("Sky light 5 blocks above spawn column: ...").
+- `DayNightCycle` ticks and its `sky_light_scale()` is correct and
+  tested, but nothing scales the actual rendered scene or
+  `engine/lighting` data by it yet - also log-line-only for now.
+- AI (`game::systems::update_ai_wander`) is wander-only: no player
+  awareness, no pathfinding/obstacle avoidance (a wandering entity can
+  walk into a wall and just stops making progress until its next
+  target pick), no combat/interaction. The 3 spawned entities in
+  `VoxelClient` have no visual representation (no mesh/model system for
+  entities yet) - only logged positions.
 - `VoxelServer`'s tick loop is a placeholder (sleeps at 20 TPS, no actual
   simulation) until Phase 7.
 - bgfx's real GPU backend (Vulkan/GL/Metal/D3D) selection is untested —
@@ -181,20 +216,21 @@ None currently tracked.
 
 ## Next Task
 
-1. Phase 6: `engine/ecs` — a minimal entity/component storage (data-
-   oriented, matching the rest of the engine's style - see
-   ARCHITECTURE.md). No entities exist anywhere yet outside the player,
-   which today is just a `PlayerPhysicsState`/`FirstPersonCamera` pair
-   in `VoxelClient`, not an ECS entity.
-2. Sunlight + block light propagation/removal (local BFS-style updates
-   on placement/removal, not a full per-chunk recompute every edit) -
-   `BlockDefinition::light_emission` already exists (brief section 24)
-   but nothing reads it yet.
-3. Simple AI (a passive mob or two) and a day/night cycle driving the
-   sunlight propagation's light level over time.
+1. Phase 7: `engine/network` transport - decide and record in
+   DECISIONS.md whether this is a chosen library (e.g. ENet, GameNetworkingSockets)
+   or a hand-rolled UDP protocol, with reliable and unreliable channels
+   (brief section 63's requirement - not everything needs guaranteed
+   delivery/ordering, e.g. frequent position updates).
+2. `VoxelServer`'s real simulation loop - replacing the Phase 0
+   placeholder (sleeps at 20 TPS, no actual simulation) with one that
+   actually ticks `World`/physics/entities, now that `engine/ecs`,
+   `engine/physics`, and `engine/world` all exist and are usable from
+   the headless `Lcu::EngineCore` `VoxelServer` already links.
+3. Server-authoritative state: decide what the server owns vs. what
+   clients predict (brief section 63/64) - this phase doesn't need to
+   solve replication/prediction (that's Phase 8), just get real client-
+   server messages flowing over the transport from (1).
 4. Update state docs and commit after each step, same as every prior
-   one.
-5. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture

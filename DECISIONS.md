@@ -492,3 +492,103 @@ accurate under a failure this build can actually hit (see "Known
 Limitations": `VoxelClient` loads a static area, so walking to its edge
 and aiming outward reproduces this today), rather than only under
 failures that happen to not matter yet.
+
+## 2026-09-09 — Lighting is single-chunk scoped: no cross-chunk bleed, no lateral sky spread
+
+**Context:** `engine/lighting`'s block light BFS and sky light column
+fill both only ever step within the `ChunkStorage<EdgeLength>` they're
+given - they have no way to ask "what does the neighboring chunk look
+like" the way `VoxelClient`'s greedy-mesh neighbor-remesh glue does for
+geometry. Real light doesn't stop at chunk boundaries: a torch one
+block from a chunk edge should light cells in the next chunk over, and
+whether a chunk's own top layer gets full sky light depends on whether
+the chunk above it is open sky or a solid roof.
+
+**Decision:** Not implemented yet. `compute_block_light`/
+`propagate_added_block_light`/`unpropagate_block_light` treat a
+chunk's own boundary as the edge of the world (light simply stops
+there, neither read from nor written to a neighbor); `compute_sky_light`
+assumes every chunk column is open to the sky above it, regardless of
+what chunk actually sits there. Extending this correctly needs the same
+kind of neighbor-awareness `VoxelClient`'s break/place handler already
+has for meshing (`neighbors_sharing_boundary`), but for light it's
+harder: a chunk edit's light effect can, in principle, propagate many
+chunks away (light travels up to 15 steps), not just into the
+immediately adjacent chunk the way a single mesh face does. That's real
+added complexity (a cross-chunk propagation queue, `World` needing to
+answer "is this chunk coordinate loaded and what's in it" from inside
+the lighting code) with no caller stressing it yet - `VoxelClient` loads
+a small enough area, and has no visible torches/light-emitting content
+placed anywhere, that the seams wouldn't be observable even with a
+display. Revisit once a real light-emitting block is added to the game
+content and the seams become an actual visible defect, not a
+theoretical one.
+
+Sky light also only fills straight down each column - no lateral spread
+under overhangs (real sunlight leaks a little sideways beneath a ledge).
+Also deferred for the same reason: nothing in this sandbox can see the
+difference, and adding it now would be guessing at how much bleed
+"looks right" with no display to check against (brief section 98).
+
+## 2026-09-09 — AI wander system takes an explicit RNG, not a hidden global one
+
+**Decision:** `game::systems::update_ai_wander` takes `std::mt19937&`
+as a parameter rather than reaching for a static/global random engine.
+Same reasoning as `engine/world::worldgen`'s noise functions: a system
+whose behavior depends on randomness stays deterministic and testable
+as long as the randomness source is explicit and caller-supplied - a
+unit test can seed it and assert exact resulting positions/timers (see
+`AIWanderSystem.ArrivalPicksANewTargetWithinWanderRadiusAndStartsIdling`,
+which pins the idle-duration range to a single value specifically so
+the test doesn't need to tolerate a range of acceptable outcomes).
+`VoxelClient` seeds one fixed RNG (`kAiRngSeed`) for its AI entities for
+the same reason every other piece of this vertical slice is
+deterministic - a headless run's output is reproducible, not "probably
+similar every time."
+
+## 2026-09-09 — DayNightCycle: a real, ticking system with no renderer consumer yet
+
+**Context:** Brief section 60 asks for a day/night cycle. Built as a
+small, real, unit-tested system (`game::systems::DayNightCycle`) that
+tracks elapsed time and produces a sky light scale via a cosine curve -
+but nothing multiplies `engine/lighting`'s sky light values by it, and
+nothing tints a rendered sky, since there is no persistent visible
+scene to observe either change (no display in this sandbox, and the
+chunk shader has no time-of-day uniform yet).
+
+**Decision:** Ship the system now, wire it to actual light/render output
+later. `VoxelClient` ticks it every frame and logs its state
+(`time_of_day`/`sky_light_scale`) so the logic is exercised by a real
+call site, not just unit tests - the same "real code, deferred
+integration, honestly documented" pattern as `RecipeRegistry` (tested,
+no crafting-UI caller yet). Wiring `sky_light_scale()` into
+`engine/lighting`'s sky light values (multiplying every
+`LightStorage::sky_light` read by it, most naturally at the point a
+renderer samples light for shading) is the obvious next step once a
+renderer actually samples per-voxel light at all - not done
+speculatively now with nothing to visually verify it against.
+
+## 2026-09-09 — Fixed: player/AI spawned embedded in the ground
+
+**Context:** Found while adding the sky-light verification log for
+Phase 6: `terrain_height()` returns the Y of the topmost *solid* block
+(`worldgen.cpp`: `world_y <= height` is solid - confirmed by
+`worldgen_test.cpp`'s own `expect_solid = ly <= height` assertion, so
+this is `terrain_height`'s intended, tested contract, not a bug in
+`terrain_height` itself). `client/main.cpp`'s player spawn code
+(written in Phase 4) set the player's feet Y directly to
+`terrain_height(...)`, i.e., to the topmost solid block's own Y rather
+than the first open-air cell above it (`terrain_height(...) + 1`) - so
+the player's AABB started overlapping the top layer of solid ground
+instead of resting on its surface.
+
+**Decision:** Fixed at the one call site that mattered:
+`spawn_ground_y` in `client/main.cpp` is now
+`terrain_height(kWorldSeed, 0, 0) + 1`, with a comment explaining the
+off-by-one so it isn't reintroduced. Re-verified `LCU_VERIFY_BREAK_PLACE`
+still round-trips correctly (break/place happen relative to a raycast
+from the corrected spawn position, so the exact world coordinates in
+the log shifted but the round-trip property held) and all existing
+Phase 4/5 tests still pass unchanged - this was a `VoxelClient`
+integration bug, not a defect in `engine/physics`/`engine/world`
+themselves, which is why no engine-level test caught it.

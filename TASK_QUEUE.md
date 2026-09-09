@@ -59,9 +59,10 @@ verified and how.
 
 ## Phase 6 — Entities + AI + lighting + day/night
 
-- [ ] engine/ecs entity/component storage.
-- [ ] Sunlight + block light propagation/removal (local updates, not full recompute).
-- [ ] Simple AI, day/night cycle.
+- [x] `engine/ecs::Registry` - generation-checked `EntityId` handles, sparse-set `ComponentPool<T>` per component type (dense contiguous storage, swap-and-pop removal). `create`/`destroy_entity`, `add`/`get`/`has`/`remove_component`, `pool_for<T>()` for dense iteration. No query DSL/archetypes/multithreaded dispatch - not needed yet. 13 unit tests.
+- [x] Sunlight + block light propagation/removal. `engine/lighting::LightStorage` (packed 4-bit sky + 4-bit block light per voxel). `compute_block_light`/`compute_sky_light` for the initial per-chunk flood; `propagate_added_block_light`/`unpropagate_block_light` for true incremental local updates on a single block add/remove (the standard two-phase BFS removal algorithm, not a full recompute per edit) - see DECISIONS.md for the single-chunk-scope simplification. 12 unit tests, incl. an exact-match check between incremental and full-recompute paths and a two-source removal/refill test.
+- [x] Simple AI, day/night cycle. `game::components::{Position, AIWander}` + `game::systems::update_ai_wander` (idle/walk-to-target/pick-new-target loop, explicit `std::mt19937` for determinism); `game::systems::DayNightCycle` (cosine sky-light-scale curve, full at noon, dim floor at midnight). 13 unit tests.
+- [x] `VoxelClient`: spawns 3 wandering AI entities and a `DayNightCycle`, both updated every frame; computes real per-chunk block+sky light at load and keeps it correct through every break/place edit via the incremental primitives (not a full recompute), plus a per-column sky light refresh. Also fixed a real off-by-one found while verifying this - the player (and AI) previously spawned embedded one block into the ground due to misreading `terrain_height()`'s solid/air boundary; now spawns resting on top of it, as documented.
 
 ## Phase 7 — Networking + dedicated server
 
@@ -157,14 +158,32 @@ via the same `LCU_VERIFY_BREAK_PLACE` headless hook used for Phase 4:
 "Picked up 1 game:stone (inventory: 1)" then "Placing block ...
 (inventory: 0)".
 
-Next task to pick up: **Phase 6 — Entities + AI + lighting +
-day/night.** `engine/ecs` entity/component storage, sunlight + block
-light propagation/removal (local updates, not full recompute), simple
-AI, and a day/night cycle. `RecipeRegistry` still has no crafting-UI
-caller and item drops are a direct 1:1 block->item mapping rather than
-a real loot-table system - both acceptable simplifications recorded in
-DECISIONS.md/PROJECT_STATE.md, revisit once a real consumer (a crafting
-grid, more droppable block types) needs more than this.
+Phase 6 is now functionally complete for what this sandbox can verify:
+`engine/ecs::Registry`, `engine/lighting::{LightStorage, propagation}`,
+`game::systems::{update_ai_wander, DayNightCycle}` are all implemented
+and unit tested, and `VoxelClient` now loads real per-chunk lighting,
+keeps it correct incrementally through every block edit, and runs 3
+wandering AI entities plus a ticking day/night cycle every frame.
+Verified via a real headless run: "Sky light 5 blocks above spawn
+column: 15", AI entities logging real (deterministic, seeded) positions,
+and "Day/night: time_of_day=0.000 sky_light_scale=0.550" alongside the
+still-passing `LCU_VERIFY_BREAK_PLACE` round-trip.
+
+Next task to pick up: **Phase 7 — Networking + dedicated server.**
+`engine/network` transport (reliable/unreliable channels), and
+`VoxelServer`'s real simulation loop (replacing the Phase 0 tick-loop
+placeholder that just sleeps at 20 TPS). This is the first phase that
+needs a genuinely new kind of decision (transport library or hand-rolled
+protocol, see DECISIONS.md once that's picked) rather than extending an
+existing pattern.
+
+Known simplifications carried forward, still accurate and still
+acceptable until something needs more: `RecipeRegistry` has no
+crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
+a loot-table system; lighting is single-chunk scoped (no cross-chunk
+bleed); `World::update_streaming` still isn't called by `VoxelClient`
+(a static area is loaded once at startup) - see
+DECISIONS.md/PROJECT_STATE.md for each.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real
