@@ -12,6 +12,7 @@
 #include "game/components/position.h"
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/day_night_cycle.h"
+#include "game/systems/replication_protocol.h"
 #include "lcu/core/log.h"
 #include "lcu/debug/frame_stats.h"
 #include "lcu/ecs/registry.h"
@@ -20,12 +21,17 @@
 #include "lcu/jobs/job_system.h"
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
+#include "lcu/network/address.h"
+#include "lcu/network/connection.h"
+#include "lcu/network/udp_socket.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
 #include "lcu/platform/input.h"
 #include "lcu/platform/window.h"
 #include "lcu/player/camera.h"
 #include "lcu/player/movement_input.h"
+#include "lcu/replication/position_interpolator.h"
+#include "lcu/replication/prediction_buffer.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/voxel/chunk_coord.h"
@@ -104,6 +110,14 @@ constexpr lcu::u32 kAiRngSeed = 20260909;
 // short headless verification run can actually observe the sky light
 // scale change across a handful of frames.
 constexpr lcu::f32 kDayLengthSeconds = 120.0f;
+
+// If LCU_CONNECT_PORT is set, VoxelClient connects to a VoxelServer on
+// 127.0.0.1:<port> at startup (brief section 64/Phase 8) instead of
+// running fully single-player/local. Only loopback IPv4 is supported
+// today - there is no hostname/IP-string parser in engine/network yet
+// (see DECISIONS.md); real connect-to-a-remote-host UI/config is later
+// work once there's an actual server browser or "join by address"
+// screen to drive it.
 
 lcu::physics::AABB make_player_aabb(lcu::math::Vec3 feet_position) {
     return lcu::physics::AABB{
@@ -195,6 +209,29 @@ int main() {
     lcu::items::Inventory player_inventory(kInventorySlotCount);
 
     lcu::jobs::JobSystem job_system;
+
+    namespace protocol = game::systems::protocol;
+    const char* connect_port_env = std::getenv("LCU_CONNECT_PORT");
+    const bool networked = connect_port_env != nullptr;
+
+    lcu::network::UdpSocket network_socket;
+    lcu::network::Connection server_connection;
+    lcu::network::Address server_address{};
+    if (networked) {
+        network_socket.bind(0);  // ephemeral local port - this client only ever initiates.
+        server_address = lcu::network::Address::loopback(
+            static_cast<lcu::u16>(std::strtoul(connect_port_env, nullptr, 10)));
+        // An empty UnreliableUnordered packet is enough to make the
+        // server learn this client's address (see VoxelServer's own
+        // connection model in NETWORKING.md) - there's no separate
+        // "connect" handshake below the application-level Welcome the
+        // server sends back once it sees this.
+        server_connection.send(lcu::network::Channel::UnreliableUnordered, {});
+        for (auto& packet : server_connection.take_outgoing_packets()) {
+            network_socket.send_to(server_address, packet);
+        }
+        LCU_LOG_INFO("Connecting to VoxelServer at {}", server_address.to_string());
+    }
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, stone_id);
@@ -384,18 +421,52 @@ int main() {
     // engine/ecs + game/systems consumer, not just a unit test. Spawned
     // in a ring around the player's spawn column so they start on solid
     // ground (the same terrain height sampled for the player).
+    //
+    // When networked, AI is server-authoritative (VoxelServer runs this
+    // exact same simulation - see server/main.cpp) - this client doesn't
+    // also simulate it locally, it renders the server's replicated
+    // positions instead (see remote_entity_interpolators below).
     lcu::ecs::Registry entity_registry;
     std::mt19937 ai_rng(kAiRngSeed);
-    for (int i = 0; i < kAiEntityCount; ++i) {
-        const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
-        const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
-                                         4.0f * std::sin(angle)};
-        const lcu::ecs::EntityId entity = entity_registry.create_entity();
-        entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
-        entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+    if (!networked) {
+        for (int i = 0; i < kAiEntityCount; ++i) {
+            const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
+            const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
+                                             4.0f * std::sin(angle)};
+            const lcu::ecs::EntityId entity = entity_registry.create_entity();
+            entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
+            entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+        }
+        LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());
     }
     game::systems::AIWanderConfig ai_wander_config;
-    LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());
+
+    // One interpolator per remote AI entity (keyed by the EntityState
+    // wire format's entity_index - see replication_protocol.h), fed by
+    // EntityState messages below. network_clock is this client's own
+    // local time base for sample timestamps (see PositionInterpolator's
+    // doc comment on why it must be the receiver's clock, not the
+    // sender's).
+    std::unordered_map<lcu::u32, lcu::replication::PositionInterpolator> remote_entity_interpolators;
+    lcu::f32 network_clock = 0.0f;
+
+    // Client-side prediction + reconciliation (brief section 64) for the
+    // local player: apply_player_input mirrors exactly what
+    // VoxelServer's own PlayerInput handling does (apply_gravity then
+    // integrate_player) so replaying it during reconciliation reproduces
+    // what the server would have computed. Only actually used when
+    // networked - in single-player mode movement is already fully local
+    // and authoritative, nothing to reconcile against.
+    const auto apply_player_input = [&](const lcu::physics::PlayerPhysicsState& state,
+                                         const lcu::math::Vec3& horizontal_delta, lcu::f32 dt) {
+        lcu::physics::PlayerPhysicsState next = state;
+        lcu::physics::apply_gravity(next, physics_config, dt);
+        lcu::physics::integrate_player(world, next, horizontal_delta, physics_config, dt, is_solid);
+        return next;
+    };
+    lcu::replication::PredictionBuffer<lcu::physics::PlayerPhysicsState, lcu::math::Vec3> player_predictor(
+        apply_player_input);
+    lcu::u32 input_sequence = 0;
 
     // Day/night cycle (brief section 60) - a real, ticking, tested
     // system. Nothing renders it yet (no sky/lighting shader input - see
@@ -427,7 +498,72 @@ int main() {
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
 
-        game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
+        if (networked) {
+            network_clock += delta_seconds;
+
+            lcu::network::Address from;
+            while (auto packet = network_socket.try_receive(from)) {
+                for (const auto& message : server_connection.on_packet_received(*packet)) {
+                    const auto type = protocol::peek_type(message.payload);
+                    if (!type) {
+                        continue;
+                    }
+                    switch (*type) {
+                        case protocol::MessageType::Welcome: {
+                            if (const auto welcome = protocol::decode_welcome(message.payload)) {
+                                // Logged, not yet acted on - this client
+                                // still generates its own world from the
+                                // compile-time kWorldSeed rather than
+                                // waiting on this round-trip before
+                                // generating anything. Both happen to be
+                                // 1337 today (see DECISIONS.md); a real
+                                // "use the server's authoritative seed"
+                                // needs world generation deferred until
+                                // after this message arrives, a bigger
+                                // structural change than this phase's
+                                // scope.
+                                LCU_LOG_INFO("Received Welcome: world_seed={} tick_rate={}", welcome->world_seed,
+                                             welcome->tick_rate);
+                            }
+                            break;
+                        }
+                        case protocol::MessageType::EntityState: {
+                            if (const auto entities = protocol::decode_entity_state(message.payload)) {
+                                for (const auto& snapshot : *entities) {
+                                    remote_entity_interpolators[snapshot.entity_index].add_sample(
+                                        network_clock, snapshot.position);
+                                }
+                            }
+                            break;
+                        }
+                        case protocol::MessageType::PlayerCorrection: {
+                            if (const auto correction = protocol::decode_player_correction(message.payload)) {
+                                // The server sends its player AABB's min
+                                // corner directly (see server/main.cpp),
+                                // the same point client-side code already
+                                // treats as the AABB's identity - not a
+                                // "feet center" point like
+                                // make_player_aabb() takes, so it's
+                                // reconstructed directly here instead of
+                                // going through that helper.
+                                lcu::physics::PlayerPhysicsState authoritative = player;
+                                authoritative.aabb.min = correction->position;
+                                authoritative.aabb.max = {correction->position.x + kPlayerHalfWidth * 2.0f,
+                                                           correction->position.y + kPlayerHeight,
+                                                           correction->position.z + kPlayerHalfWidth * 2.0f};
+                                player = player_predictor.reconcile(authoritative, correction->acknowledged_sequence);
+                            }
+                            break;
+                        }
+                        case protocol::MessageType::Heartbeat:
+                        case protocol::MessageType::PlayerInput:
+                            break;  // Heartbeat: nothing to act on. PlayerInput: server->client never sends this.
+                    }
+                }
+            }
+        } else {
+            game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
+        }
         day_night_cycle.update(delta_seconds);
 
         if (input.is_down(lcu::platform::Action::LookLeft)) {
@@ -449,8 +585,20 @@ int main() {
         if (input.is_down(lcu::platform::Action::Jump)) {
             lcu::physics::try_jump(player, physics_config);
         }
-        lcu::physics::apply_gravity(player, physics_config, delta_seconds);
-        lcu::physics::integrate_player(world, player, horizontal_delta, physics_config, delta_seconds, is_solid);
+
+        if (networked) {
+            // Predict locally (so movement feels instant, not delayed by
+            // a round-trip to the server) and record the input for
+            // later reconciliation against the server's PlayerCorrection
+            // - see the PlayerCorrection handling above.
+            ++input_sequence;
+            player = player_predictor.predict_and_record(player, input_sequence, horizontal_delta, delta_seconds);
+            server_connection.send(lcu::network::Channel::UnreliableSequenced,
+                                    protocol::encode_player_input({input_sequence, horizontal_delta, delta_seconds}));
+        } else {
+            lcu::physics::apply_gravity(player, physics_config, delta_seconds);
+            lcu::physics::integrate_player(world, player, horizontal_delta, physics_config, delta_seconds, is_solid);
+        }
 
         camera.position = {player.aabb.center().x, player.aabb.min.y + kEyeHeight, player.aabb.center().z};
 
@@ -516,6 +664,13 @@ int main() {
 
         previous_input = input;
 
+        if (networked) {
+            server_connection.update(delta_seconds);
+            for (auto& packet : server_connection.take_outgoing_packets()) {
+                network_socket.send_to(server_address, packet);
+            }
+        }
+
 #if defined(LCU_ENABLE_BGFX)
         renderer.begin_frame(0x87ceebff);
         const lcu::math::Mat4 view = camera.view_matrix();
@@ -555,9 +710,20 @@ int main() {
 
     LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),
                  day_night_cycle.sky_light_scale());
-    for (const lcu::ecs::EntityId& entity : entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
-        const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
-        LCU_LOG_INFO("AI entity (index={}) at ({:.2f}, {:.2f}, {:.2f})", entity.index, pos.x, pos.y, pos.z);
+    if (networked) {
+        LCU_LOG_INFO("Player position (server-reconciled): ({:.2f}, {:.2f}, {:.2f})", player.aabb.min.x,
+                     player.aabb.min.y, player.aabb.min.z);
+        for (const auto& [entity_index, interpolator] : remote_entity_interpolators) {
+            const lcu::math::Vec3 pos = interpolator.interpolated_position(network_clock);
+            LCU_LOG_INFO("Remote AI entity (index={}) interpolated position: ({:.2f}, {:.2f}, {:.2f})", entity_index,
+                         pos.x, pos.y, pos.z);
+        }
+    } else {
+        for (const lcu::ecs::EntityId& entity :
+             entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
+            const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
+            LCU_LOG_INFO("AI entity (index={}) at ({:.2f}, {:.2f}, {:.2f})", entity.index, pos.x, pos.y, pos.z);
+        }
     }
 
     LCU_LOG_INFO("LiveCraftUltimate client shutting down after {} frames", frame);

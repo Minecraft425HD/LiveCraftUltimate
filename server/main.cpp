@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -6,21 +7,26 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "game/components/ai_wander.h"
 #include "game/components/position.h"
 #include "game/systems/ai_wander_system.h"
+#include "game/systems/replication_protocol.h"
 #include "lcu/core/log.h"
 #include "lcu/core/types.h"
 #include "lcu/ecs/registry.h"
 #include "lcu/network/connection.h"
 #include "lcu/network/udp_socket.h"
+#include "lcu/physics/collision.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/world/world.h"
 #include "lcu/world/worldgen.h"
 
 namespace {
+
+namespace protocol = game::systems::protocol;
 
 struct ServerConfig {
     std::string world = "world";
@@ -59,37 +65,31 @@ constexpr int kAiEntityCount = 3;
 constexpr lcu::u32 kAiRngSeed = 20260909;
 constexpr int kTicksPerSecond = 20;
 
-// Application-level messages riding on top of engine/network's channel
-// transport - engine/network itself is deliberately game-agnostic (it
-// has no idea what a "world seed" is), so this small hand-rolled framing
-// (a one-byte type tag, then fixed big-endian fields - the same manual
-// approach packet_header.cpp uses, not a generic serialization
-// framework nothing else needs yet) lives here in server/ instead.
-enum class MessageType : lcu::u8 { Welcome = 0, Heartbeat = 1 };
+// A client-reported PlayerInput's `dt` is trusted for the movement math
+// (brief section 64 doesn't require full movement validation/anti-cheat
+// yet - see DECISIONS.md), but clamped to a sane ceiling so a bogus or
+// malicious huge dt can't move a player an absurd distance in one input.
+constexpr lcu::f32 kMaxAcceptedInputDt = 0.25f;
 
-std::vector<lcu::u8> encode_welcome(lcu::u32 world_seed, lcu::u8 tick_rate) {
-    return {
-        static_cast<lcu::u8>(MessageType::Welcome),
-        static_cast<lcu::u8>((world_seed >> 24) & 0xFF),
-        static_cast<lcu::u8>((world_seed >> 16) & 0xFF),
-        static_cast<lcu::u8>((world_seed >> 8) & 0xFF),
-        static_cast<lcu::u8>(world_seed & 0xFF),
-        tick_rate,
-    };
-}
+// How often (in ticks) each connection gets a PlayerCorrection - not
+// every single tick, since the correction only matters when there's
+// something to reconcile against, and this keeps the broadcast volume
+// down (still real "authoritative periodic sync", just not maximal
+// frequency - see DECISIONS.md).
+constexpr lcu::u64 kCorrectionIntervalTicks = 4;
 
-std::vector<lcu::u8> encode_heartbeat(lcu::u64 tick, lcu::u16 entity_count) {
-    const auto tick32 = static_cast<lcu::u32>(tick);
-    return {
-        static_cast<lcu::u8>(MessageType::Heartbeat),
-        static_cast<lcu::u8>((tick32 >> 24) & 0xFF),
-        static_cast<lcu::u8>((tick32 >> 16) & 0xFF),
-        static_cast<lcu::u8>((tick32 >> 8) & 0xFF),
-        static_cast<lcu::u8>(tick32 & 0xFF),
-        static_cast<lcu::u8>((entity_count >> 8) & 0xFF),
-        static_cast<lcu::u8>(entity_count & 0xFF),
-    };
-}
+// Interest management (brief section 22/64): a client's EntityState
+// broadcast only includes AI entities within this many blocks of that
+// client's own (server-known) player position - real filtering logic,
+// even though every entity in this vertical slice's small world
+// currently falls within it (see DECISIONS.md).
+constexpr lcu::f32 kInterestRadius = 24.0f;
+
+struct ClientState {
+    lcu::network::Connection connection;
+    lcu::physics::PlayerPhysicsState player;
+    lcu::u32 last_acknowledged_sequence = 0;
+};
 
 }  // namespace
 
@@ -120,13 +120,23 @@ int main(int argc, char** argv) {
     }
     LCU_LOG_INFO("Loaded {} chunks (seed={})", world.loaded_chunk_count(), kWorldSeed);
 
+    const auto is_solid = [&](lcu::voxel::BlockId id) { return block_registry.definition_of(id).has_collision; };
+    const lcu::physics::PlayerPhysicsConfig physics_config;
+    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
+
+    auto make_spawn_aabb = [&](lcu::math::Vec3 feet) {
+        constexpr lcu::f32 kHalfWidth = 0.3f;
+        constexpr lcu::f32 kHeight = 1.8f;
+        return lcu::physics::AABB{{feet.x - kHalfWidth, feet.y, feet.z - kHalfWidth},
+                                   {feet.x + kHalfWidth, feet.y + kHeight, feet.z + kHalfWidth}};
+    };
+
     // Same wandering AI simulation VoxelClient runs, now driven
     // server-side - a dedicated server needs to simulate entities
     // whether or not any client is even connected to watch them (brief
     // section 64's "server-authoritative state").
     lcu::ecs::Registry entity_registry;
     std::mt19937 ai_rng(kAiRngSeed);
-    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
     for (int i = 0; i < kAiEntityCount; ++i) {
         const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
         const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
@@ -154,7 +164,7 @@ int main(int argc, char** argv) {
     // DECISIONS.md; nothing gatekeeps who can send a packet and be
     // treated as connected, which is fine for this vertical slice with
     // no untrusted network exposure, not for a real public server.
-    std::unordered_map<lcu::network::Address, lcu::network::Connection> connections;
+    std::unordered_map<lcu::network::Address, ClientState> clients;
 
     constexpr auto kTickDuration = std::chrono::milliseconds(1000 / kTicksPerSecond);
     constexpr lcu::f32 kTickDt = 1.0f / static_cast<lcu::f32>(kTicksPerSecond);
@@ -167,20 +177,31 @@ int main(int argc, char** argv) {
 
         lcu::network::Address from;
         while (auto packet = socket.try_receive(from)) {
-            auto [it, inserted] = connections.try_emplace(from);
+            auto [it, inserted] = clients.try_emplace(from);
+            ClientState& client = it->second;
             if (inserted) {
+                client.player.aabb = make_spawn_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
                 LCU_LOG_INFO("New client connection from {}", from.to_string());
             }
-            const auto messages = it->second.on_packet_received(*packet);
+
+            const auto messages = client.connection.on_packet_received(*packet);
             for (const auto& message : messages) {
-                LCU_LOG_DEBUG("Received a {}-byte message on channel {} from {}", message.payload.size(),
-                              static_cast<int>(message.channel), from.to_string());
+                const auto input = protocol::decode_player_input(message.payload);
+                if (!input) {
+                    continue;  // not a PlayerInput (or a malformed one) - nothing else expected client->server yet.
+                }
+                const lcu::f32 dt = std::min(input->dt, kMaxAcceptedInputDt);
+                lcu::physics::apply_gravity(client.player, physics_config, dt);
+                lcu::physics::integrate_player(world, client.player, input->horizontal_delta, physics_config, dt,
+                                                is_solid);
+                client.last_acknowledged_sequence = input->sequence;
             }
+
             if (inserted) {
                 // The real handshake: greet a newly-seen connection with
                 // the world seed and tick rate over the reliable channel.
-                it->second.send(lcu::network::Channel::ReliableOrdered,
-                                 encode_welcome(kWorldSeed, static_cast<lcu::u8>(kTicksPerSecond)));
+                client.connection.send(lcu::network::Channel::ReliableOrdered,
+                                        protocol::encode_welcome({kWorldSeed, static_cast<lcu::u8>(kTicksPerSecond)}));
                 LCU_LOG_INFO("Sent Welcome (seed={}, tick_rate={}) to {}", kWorldSeed, kTicksPerSecond,
                              from.to_string());
             }
@@ -188,17 +209,48 @@ int main(int argc, char** argv) {
 
         game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, kTickDt);
 
-        // A per-tick heartbeat to every known client on the unreliable
-        // channel - real, live proof the unreliable path works in an
-        // actual running server loop, not just in isolated tests.
-        for (auto& [addr, connection] : connections) {
-            connection.send(lcu::network::Channel::UnreliableSequenced,
-                             encode_heartbeat(tick, static_cast<lcu::u16>(entity_registry.entity_count())));
+        // Snapshot every AI entity's current position once per tick -
+        // shared across all clients' (interest-filtered) EntityState
+        // messages below rather than re-walking the registry per client.
+        std::vector<protocol::EntitySnapshot> all_entities;
+        for (const lcu::ecs::EntityId& entity : entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
+            const auto* pos = entity_registry.get_component<game::components::Position>(entity);
+            if (pos != nullptr) {
+                all_entities.push_back({entity.index, pos->value});
+            }
         }
 
-        for (auto& [addr, connection] : connections) {
-            connection.update(kTickDt);
-            for (auto& packet : connection.take_outgoing_packets()) {
+        for (auto& [addr, client] : clients) {
+            // A per-tick heartbeat - real, live proof the unreliable
+            // path works in an actual running server loop, not just in
+            // isolated tests.
+            client.connection.send(
+                lcu::network::Channel::UnreliableSequenced,
+                protocol::encode_heartbeat(
+                    {static_cast<lcu::u32>(tick), static_cast<lcu::u16>(entity_registry.entity_count())}));
+
+            // Interest management: only entities within kInterestRadius
+            // of this client's own (server-known) player position.
+            const lcu::math::Vec3 client_pos = client.player.aabb.center();
+            std::vector<protocol::EntitySnapshot> visible_entities;
+            for (const auto& snapshot : all_entities) {
+                if (lcu::math::length(snapshot.position - client_pos) <= kInterestRadius) {
+                    visible_entities.push_back(snapshot);
+                }
+            }
+            client.connection.send(lcu::network::Channel::UnreliableSequenced,
+                                    protocol::encode_entity_state(visible_entities));
+
+            if (tick % kCorrectionIntervalTicks == 0) {
+                client.connection.send(
+                    lcu::network::Channel::UnreliableSequenced,
+                    protocol::encode_player_correction({client.last_acknowledged_sequence, client.player.aabb.min}));
+            }
+        }
+
+        for (auto& [addr, client] : clients) {
+            client.connection.update(kTickDt);
+            for (auto& packet : client.connection.take_outgoing_packets()) {
                 socket.send_to(addr, packet);
             }
         }
@@ -210,7 +262,6 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(kTickDuration);
     }
 
-    LCU_LOG_INFO("VoxelServer shut down cleanly after {} ticks, {} client connection(s) seen", tick,
-                 connections.size());
+    LCU_LOG_INFO("VoxelServer shut down cleanly after {} ticks, {} client connection(s) seen", tick, clients.size());
     return 0;
 }
