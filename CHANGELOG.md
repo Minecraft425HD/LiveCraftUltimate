@@ -2,7 +2,63 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9
+
+### Phase 9
+
+- Added Lua 5.4.7 as a build dependency: official upstream
+  (`github.com/lua/lua`, which ships no CMake support) fetched via
+  `FetchContent_Populate`, built from its own `onelua.c` amalgamation
+  with `-DMAKE_LIB` to produce just the embeddable library (no `main()`).
+  Root `CMakeLists.txt` now declares `LANGUAGES CXX C` for it.
+- `engine/scripting::LuaState`: RAII wrapper around one Lua VM. Opens
+  only the base/table/string/math standard libraries - not `io`/`os`/
+  `package` - so a mod script has no filesystem/process access by
+  default. Forward-declares `lua_State` so `<lua.h>` is only ever
+  `#include`d inside `engine/scripting`'s and `engine/modding`'s own
+  `.cpp` files (mirrors the existing bgfx-header-confinement rule).
+  `register_function` exposes a native C function to Lua's global
+  namespace with a stateful `void*` upvalue, the standard technique for
+  binding a C++ object to Lua's C-style callback ABI. 7 new unit tests.
+- `engine/modding::EventBus`: a named pub/sub bus - mod scripts call
+  `lcu.subscribe(event_name, fn)`, the engine calls a typed
+  `emit_<event>()` method (currently just `emit_block_broken`) at the
+  real moment that event happens. An erroring handler is logged and
+  skipped without blocking the remaining subscribers. 7 new unit tests.
+- `engine/modding::{bind_block_registry, bind_item_registry}`: expose
+  `register_block(namespaced_id, display_name, is_transparent,
+  has_collision)`/`register_item(namespaced_id, display_name,
+  max_stack_size)` to Lua, writing directly into the given
+  `BlockRegistry`/`ItemRegistry` - mod content and base game content are
+  otherwise indistinguishable. 6 new unit tests.
+- `engine/modding::ModLoader`: enumerates immediate subdirectories of a
+  mods directory, running each one's fixed `<mod>/init.lua` entry point
+  against one shared `LuaState`. A mod without an `init.lua`, or whose
+  script errors, is logged and skipped - not fatal to the others.
+  Deliberately no manifest/dependency/version format yet. 6 new unit
+  tests.
+- `mods/example_mod/init.lua`: a real, working demonstration mod -
+  registers `example_mod:magic_stone`/`example_mod:magic_wand`,
+  subscribes to `block_broken`, and logs every block it sees broken.
+- `VoxelClient`/`VoxelServer`: both now construct their own `LuaState`,
+  bind their own block/item registries, and call
+  `ModLoader::load_all("mods")` at startup (guarded by the new
+  `LCU_ENABLE_SCRIPTING` compile definition, on by default via
+  `LCU_BUILD_SCRIPTING`). `VoxelClient` fires a real
+  `EventBus::emit_block_broken()` at the exact point in the existing
+  break-handling code where a block actually becomes air.
+  `VoxelServer` also constructs an `EventBus`/`ItemRegistry` purely so a
+  mod script shared between both hosts has a uniform Lua API surface,
+  even though the server never itself calls `emit_block_broken` (block
+  edits aren't replicated yet).
+- Verified via real runs, not just unit tests: `VoxelServer` logs its
+  mod's registrations and `Loaded 1 mod(s) from 'mods'`; `VoxelClient`
+  under `LCU_VERIFY_BREAK_PLACE` additionally logs `[example_mod]
+  block_broken #1: block id 1 broken at (0, 28, -1)` immediately after
+  breaking that exact block.
+- `ctest` 274/274 passing (bgfx build) / 271/271 (non-bgfx build), up
+  from 247/247 / 244/244 - 27 new tests across `LuaState`, `EventBus`,
+  `RegistryBindings`, `ModLoader`.
 
 ### Phase 8
 

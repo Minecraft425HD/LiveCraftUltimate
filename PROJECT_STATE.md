@@ -10,62 +10,69 @@ commands).
 
 ## Current Phase
 
-Phase 0 through 7 complete/functionally complete for what this headless
-sandbox can verify. Phase 8 (replication + prediction + interpolation)
-is also functionally complete: `engine/replication`'s prediction buffer
-and position interpolator, the shared `game::systems::protocol` wire
-messages, and a real, verified `VoxelClient`<->`VoxelServer` multiplayer
-connection are done and tested.
+Phase 0 through 8 complete/functionally complete for what this headless
+sandbox can verify. Phase 9 (modding + registries + Lua + events) is
+also functionally complete: `engine/scripting`'s sandboxed `LuaState`,
+`engine/modding`'s `EventBus`/registry bindings/`ModLoader`, and a real,
+verified `example_mod` are done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 9 — Modding +
-registries + Lua + events.** A Lua dependency, genuinely mod-extensible
-registries, an event system, a mod loader, and `example_mod`.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 10 — Mobile + touch
++ Android + iOS.** Architecture/CMake presets only in this Linux-only
+sandbox - honestly documented as BLOCKED/UNTESTED for anything that
+needs a real mobile toolchain.
 
 ## Last Completed Task
 
-Phase 8: added `engine/replication::PositionInterpolator` (buffers
-timestamped position samples, linearly interpolates at a small render
-delay behind the latest arrival, clamps rather than extrapolates past
-it) and `engine/replication::PredictionBuffer<State, Input>` (generic
-client-side prediction + server reconciliation: applies an input
-immediately and records it, then on a later authoritative correction
-discards acknowledged history and replays what's left on top of it).
-Both fully unit-tested, the latter against both a hand-verifiable plain
-value instantiation and a real `PlayerPhysicsState`/`integrate_player`
-instantiation with hand-computed expected results.
+Phase 9: embedded official upstream Lua 5.4.7 (`github.com/lua/lua`,
+which ships no CMake support) via its own `onelua.c` amalgamation built
+with `-DMAKE_LIB`, fetched through `FetchContent_Populate` since there's
+no `CMakeLists.txt` to `FetchContent_MakeAvailable`. Added
+`engine/scripting::LuaState` - an RAII Lua VM wrapper that only opens the
+base/table/string/math standard libraries (no `io`/`os`/`package`, so a
+mod script has no filesystem/process access by default) and forward-
+declares `lua_State` so `<lua.h>` is only ever `#include`d inside
+`engine/scripting`'s and `engine/modding`'s own `.cpp` files (mirrors the
+existing "only `engine/rendering` includes bgfx headers" rule).
 
-Added `game::systems::protocol` - the shared wire-message definitions
-(`Welcome`, `Heartbeat`, `EntityState`, `PlayerInput`, `PlayerCorrection`)
-`VoxelClient` and `VoxelServer` both use, so the two executables can't
-independently drift out of sync. `VoxelServer` now tracks one real
-`PlayerPhysicsState` per connected client, driven by received
-`PlayerInput` messages through the same physics `VoxelClient` runs, and
-periodically reports it back via `PlayerCorrection`; its `EntityState`
-broadcast is filtered per-client by a real interest-management distance
-check. `VoxelClient` gained a `LCU_CONNECT_PORT`-gated networked mode
-(loopback IPv4 only for now, single-player behavior completely
-unchanged when unset): predicts local player movement immediately and
-reconciles against the server's corrections, and renders server-driven
-AI entities through client-side interpolation instead of simulating
-them locally.
+Added `engine/modding`: `EventBus` (a named pub/sub bus - mod scripts
+call `lcu.subscribe("block_broken", fn)`, the engine calls
+`emit_block_broken(x, y, z, block_id)` at the real break site; an
+erroring handler is logged and skipped without blocking the rest),
+`bind_block_registry`/`bind_item_registry` (expose `register_block`/
+`register_item` to Lua, writing straight into the same `BlockRegistry`/
+`ItemRegistry` the base game populates - mod content and base content
+are otherwise indistinguishable), and `ModLoader` (enumerates immediate
+subdirectories of a mods directory, running each one's fixed
+`<mod>/init.lua` entry point; a mod that errors is logged and skipped,
+not fatal to the others). All bindings use the standard
+`lua_pushlightuserdata` + `lua_pushcclosure` upvalue technique to attach
+a stateful C++ object to Lua's C-style callback ABI.
 
-Verified via a real two-process run: a `VoxelClient` process connected
-to a running `VoxelServer` process over real loopback UDP, received a
-genuine Welcome (`world_seed=1337 tick_rate=20`), rendered all 3 remote
-AI entities' positions through real interpolation, and had its player
-position predicted, sent, and reconciled against the server's
-authoritative correction - the entire prediction -> network ->
-correction -> reconciliation loop actually exercised end to end.
-Single-player mode reverified byte-for-byte unchanged in both build
-configs. Chunk network streaming and block-edit replication are
-explicitly deferred - see NETWORKING.md.
+Wrote `mods/example_mod/init.lua` as a real, working mod: registers
+`example_mod:magic_stone`/`example_mod:magic_wand`, subscribes to
+`block_broken`, and logs every block it sees broken. Wired the full
+modding stack into both `VoxelClient` and `VoxelServer` (each
+constructs its own `LuaState`, binds its own registries, loads `mods/`
+at startup) - the server also gets an `EventBus` and `ItemRegistry`
+purely so a mod script shared between both hosts has a uniform API
+surface and doesn't fail to load on whichever host doesn't yet consume
+one of its calls (documented in `server/main.cpp`; block edits aren't
+replicated yet, so the server never itself calls `emit_block_broken`).
 
-26 new unit tests (`PositionInterpolator`, `PredictionBuffer`,
-`ReplicationProtocol`), plus the real two-process multiplayer run above
-(not an automated `ctest` case - see BUILD_STATUS.md for the reproduce
-steps). `ctest` 247/247 passing (bgfx build) / 244/244 (non-bgfx build).
+Verified via real runs, not just unit tests: `VoxelServer` logs
+`[example_mod] registered block ... -> id 2`, `registered item ... -> id
+1`, `[example_mod] loaded`, `Loaded 1 mod(s) from 'mods'`; `VoxelClient`
+(under `LCU_VERIFY_BREAK_PLACE`) logs the same registration lines plus,
+on the synthesized break, `[example_mod] block_broken #1: block id 1
+broken at (0, 28, -1)` immediately after `Breaking block at world (0,
+28, -1)` - the event fires with the correct coordinates and block id at
+the exact moment a real block is broken.
+
+27 new unit tests (`LuaState`, `EventBus`, `RegistryBindings`,
+`ModLoader`). `ctest` 274/274 passing (bgfx build) / 271/271 (non-bgfx
+build).
 
 ## Build Status
 
@@ -79,11 +86,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 247/247 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 274/274 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 244/244 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 271/271 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
@@ -92,7 +99,8 @@ PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
 AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
 UdpSocket, Address, LoopbackIntegration, PositionInterpolator,
-PredictionBuffer, ReplicationProtocol. JobSystem
+PredictionBuffer, ReplicationProtocol, LuaState, EventBus,
+RegistryBindings, ModLoader. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
@@ -264,25 +272,41 @@ None currently tracked.
   sandbox — every claim above about the draw call is about the API
   calls succeeding (valid handles, no crash, bgfx accepts the shader
   binaries), not about correct-looking output on a screen.
+- Registries beyond `BlockRegistry`/`ItemRegistry` (`EntityRegistry`,
+  `BiomeRegistry`, `StructureRegistry`, `SoundRegistry`,
+  `CommandRegistry`) don't exist yet — Lua bindings only cover the two
+  registries that were already real before Phase 9; the others are
+  added when something actually needs them (brief section 98).
+- `EventBus` only has one real event (`block_broken`) — no entity-
+  spawned/player-joined/tick/... events exist since nothing in the
+  engine fires them yet; add another `emit_<event>()` the same way once
+  a second real event exists (see DECISIONS.md).
+- `ModLoader` has no manifest/dependency/version format — a mod is just
+  a directory name plus a fixed `init.lua` entry point. No load-order
+  guarantees between mods beyond directory iteration order, no way for
+  one mod to depend on another.
+- Mod-registered block/item ids aren't synced over the network at all —
+  `VoxelClient` and `VoxelServer` each load `mods/` independently and
+  must agree by construction (same mods directory, same registration
+  order) for ids to match; nothing detects or reports a mismatch. Same
+  underlying gap as the pre-existing "block edits aren't replicated"
+  limitation above.
+- Lua sandboxing is standard-library-only (no `io`/`os`/`package`) — a
+  mod script still runs with no CPU/memory/time limits (a mod with an
+  infinite loop hangs the host process); resource-limiting a Lua VM is
+  deferred until a real need (untrusted third-party mods, not just this
+  repo's own `example_mod`) exists.
 
 ## Next Task
 
-1. Phase 9: add a Lua dependency (decide the exact library - e.g. Lua
-   5.4 itself vs. LuaJIT vs. sol2/LuaBridge as a binding layer - and
-   record the choice and rationale in DECISIONS.md when this starts).
-2. Expand registries (`BlockRegistry`/`ItemRegistry` already exist and
-   are namespaced/datadriven; add `EntityRegistry`/`BiomeRegistry`/
-   `RecipeRegistry` is already done/`StructureRegistry`/`SoundRegistry`/
-   `CommandRegistry`) to be genuinely mod-extensible - callable from Lua,
-   not just C++ call sites.
-3. Event system: something a mod can subscribe to (block broken, entity
-   spawned, player joined, ...) without the engine knowing mods exist.
-4. Mod loader: discover/load mod manifests and their Lua scripts at
-   startup.
-5. `example_mod` (brief section 91) exercising the above - a real,
-   working mod, not just the loader infrastructure with nothing loaded
-   into it.
-6. Update state docs and commit after each step, same as every prior
+1. Phase 10: mobile/touch/Android/iOS. Architecture and `CMakePresets.json`
+   entries only — this Linux-only sandbox has no Android NDK/Xcode
+   toolchain, so anything requiring one is documented as BLOCKED/UNTESTED
+   here, not attempted.
+2. Phase 11: optimization + profiling once Phase 10's architecture work
+   is settled.
+3. Phase 12: UI + audio + content + polish.
+4. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture

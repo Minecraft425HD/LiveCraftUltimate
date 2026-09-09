@@ -733,3 +733,102 @@ synchronously and unconditionally would need to become conditional on
 to do once there's an actual reason two peers' seeds would differ (e.g.
 Phase 9 server-side world configuration a client can't already guess),
 not preemptively.
+
+## 2026-09-09 — Lua 5.4 (official upstream), embedded via its own amalgamation
+
+**Context:** Phase 9 needs an embeddable scripting language for mods
+(brief section 84). Candidates considered: Lua 5.4 itself, LuaJIT, and a
+C++ binding layer on top of either (sol2, LuaBridge). `github.com/lua/
+lua` (the official upstream mirror) ships no CMake support at all - just
+a plain Makefile C project - so pulling it in via `FetchContent_
+MakeAvailable` (this repo's usual pattern for every other dependency)
+doesn't work.
+
+**Decision:** Plain Lua 5.4.7, not LuaJIT, and no binding library (raw
+C API, not sol2/LuaBridge). Lua 5.4 over LuaJIT: LuaJIT's last release
+targets Lua 5.1 semantics and its maintenance status is a real concern
+for a project meant to last; this project's scripting workload (mod
+registration calls at startup, occasional event handlers) has no
+performance profile that needs a JIT. No binding library: sol2/LuaBridge
+buy convenience (automatic type marshalling, RAII wrappers) at the cost
+of a template-heavy header-only dependency and another abstraction layer
+between engine code and the actual Lua C API - for the handful of
+binding functions this phase needs (`register_block`, `register_item`,
+`lcu_subscribe`), the raw
+`lua_pushlightuserdata`/`lua_pushcclosure`/`luaL_check*` pattern is a
+few lines each and keeps the dependency surface to just Lua itself (no
+overengineering ahead of need, brief section 98).
+
+Fetched via `FetchContent_Declare` + `FetchContent_GetProperties`/
+`FetchContent_Populate` (not `FetchContent_MakeAvailable`, since that
+requires the populated source to have its own `CMakeLists.txt`) at tag
+`v5.4.7`, then built by hand: `add_library(LuaLib STATIC
+${lua_SOURCE_DIR}/onelua.c)` compiled with `-DMAKE_LIB`. `onelua.c` is
+Lua's own official single-translation-unit amalgamation (it
+`#include`s every other `.c` file in the distribution); `MAKE_LIB`
+selects the branch that omits `lua.c`'s `main()`, producing just the
+embeddable library - confirmed by cloning the real upstream repo and
+inspecting `onelua.c`'s preprocessor guards directly before writing any
+CMake code, not assumed from documentation. No `LUA_USE_LINUX`/
+`LUA_USE_POSIX` platform define is set (portable ANSI C mode) - the only
+thing that trades away is `package.loadlib` (dynamic C-module loading
+from Lua), which nothing here needs since mods are pure Lua scripts, not
+compiled C extensions. Root `CMakeLists.txt` gained `LANGUAGES CXX C`
+because `onelua.c` is a C file and CMake's C toolchain isn't configured
+otherwise (a real configure-time error surfaced this, not a proactive
+change) - documented inline as being needed only for Lua, since every
+other target in this repo is C++.
+
+## 2026-09-09 — engine/scripting sandboxes the standard library
+
+**Context:** A full Lua VM opened with `luaL_openlibs()` gives a mod
+script `io`/`os`/`package` - arbitrary file I/O, process execution
+(`os.execute`), and dynamic native-library loading. `example_mod` (and
+any future third-party mod) should be able to register content and
+react to events without also being able to read/write arbitrary files
+or shell out.
+
+**Decision:** `engine/scripting::LuaState`'s constructor opens only
+`base`/`table`/`string`/`math` via individual `luaL_requiref` calls, not
+`luaL_openlibs()`. `base` still includes `print`, so a mod can log
+output for debugging despite `io` being absent. This is a real,
+enforced boundary (verified by a unit test asserting `io`/`os`/
+`package`/`require` are all `nil` from Lua's perspective), not a
+documented convention a mod could route around - there is no
+alternative code path to those libraries once the VM is constructed
+this way. It does not address CPU/memory/time resource limits (an
+infinite Lua loop still hangs the host process) - deferred until a real
+need for it exists (untrusted third-party mods, not just this repo's
+own `example_mod`) - see `PROJECT_STATE.md` "Known Limitations".
+
+## 2026-09-09 — EventBus exposed on the server even though nothing emits through it yet
+
+**Context:** `mods/example_mod/init.lua` is one script shared, unmodified,
+between `VoxelClient` and `VoxelServer` (both load `mods/` independently
+at startup - see "VoxelClient doesn't yet use the server's replicated
+world seed" above for the broader pattern of both sides agreeing by
+construction rather than by sync). It unconditionally calls
+`lcu.subscribe("block_broken", ...)`. The server has no source of
+`block_broken` events today - block edits aren't replicated
+(`NETWORKING.md`), so nothing server-side ever calls
+`emit_block_broken()`.
+
+**Decision:** Construct a real `EventBus` on the server and call
+`expose_to_lua()` on it anyway, even though `emit_block_broken()` is
+never called from `server/main.cpp`. Verified this was a real bug, not
+a hypothetical one: without it, `example_mod`'s `init.lua` threw
+`attempt to index a nil value (global 'lcu')` on the server and the
+entire mod failed to load (including its otherwise-successful
+`register_block`/`register_item` calls before that line) - see
+`CHANGELOG.md`/git history for the exact error message hit while
+verifying this phase. The alternative (making the example mod
+defensive - `if lcu and lcu.subscribe then ... end`) would work but
+pushes a host-capability-detection burden onto every mod author for
+something that should just be a uniform part of the modding API surface
+across client and server, the same way `register_block`/`register_item`
+already are. This is not premature - a shared Lua API that silently
+differs between hosts is a real correctness trap for any mod, not a
+speculative one; the corresponding `ItemRegistry` was added to the
+server for the identical reason (its absence broke the same mod's
+`register_item` call the same way, caught first during this same
+verification pass).

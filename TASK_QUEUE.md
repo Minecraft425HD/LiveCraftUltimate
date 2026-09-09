@@ -80,9 +80,11 @@ verified and how.
 
 ## Phase 9 — Modding + registries + Lua + events
 
-- [ ] Add Lua dependency (decision recorded when this starts).
-- [ ] Registries (Block/Item/Entity/Biome/Recipe/Structure/Sound/Command), namespaced IDs.
-- [ ] Event system, mod loader, example_mod per brief section 91.
+- [x] Add Lua dependency: official upstream Lua 5.4.7 via its own `onelua.c` amalgamation (`-DMAKE_LIB`), `FetchContent_Populate` since upstream ships no CMake support. `engine/scripting::LuaState` - RAII VM wrapper, sandboxes to base/table/string/math (no io/os/package), forward-declares `lua_State` so `<lua.h>` stays confined to `engine/scripting`/`engine/modding` `.cpp` files. 7 unit tests.
+- [x] Registries: `bind_block_registry`/`bind_item_registry` (`engine/modding::registry_bindings`) expose `register_block`/`register_item` to Lua, writing into the same `BlockRegistry`/`ItemRegistry` the base game uses. (Entity/Biome/Recipe/Structure/Sound/Command registry bindings deferred - no such registries exist yet beyond RecipeRegistry, which has no mod-facing use case yet either; added when something needs them.) 6 unit tests.
+- [x] Event system: `engine/modding::EventBus` - `lcu.subscribe(event_name, fn)` from Lua, `emit_block_broken(x, y, z, block_id)` from C++, erroring handlers logged and skipped without blocking others. 7 unit tests.
+- [x] Mod loader: `engine/modding::ModLoader` - enumerates `<mods_dir>/<mod_name>/init.lua`, one shared `LuaState` per host process, a mod that errors is skipped not fatal. 6 unit tests.
+- [x] `example_mod` (brief section 91): `mods/example_mod/init.lua` - registers `example_mod:magic_stone`/`example_mod:magic_wand`, subscribes to `block_broken`, logs every block broken. Wired into both `VoxelClient` and `VoxelServer` (each loads `mods/` at startup into its own `LuaState`+registries). Verified via real runs: server logs its registration lines and `Loaded 1 mod(s) from 'mods'`; client (under `LCU_VERIFY_BREAK_PLACE`) additionally logs `[example_mod] block_broken #1: block id 1 broken at (0, 28, -1)` at the exact moment a real block is broken.
 
 ## Phase 10 — Mobile + touch + Android + iOS
 
@@ -200,12 +202,26 @@ message fragmentation `engine/network::Connection` doesn't have yet -
 see NETWORKING.md), and block edits still aren't replicated at all - see
 NETWORKING.md "What's deferred" for the complete list.
 
-Next task to pick up: **Phase 9 — Modding + registries + Lua + events.**
-Add a Lua dependency (decision recorded when this starts - see
-DECISIONS.md), expand registries (Block/Item/Entity/Biome/Recipe/
-Structure/Sound/Command) to be genuinely mod-extensible (not just
-hardcoded `game:*` entries), an event system, a mod loader, and
-`example_mod` per brief section 91.
+Phase 9 is now functionally complete for what this sandbox can verify:
+`engine/scripting::LuaState` (sandboxed Lua 5.4.7 VM),
+`engine/modding::{EventBus, bind_block_registry, bind_item_registry,
+ModLoader}`, and a real working `example_mod` are all implemented and
+tested. Both `VoxelClient` and `VoxelServer` load `mods/` at startup
+into their own `LuaState` + registries (the server also gets an
+`EventBus`/`ItemRegistry` purely so a mod script shared between both
+hosts has a uniform Lua API and doesn't fail to load on whichever host
+doesn't yet consume one of its calls). Verified via real runs (not just
+unit tests): the server logs its mod's registrations and `Loaded 1
+mod(s)`; the client, under `LCU_VERIFY_BREAK_PLACE`, additionally logs
+`[example_mod] block_broken #1: block id 1 broken at (0, 28, -1)` at the
+exact moment a real block is broken - the full register -> load ->
+subscribe -> emit loop exercised end to end. 27 new unit tests. `ctest`
+274/274 (bgfx build) / 271/271 (non-bgfx build).
+
+Next task to pick up: **Phase 10 — Mobile + touch + Android + iOS.**
+Architecture and `CMakePresets.json` entries only in this Linux-only
+sandbox - no Android NDK/Xcode toolchain here, so anything requiring one
+is documented as BLOCKED/UNTESTED rather than attempted.
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
@@ -216,7 +232,11 @@ bleed); `World::update_streaming` still isn't called by either
 startup); `engine/network`'s reliable channel has no RTT
 estimation/congestion control, and its server connection model has no
 authentication; chunk data and block edits aren't replicated over the
-network yet - see NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
+network yet; `EventBus` has only one real event (`block_broken`);
+`ModLoader` has no manifest/dependency/version format; mod-registered
+ids aren't synced over the network (both hosts must load the same mods
+independently and agree by construction) - see
+NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real
