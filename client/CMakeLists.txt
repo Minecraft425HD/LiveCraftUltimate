@@ -26,18 +26,25 @@ endif()
 # uploaded chunk mesh with (see chunk_mesh_upload.h).
 if(LCU_ENABLE_BGFX AND LCU_BUILD_SHADER_TOOLS AND TARGET bgfx::shaderc)
     set(LCU_CHUNK_SHADER_OUTPUT_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/chunk)
+    # bgfx_compile_shaders() resolves SHADERS to an absolute path itself,
+    # but passes VARYING_DEF through unresolved into a custom command
+    # that runs with the *build* directory as its working directory - a
+    # relative path here silently fails to parse (shaderc still runs,
+    # just without the varying info it needs, and errors out deep in
+    # HLSL parsing instead of "file not found"). Pass it absolute.
+    set(LCU_CHUNK_VARYING_DEF ${CMAKE_CURRENT_SOURCE_DIR}/shaders/varying.def.sc)
 
     bgfx_compile_shaders(
         TYPE VERTEX
         SHADERS shaders/vs_chunk.sc
-        VARYING_DEF shaders/varying.def.sc
+        VARYING_DEF ${LCU_CHUNK_VARYING_DEF}
         OUTPUT_DIR ${LCU_CHUNK_SHADER_OUTPUT_DIR}
         OUT_FILES_VAR LCU_CHUNK_VS_OUTPUTS
     )
     bgfx_compile_shaders(
         TYPE FRAGMENT
         SHADERS shaders/fs_chunk.sc
-        VARYING_DEF shaders/varying.def.sc
+        VARYING_DEF ${LCU_CHUNK_VARYING_DEF}
         OUTPUT_DIR ${LCU_CHUNK_SHADER_OUTPUT_DIR}
         OUT_FILES_VAR LCU_CHUNK_FS_OUTPUTS
     )

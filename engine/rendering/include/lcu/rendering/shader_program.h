@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "lcu/core/types.h"
+
 namespace lcu::rendering {
 
 // Maps the currently active bgfx renderer (bgfx::getRendererType(),
