@@ -17,12 +17,13 @@ add_subdirectory(physics)
 add_subdirectory(items)
 add_subdirectory(ecs)
 add_subdirectory(lighting)
+add_subdirectory(network)
 
 add_library(LcuEngineCore INTERFACE)
 add_library(Lcu::EngineCore ALIAS LcuEngineCore)
 target_link_libraries(LcuEngineCore INTERFACE
     Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel Lcu::Jobs Lcu::World Lcu::Serialization Lcu::Physics Lcu::Items Lcu::Ecs
-    Lcu::Lighting
+    Lcu::Lighting Lcu::Network
 )
 
 if(LCU_BUILD_CLIENT)
