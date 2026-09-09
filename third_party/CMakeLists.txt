@@ -150,3 +150,26 @@ if(LCU_BUILD_SCRIPTING)
         target_link_libraries(LuaLib PUBLIC m)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Google Benchmark — micro-benchmarks (tools/benchmark, Phase 11). Same
+# vendor/ecosystem as GoogleTest, so it needs no separate justification -
+# it's the standard tool for exactly this job. BENCHMARK_ENABLE_TESTING/
+# _DOWNLOAD_DEPENDENCIES off: we don't need benchmark's own test suite, and
+# it would otherwise try to fetch its own (older-pinned) copy of
+# GoogleTest, duplicating the one this repo already fetches above.
+# ---------------------------------------------------------------------------
+if(LCU_BUILD_TOOLS)
+    FetchContent_Declare(
+        benchmark
+        GIT_REPOSITORY https://github.com/google/benchmark.git
+        GIT_TAG        v1.9.1
+        GIT_SHALLOW    TRUE
+    )
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_DOWNLOAD_DEPENDENCIES OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(benchmark)
+endif()
