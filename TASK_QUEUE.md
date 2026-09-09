@@ -46,9 +46,9 @@ verified and how.
 
 ## Phase 4 — Player + physics + interaction
 
-- [ ] AABB + voxel collision, gravity, jump/crouch/swim/step.
-- [ ] Voxel DDA raycaster.
-- [ ] First-person camera, block break/place.
+- [x] AABB + voxel collision, gravity, jump/crouch/swim/step (`engine/physics::move_and_collide`/`integrate_player`, 18 unit tests, including a hand-verified auto-step regression and a dedicated-ground-probe grounding fix - see DECISIONS.md).
+- [x] Voxel DDA raycaster (`engine/physics::raycast`, Amanatides & Woo, 9 unit tests incl. a hand-computed exact-distance case).
+- [x] First-person camera, block break/place (`engine/player::FirstPersonCamera`/`movement_direction_from_input`, 12 unit tests; `VoxelClient` now builds a multi-chunk `World`, spawns a physics-driven player on the terrain surface, and wires raycast hits into `World::chunk_at_mutable()` for edge-detected break/place, remeshing the affected chunk plus any chunk sharing the mutated boundary - verified end-to-end with a real headless run, not a mock).
 
 ## Phase 5 — Items + inventory + crafting
 
@@ -123,17 +123,34 @@ calls, multi-chunk `World` with streaming, deterministic terrain
 generation, and versioned/corruption-checked save/load are all done
 and tested (see the phase sections above for specifics).
 
-Next task to pick up: **Phase 4 — Player + physics + interaction.**
-(a) AABB + voxel collision (a moving AABB against `World`'s block
-data), gravity, jump/crouch/swim/step - pure logic, thoroughly
-testable. (b) Voxel DDA raycaster against `World` (brief section 25) -
-also pure logic. (c) First-person camera + block break/place, wiring
-the raycaster's hit result into `World::chunk_at_mutable()` to actually
-remove/place a block. This is the last piece of brief section 80's
-vertical slice before save/load closes the loop (already done). Order:
-raycaster and collision first (both independently testable against a
-hand-built `World`), camera/input wiring last (ties into the existing
-`InputState`/`Action` abstraction from Phase 1).
+Phase 4 is now functionally complete for what this sandbox can verify:
+voxel DDA raycasting, AABB collision/player physics (gravity, jump,
+auto-step, a dedicated ground probe fixing a real grounding-detection
+bug found before it ever shipped), and a first-person camera are all
+implemented and unit tested. `VoxelClient` was rewritten from its
+Phase 2 single-placeholder-chunk approach to load a real multi-chunk
+`World` (36 chunks around spawn), spawn a physics-driven player resting
+on the generated terrain surface, drive the camera from arrow-key look
+input and WASD movement, raycast every frame for block selection, and
+mutate the world on edge-detected Interact (break)/PlaceBlock (place)
+presses - remeshing and re-uploading the affected chunk (plus any
+neighbor chunk sharing the mutated block's boundary, so cross-chunk
+face culling stays correct). Verified via a real headless run with a
+synthetic input hook (`LCU_VERIFY_BREAK_PLACE`, see DECISIONS.md): a
+block is broken, logged, then the next frame's raycast (now reaching
+one block deeper) is used to place a new block back at the exact same
+world position - a real round-trip through the mutate/remesh/reupload
+pipeline, not a mock of it. This closes brief section 80's slice 1
+vertical slice (save/load already existed from Phase 3, just not yet
+wired to any trigger in `VoxelClient` - see Known Limitations).
+
+Next task to pick up: **Phase 5 — Items + inventory + crafting.**
+`ItemRegistry` (datadriven, namespaced like `BlockRegistry`), an
+`Inventory` component (slot-based, stack sizes), and `RecipeRegistry`
+(shaped/shapeless crafting matching). No consumer of items exists yet
+(nothing drops items on block break, no hand/hotbar) so this phase
+also has to decide - and record in DECISIONS.md - how block-break
+loosely connects to an item drop for the first time.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real

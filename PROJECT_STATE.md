@@ -9,41 +9,48 @@ commands).
 
 ## Current Phase
 
-Phase 0, 1, 2 complete/functionally complete for what this headless
-sandbox can verify. Phase 3 (world generation + streaming + save) is
-also functionally complete: multi-chunk `World` with a lifecycle state
-machine and distance-based streaming, deterministic terrain generation,
-and versioned/corruption-checked chunk save-load are all done and
-tested.
+Phase 0, 1, 2, 3 complete/functionally complete for what this headless
+sandbox can verify. Phase 4 (player + physics + interaction) is also
+functionally complete: voxel DDA raycasting, AABB collision/player
+physics, a first-person camera, and `VoxelClient` block break/place
+wired against a real multi-chunk `World` are all done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 4 — Player +
-physics + interaction.** Start with the voxel DDA raycaster and AABB
-collision (both pure logic, testable against a hand-built `World`),
-then a first-person camera + block break/place wiring the raycaster's
-hit into `World::chunk_at_mutable()`.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 5 — Items +
+inventory + crafting.** `ItemRegistry`, an `Inventory` component, and
+`RecipeRegistry`.
 
 ## Last Completed Task
 
-Phase 3: added `engine/world::World` (sparse chunk table, lifecycle
-state machine matching ARCHITECTURE.md, distance-based streaming with
-load/unload hysteresis), `engine/world::worldgen` (deterministic seeded
-value-noise terrain height, continental+terrain pipeline stage only),
-and `engine/serialization::chunk_serializer` (zstd-compressed, versioned
-chunk save/load with corruption and version-mismatch detection - a new
-dependency, see DECISIONS.md/third_party/README.md). Added
-`std::hash<ChunkCoord>` so it can key `World`'s chunk table.
+Phase 4: added `engine/physics::raycast` (voxel DDA / Amanatides & Woo
+against `World`), `engine/physics::{AABB, move_and_collide,
+integrate_player}` (axis-independent Y->X->Z collision resolution,
+gravity, jump, auto-step, a dedicated ground-probe fix for a real
+stationary-player grounding bug found and fixed before it ever
+shipped - see DECISIONS.md), and `engine/player::{FirstPersonCamera,
+movement_direction_from_input}` (yaw/pitch camera matching the existing
+`Mat4::look_at` convention, WASD-relative movement direction).
 
-27 new unit tests covering: chunk lifecycle transitions and their
-assertions, streaming load/unload/hysteresis behavior, terrain
-determinism/variation/smoothness, and - most rigorously - save/load
-correctness: a full 4096-cell round-trip, an empty chunk, a missing
-file, a garbage file, a version byte flipped after the fact, and a
-corrupted compressed payload, each asserted to produce its own distinct
-correct error code, plus confirmation that a failed load never touches
-the caller's chunk data. `ctest` 88/88 passing (bgfx build) / 85/85
-(non-bgfx build); `VoxelServer` confirmed still SDL/bgfx-free via `ldd`.
+Rewrote `client/main.cpp` from Phase 2's single hardcoded placeholder
+chunk to a real vertical slice: loads a 36-chunk area of `World`-driven
+terrain around spawn, spawns a physics-driven player resting on the
+generated surface, drives the camera from arrow-key look input
+(`LookUp/Down/Left/Right`, an interim stand-in for mouse-look - see
+DECISIONS.md) and WASD movement through `integrate_player`, raycasts
+from the camera every frame, and mutates the world on edge-detected
+Interact (break, `E`)/PlaceBlock (place, `F`) presses - remeshing and
+re-uploading not just the edited chunk but any neighbor chunk sharing
+the mutated block's boundary, so cross-chunk face culling stays
+correct. Verified via a real headless run using a synthetic input hook
+(`LCU_VERIFY_BREAK_PLACE`): breaks a block, logs it, then places a new
+block back at the exact same world position on the next raycast - a
+real round-trip through mutate-world -> remesh -> re-upload, not a
+mock.
+
+12 new unit tests for camera/movement (39 total for raycast/collision/
+camera/movement across Phase 4). `ctest` 125/125 passing (bgfx build) /
+122/122 (non-bgfx build).
 
 ## Build Status
 
@@ -57,23 +64,25 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 88/88 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 125/125 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 85/85 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 122/122 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
-ChunkMeshUpload, World, Worldgen, ChunkSerializer. JobSystem additionally
-verified via 200 repeated `ctest`-suite runs and 50 runs under
-ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing under
-ThreadSanitizer" for the exact commands. GreedyMesher's triangle winding
-is verified via a geometric cross-product check, not just vertex counts.
-No integration tests yet (no networking exists to integration-test;
-save/load is unit-tested but not yet exercised through a full
-server-save/client-load cycle since there's no server-side world-save
-trigger yet either).
+ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
+PlayerPhysics/AABB, FirstPersonCamera, MovementInput. JobSystem
+additionally verified via 200 repeated `ctest`-suite runs and 50 runs
+under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
+under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
+winding is verified via a geometric cross-product check, not just
+vertex counts. No integration tests yet (no networking exists to
+integration-test; save/load is unit-tested but not yet exercised
+through a full server-save/client-load cycle since there's no
+server-side world-save trigger yet either, and `VoxelClient` doesn't
+call it either - see Known Limitations).
 
 ## Known Bugs
 
@@ -81,27 +90,40 @@ None currently tracked.
 
 ## Known Limitations
 
-- `VoxelClient` still draws only its one hardcoded placeholder chunk
-  with a fixed camera, not a `World`-driven scene — `World` exists and
-  is tested, but nothing has wired `VoxelClient` to build/stream one yet
-  (that's naturally Phase 4's job, alongside the camera that would move
-  through it).
-- No player, physics, or interaction yet — intentionally still
-  pre-vertical-slice (see `ROADMAP.md` "Vertical slice targets"). Zero
-  gameplay blocks are registered anywhere outside unit tests/the
-  placeholder "game:stone".
-- `World::update_streaming` streams a 3D cube by Chebyshev distance, not
-  the horizontal-disc-plus-bounded-vertical shape real worlds want -
-  no camera/player yet to define "horizontal" against (see
-  DECISIONS.md).
+- `VoxelClient` loads a static, fixed 36-chunk area around spawn once at
+  startup (a 3x3 column of chunks, 4 chunks tall) rather than calling
+  `World::update_streaming` every frame from the player's actual
+  position - the player can walk outside the loaded area (movement/
+  physics/raycast simply stop finding chunks there; `chunk_at`/
+  `chunk_at_mutable` return null and break/place silently no-ops, logged
+  at debug level). Wiring `update_streaming` into the per-frame loop is
+  deferred, not forgotten - see DECISIONS.md.
+- `World::update_streaming` itself still streams a 3D cube by Chebyshev
+  distance, not the horizontal-disc-plus-bounded-vertical shape real
+  worlds want. A camera/player now exists (Phase 4) but `VoxelClient`
+  doesn't call `update_streaming` yet (see above), so there's still no
+  real caller to validate a disc-shaped version against.
 - Worldgen only implements continental+terrain (brief section 21's first
   two pipeline stages) - no climate/biome/caves/ores/structures/
   vegetation/decoration, and no surface/subsurface block variation
   (dirt/grass over stone) - single block type fills everything below
   the height.
-- Chunk save/load is unit-tested in isolation but not yet wired to any
-  actual save/load trigger (no "save world" command, no server
-  persistence loop yet - Phase 7+).
+- Chunk save/load (`engine/serialization::chunk_serializer`) is
+  unit-tested in isolation but still not wired to any actual trigger in
+  `VoxelClient` or `VoxelServer` (no "save world" command, no server
+  persistence loop yet - Phase 7+). Brief section 80's slice 1 is closed
+  in the sense that the save/load primitive exists and break/place
+  mutates real in-memory chunk data; persisting those edits to disk from
+  a live client/server session is still open.
+- Look input is arrow keys, not mouse-look - SDL relative-mouse-mode
+  plumbing doesn't exist yet (see `engine/platform/include/lcu/platform/
+  input.h` and DECISIONS.md). A real, usable interim control scheme, not
+  a placeholder that does nothing.
+- No item drops on block break, no hotbar/hand - breaking a block simply
+  removes it; there is no item system yet to hand the player anything
+  (Phase 5).
+- Only one block type (`game:stone`) exists anywhere outside unit tests;
+  placing a block always places stone.
 - `VoxelServer`'s tick loop is a placeholder (sleeps at 20 TPS, no actual
   simulation) until Phase 7.
 - bgfx's real GPU backend (Vulkan/GL/Metal/D3D) selection is untested —
@@ -111,8 +133,10 @@ None currently tracked.
   `CMakePresets.json` presets exist for them but have not been exercised
   on their native toolchains.
 - Input abstraction covers keyboard only (`KeyboardInputBackend`); no
-  mouse-look, gamepad or touch backend yet — none has a consumer to drive
-  until a camera/player exists (Phase 4) or mobile work starts (Phase 10).
+  real mouse-look, gamepad or touch backend yet — camera look is driven
+  by arrow keys (`LookUp/Down/Left/Right`, see `DECISIONS.md`) as an
+  interim scheme until SDL relative-mouse-mode is wired up; gamepad/touch
+  still have no consumer until mobile work starts (Phase 10).
 - Debug overlay is a log line, not an on-screen overlay — needs
   `engine/ui`/text rendering (later phase) to actually draw on screen.
 - No block state encoding yet (rotation/orientation/powered/etc., brief
@@ -150,16 +174,17 @@ None currently tracked.
 
 ## Next Task
 
-1. Phase 4: `engine/physics` — voxel DDA raycaster (brief section 25)
-   against `World`, then AABB collision (moving AABB vs. block data),
-   gravity/jump/crouch/swim/step. Both independently testable against a
-   hand-built `World` with no display needed.
-2. First-person camera + block break/place, wiring the raycaster's hit
-   result into `World::chunk_at_mutable()` to actually remove/place a
-   block - the last piece of brief section 80's vertical slice (window
-   -> renderer -> voxel chunk -> world -> player -> camera -> raycast ->
-   break block -> place block -> save -> load; save/load already done).
-3. Update state docs and commit after each step, same as every prior one.
+1. Phase 5: `engine/items::ItemRegistry` — datadriven, namespaced item
+   definitions (same pattern as `BlockRegistry`).
+2. `engine/items::Inventory` component — slot-based storage, stack
+   sizes/limits.
+3. `engine/items::RecipeRegistry` — shaped/shapeless crafting matching
+   against an inventory/crafting grid.
+4. Decide (and record in DECISIONS.md) the first real connection between
+   block-break and an item - e.g. broken blocks drop a corresponding
+   item into the world/inventory - since nothing produces items yet.
+5. Update state docs and commit after each step, same as every prior
+   one.
 
 ## Current Architecture
 

@@ -337,3 +337,97 @@ minimal `engine/core/log.h` wrapper. Defer pulling in spdlog until actual
 need for async/file sinks, threaded logging appears (Phase 6+/7 once
 server logging requirements are concrete). Wrapper API is designed so
 swapping the backend later doesn't touch call sites.
+
+## 2026-09-09 — Player grounding: a dedicated ground-probe, not the movement collision result
+
+**Context:** While implementing `engine/physics::integrate_player`, an
+early draft set `state.grounded = result.grounded` where `result` comes
+straight from that frame's `move_and_collide` call, and
+`CollisionResult::grounded` is defined as "movement was blocked while
+moving downward" (`delta.y < 0.0f && hit_y`). Traced through by hand
+before writing any test: a player standing motionless on solid ground,
+with no fall and no jump that particular frame, has `delta.y == 0.0f`,
+so `hit_y` is never even evaluated as a downward block - `result.grounded`
+comes out `false` even though the player is plainly resting on the
+ground. A caller driving animation/jump-eligibility/fall-damage off
+`state.grounded` would see it flicker false every frame the player
+doesn't happen to be actively falling, which is most frames.
+
+**Decision:** Added `probe_grounded()` - a small dedicated
+`move_and_collide` call with a fixed tiny downward delta
+(`kGroundProbeDistance = 0.05f`), called once after the real movement is
+resolved, regardless of what that movement's own delta.y was. `grounded`
+is now "is there solid ground within 5cm below me right now", decoupled
+from "did I collide moving down this specific frame". Costs one extra
+(cheap) collision sweep per `integrate_player` call.
+
+**Verification:** caught by hand-tracing the logic against a concrete
+scenario before writing the test that would have caught it live - see
+`PlayerPhysics.StationaryGroundedPlayerStaysGroundedWithoutFalling` in
+`tests/physics/collision_test.cpp`, added specifically to pin this down
+as a regression test.
+
+## 2026-09-09 — Camera look input: arrow keys as an interim control scheme
+
+**Context:** Phase 4 needed the first-person camera to actually turn
+somehow. Real mouse-look needs SDL3 relative-mouse-mode plumbing
+(`SDL_SetWindowRelativeMouseMode` + accumulating per-frame mouse deltas
+through the `InputState`/`Action` abstraction, brief section 27) that
+doesn't exist yet, and is also not meaningfully verifiable in this
+display-less sandbox even if built (a synthetic mouse-delta event still
+wouldn't prove anything about how mouse-look feels).
+
+**Decision:** Added `Action::LookUp/LookDown/LookLeft/LookRight`, bound
+to the arrow keys, and drove `FirstPersonCamera::add_yaw_pitch` from
+them in `VoxelClient`'s frame loop (scaled by a fixed `kLookSpeed`
+radians/s and real per-frame delta time). This is a real, immediately
+usable control scheme - not a placeholder that silently does nothing -
+and it exercises the exact same `InputState`/`Action` path a mouse-look
+backend would plug into later; only the backend producing the deltas
+changes. Revisit once SDL relative-mouse-mode is worth the plumbing
+(likely alongside Phase 10's touch input, which needs its own delta
+source anyway).
+
+## 2026-09-09 — Block mutation remeshes the edited chunk and any neighbor sharing the boundary
+
+**Context:** `mesh_chunk_greedy` treats any position outside a chunk's
+own bounds as air (`detail::block_or_air`) when deciding whether a
+boundary face is visible - so a chunk's mesh, once built, embeds an
+assumption about what was on the *other* side of each of its six faces
+at meshing time. Editing a block at local coordinate 0 or `EdgeLength-1`
+on any axis changes what that assumption should have been for the
+chunk on the other side of that boundary too, not just the edited
+chunk.
+
+**Decision:** `VoxelClient`'s break/place handling computes which
+already-loaded neighbor chunks (if any - up to three, at a chunk corner)
+share the mutated block's boundary, and remeshes/re-uploads each of them
+alongside the primary edited chunk. This keeps face culling correct
+across chunk seams without a general "dirty chunk" propagation system -
+proportionate to a single-block edit's blast radius, not a queue/graph
+solving a problem this doesn't have yet. Revisit if/when edits start
+happening in bulk (explosions, world-edit tools) and the "remesh every
+touched neighbor synchronously" approach shows up as a real cost.
+
+## 2026-09-09 — Headless break/place verification via a synthetic input hook
+
+**Context:** `VoxelClient`'s Phase 4 break/place logic is real
+edge-detected `InputState` handling (`Action::Interact`/`PlaceBlock`
+transitioning from up to down), but this sandbox has no real keyboard
+to press - `SDL_GetKeyboardState` always reports everything up under
+`SDL_VIDEODRIVER=dummy`. Without some way to drive a keypress, the
+mutate-world -> remesh -> re-upload pipeline would be unverified code,
+which brief section 96 rules out claiming as done.
+
+**Decision:** Added `LCU_VERIFY_BREAK_PLACE`, an env var that - only
+when set - overwrites `input`'s `Interact`/`PlaceBlock` bits directly
+for one frame each (frame 3 and frame 6) after `KeyboardInputBackend`
+has already run, before the edge-detection logic reads them. This is
+indistinguishable, from the edge-detection code's point of view, from a
+real single-frame key press and release; it exercises the actual
+production code path (not a separate test-only branch) end to end. Real
+interactive runs never set this env var, so it has zero effect outside
+verification. Confirmed via a real run: a block is broken and logged,
+then the next frame's raycast (now reaching the block below) is used to
+place a new block back at the exact same world coordinate the broken
+one occupied.

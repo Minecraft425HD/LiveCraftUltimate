@@ -2,7 +2,57 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4
+
+### Phase 4
+
+- `engine/physics::raycast`: voxel DDA (Amanatides & Woo) against
+  `World`, stepping one voxel boundary at a time regardless of chunk
+  size, predicate-driven solidity. 9 unit tests incl. a hand-computed
+  exact-distance case and the origin-starts-inside-solid edge case.
+- `engine/physics::{AABB, move_and_collide, PlayerPhysicsState,
+  integrate_player}`: axis-independent Y->X->Z AABB-vs-voxel collision
+  resolution, gravity, jump, and single-ledge auto-stepping. Found and
+  fixed a real grounding-detection bug during development (a stationary
+  grounded player briefly reported ungrounded because "grounded" was
+  read off whether *this frame's* downward movement collided, not
+  whether the player was actually resting on something) via a dedicated
+  small downward ground-probe, decoupling the two - see DECISIONS.md.
+  18 unit tests, including a regression test for that exact bug and
+  hand-computed auto-step clamp positions.
+- `engine/player::{FirstPersonCamera, movement_direction_from_input}`:
+  yaw/pitch first-person camera matching the existing `Mat4::look_at`
+  -Z-forward convention (pitch clamped just under the poles), and
+  WASD-relative normalized movement direction decoupled from pitch.
+  12 unit tests.
+- `engine/platform::Action` gained `LookUp/Down/Left/Right` (arrow keys)
+  and `PlaceBlock` (`F`) - arrow-key look is a real, immediately usable
+  interim control scheme standing in for mouse-look until SDL
+  relative-mouse-mode plumbing exists (see DECISIONS.md).
+- `VoxelClient` rewritten from Phase 2's single hardcoded placeholder
+  chunk to a real vertical slice: loads a 36-chunk area of `World`-
+  driven terrain around spawn, spawns a physics-driven player resting
+  on the generated surface, drives the camera from arrow-key look input
+  and WASD movement through `integrate_player`, raycasts from the
+  camera every frame, and mutates the world on edge-detected Interact
+  (break, `E`)/PlaceBlock (place, `F`) presses - remeshing and
+  re-uploading not just the edited chunk but any neighbor chunk sharing
+  the mutated block's boundary, so cross-chunk face culling stays
+  correct after an edit at a chunk seam.
+- New `LCU_VERIFY_BREAK_PLACE` env var: since this sandbox has no real
+  keyboard/mouse, synthesizes an Interact press at frame 3 and a
+  PlaceBlock press at frame 6, driving the exact same edge-detected
+  `InputState` code path a real key press would. Verified via a real
+  run: breaks a block, logs it, then the next raycast (now reaching one
+  block deeper) places a new block back at the exact same world
+  position - a genuine round-trip through mutate-world -> remesh ->
+  re-upload, not a mock of it. This closes brief section 80's slice 1
+  vertical slice (save/load already existed from Phase 3; persisting a
+  live session's edits to disk still has no trigger wired up - see
+  PROJECT_STATE.md "Known Limitations").
+- 39 new unit tests across `Raycast`/`Collision`/`PlayerPhysics`/
+  `FirstPersonCamera`/`MovementInput`. `VoxelTests` now at 125/125
+  passing (bgfx build) / 122/122 (non-bgfx build).
 
 ### Phase 3
 
