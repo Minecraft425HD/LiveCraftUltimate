@@ -80,6 +80,22 @@ if(LCU_BUILD_CLIENT AND LCU_ENABLE_BGFX)
         set(BGFX_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
     endif()
     FetchContent_MakeAvailable(bgfx.cmake)
+
+    if(LCU_BUILD_SHADER_TOOLS)
+        # bgfxToolUtils.cmake (bgfx_compile_shaders() and friends) is only
+        # auto-included when bgfx is consumed via find_package() against
+        # an installed package; we consume it via FetchContent, so pull it
+        # in explicitly. BGFX_SHADER_INCLUDE_PATH is likewise only set by
+        # bgfx's installed package config - set it ourselves to bgfx's own
+        # src/ dir, where bgfx_shader.sh (the common shader header every
+        # .sc file includes) lives.
+        include(${bgfx.cmake_SOURCE_DIR}/cmake/bgfxToolUtils.cmake)
+        # CACHE (not a plain set()) so this is visible from client/'s
+        # CMakeLists.txt too, not just here - CMake directory-variable
+        # scoping wouldn't otherwise carry a plain set() across sibling
+        # add_subdirectory() calls.
+        set(BGFX_SHADER_INCLUDE_PATH ${BGFX_DIR}/src CACHE PATH "bgfx shader include path" FORCE)
+    endif()
 endif()
 
 # Lua (scripting, Phase 9) and a compression library (save system, Phase 3)

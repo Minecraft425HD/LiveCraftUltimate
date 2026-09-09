@@ -1,7 +1,11 @@
 #pragma once
 
+#include <bgfx/bgfx.h>
+
 #include "lcu/core/types.h"
+#include "lcu/math/mat4.h"
 #include "lcu/platform/native_handle.h"
+#include "lcu/rendering/chunk_mesh_upload.h"
 
 namespace lcu::rendering {
 
@@ -32,9 +36,21 @@ class Renderer : public NonCopyable {
     // once per Renderer instance.
     bool init(const RendererDesc& desc);
 
-    // Clears view 0 to `rgba` and advances one bgfx frame. Returns the
-    // frame count bgfx reports, mainly useful for tests/logging.
-    u32 render_clear_frame(u32 rgba);
+    // Clears view 0 to `rgba` and marks it touched. Call once per frame,
+    // before any submit_chunk_mesh() calls, then end_frame() after.
+    void begin_frame(u32 clear_rgba);
+
+    // Draws one chunk mesh with the given program/transforms into view 0.
+    // No-op (logged at debug level would be noisy per-frame - silently
+    // skipped) if `mesh` has no geometry or `program` is invalid, both
+    // of which are legitimate states today (an empty chunk; no shader
+    // compiled because LCU_BUILD_SHADER_TOOLS is off - see BUILDING.md).
+    void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
+                            const math::Mat4& view, const math::Mat4& proj);
+
+    // Advances one bgfx frame. Returns the frame count bgfx reports,
+    // mainly useful for tests/logging.
+    u32 end_frame();
 
     void resize(u32 width, u32 height);
 

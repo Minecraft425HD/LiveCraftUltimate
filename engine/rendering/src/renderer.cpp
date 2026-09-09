@@ -49,14 +49,34 @@ bool Renderer::init(const RendererDesc& desc) {
     return true;
 }
 
-u32 Renderer::render_clear_frame(u32 rgba) {
+void Renderer::begin_frame(u32 clear_rgba) {
     LCU_ASSERT(initialized_);
 
-    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, rgba, 1.0f, 0);
+    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, clear_rgba, 1.0f, 0);
     bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
-    // touch(0) ensures view 0 executes its clear even though nothing has
-    // submitted a draw call to it yet - there is no geometry until Phase 2.
+    // touch(0) ensures view 0 executes its clear even when nothing submits
+    // a draw call to it this frame (e.g. an empty chunk, or no shader
+    // program compiled - see submit_chunk_mesh).
     bgfx::touch(0);
+}
+
+void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
+                                  const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj) {
+    LCU_ASSERT(initialized_);
+    if (!mesh.is_valid() || !bgfx::isValid(program)) {
+        return;
+    }
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setTransform(model.data());
+    bgfx::setVertexBuffer(0, mesh.vertex_buffer);
+    bgfx::setIndexBuffer(mesh.index_buffer);
+    bgfx::setState(BGFX_STATE_DEFAULT);
+    bgfx::submit(0, program);
+}
+
+u32 Renderer::end_frame() {
+    LCU_ASSERT(initialized_);
     return bgfx::frame();
 }
 

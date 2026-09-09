@@ -19,3 +19,30 @@ if(WIN32)
             $<TARGET_FILE_DIR:VoxelClient>
     )
 endif()
+
+# Compiled chunk shaders: only when shaderc was actually built
+# (LCU_BUILD_SHADER_TOOLS, opt-in - see BUILDING.md). Without this,
+# VoxelClient still runs fine; it just has no program to draw the
+# uploaded chunk mesh with (see chunk_mesh_upload.h).
+if(LCU_ENABLE_BGFX AND LCU_BUILD_SHADER_TOOLS AND TARGET bgfx::shaderc)
+    set(LCU_CHUNK_SHADER_OUTPUT_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/chunk)
+
+    bgfx_compile_shaders(
+        TYPE VERTEX
+        SHADERS shaders/vs_chunk.sc
+        VARYING_DEF shaders/varying.def.sc
+        OUTPUT_DIR ${LCU_CHUNK_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_CHUNK_VS_OUTPUTS
+    )
+    bgfx_compile_shaders(
+        TYPE FRAGMENT
+        SHADERS shaders/fs_chunk.sc
+        VARYING_DEF shaders/varying.def.sc
+        OUTPUT_DIR ${LCU_CHUNK_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_CHUNK_FS_OUTPUTS
+    )
+
+    add_custom_target(VoxelClientShaders DEPENDS ${LCU_CHUNK_VS_OUTPUTS} ${LCU_CHUNK_FS_OUTPUTS})
+    add_dependencies(VoxelClient VoxelClientShaders)
+    target_compile_definitions(VoxelClient PRIVATE LCU_HAS_CHUNK_SHADERS)
+endif()

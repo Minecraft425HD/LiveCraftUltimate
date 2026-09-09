@@ -1,6 +1,7 @@
 add_library(LcuRendering STATIC
     src/renderer.cpp
     src/chunk_mesh_upload.cpp
+    src/shader_program.cpp
 )
 add_library(Lcu::Rendering ALIAS LcuRendering)
 

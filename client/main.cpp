@@ -12,9 +12,11 @@
 #include "lcu/voxel/greedy_mesher.h"
 
 #if defined(LCU_ENABLE_BGFX)
+#include "lcu/math/mat4.h"
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/renderer.h"
+#include "lcu/rendering/shader_program.h"
 #endif
 
 namespace {
@@ -48,7 +50,7 @@ lcu::voxel::Chunk build_placeholder_chunk(lcu::voxel::BlockId stone) {
 }  // namespace
 
 int main() {
-    LCU_LOG_INFO("LiveCraftUltimate client starting (Phase 2: chunk -> greedy mesh -> GPU buffers)");
+    LCU_LOG_INFO("LiveCraftUltimate client starting (Phase 2: chunk -> greedy mesh -> GPU draw)");
 
     lcu::platform::WindowDesc desc;
     desc.title = "LiveCraftUltimate";
@@ -75,7 +77,7 @@ int main() {
     }
 #endif
 
-    // --- Chunk -> job-dispatched greedy mesh -> (bgfx) GPU upload ---
+    // --- Chunk -> job-dispatched greedy mesh -> (bgfx) GPU upload/draw ---
     lcu::voxel::BlockRegistry block_registry;
     lcu::voxel::BlockDefinition stone_def;
     stone_def.namespaced_id = "game:stone";
@@ -99,9 +101,25 @@ int main() {
     lcu::rendering::GpuChunkMesh gpu_mesh = lcu::rendering::upload_chunk_mesh_layer(chunk_mesh.opaque);
     LCU_LOG_INFO("Uploaded chunk mesh to GPU buffers: valid={} index_count={}", gpu_mesh.is_valid(),
                  gpu_mesh.index_count);
-    // No shader/draw-call submission yet - see chunk_mesh_upload.h and
-    // TASK_QUEUE.md. The buffers exist on the GPU but nothing draws them
-    // to the screen this frame.
+
+    // Only present when LCU_BUILD_SHADER_TOOLS compiled shaders into
+    // <exe_dir>/shaders/chunk (see client/CMakeLists.txt and BUILDING.md).
+    // "shaders/chunk" is relative to the current working directory, which
+    // every verification run in this repo has been the executable's own
+    // directory - a real asset system (brief section 33) will replace
+    // this raw path with an ID-based lookup once one exists.
+    bgfx::ProgramHandle chunk_program = BGFX_INVALID_HANDLE;
+#if defined(LCU_HAS_CHUNK_SHADERS)
+    chunk_program = lcu::rendering::load_chunk_program("shaders/chunk", "chunk");
+#endif
+    LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
+
+    const lcu::math::Mat4 model = lcu::math::Mat4::identity();
+    const lcu::math::Mat4 view =
+        lcu::math::Mat4::look_at({8.0f, 12.0f, 24.0f}, {8.0f, 0.0f, 8.0f}, {0.0f, 1.0f, 0.0f});
+    const lcu::f32 aspect =
+        static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
+    const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(1.0f, aspect, 0.1f, 500.0f);
 #endif
 
     lcu::platform::KeyboardInputBackend keyboard;
@@ -119,7 +137,9 @@ int main() {
         }
 
 #if defined(LCU_ENABLE_BGFX)
-        renderer.render_clear_frame(0x303030ff);
+        renderer.begin_frame(0x303030ff);
+        renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj);
+        renderer.end_frame();
 #endif
 
         const auto now = std::chrono::steady_clock::now();
@@ -139,6 +159,9 @@ int main() {
     }
 
 #if defined(LCU_ENABLE_BGFX)
+    if (bgfx::isValid(chunk_program)) {
+        bgfx::destroy(chunk_program);
+    }
     lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
 #endif
 
