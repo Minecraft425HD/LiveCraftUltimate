@@ -6,6 +6,8 @@
 
 #include "lcu/core/log.h"
 #include "lcu/debug/frame_stats.h"
+#include "lcu/items/inventory.h"
+#include "lcu/items/item_registry.h"
 #include "lcu/jobs/job_system.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
@@ -73,6 +75,12 @@ constexpr lcu::f32 kInteractRange = 6.0f;
 // re-upload pipeline, not a mock of it.
 constexpr lcu::u64 kVerifyBreakFrame = 3;
 constexpr lcu::u64 kVerifyPlaceFrame = 6;
+
+// Hotbar-sized (Minecraft-like); the rest of a real inventory (a
+// separate main storage grid, armor slots, ...) has no consumer yet -
+// nothing reads/writes them - so isn't built speculatively (brief
+// section 98).
+constexpr lcu::usize kInventorySlotCount = 9;
 
 lcu::physics::AABB make_player_aabb(lcu::math::Vec3 feet_position) {
     return lcu::physics::AABB{
@@ -148,6 +156,20 @@ int main() {
     stone_def.is_transparent = false;
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
+
+    // Block-break's first real item consumer (brief section 55): the
+    // item a broken "game:stone" block hands the player. Item drops go
+    // straight into the inventory rather than spawning a physical
+    // dropped-item world entity - that needs entities to exist first
+    // (Phase 6) - see DECISIONS.md.
+    lcu::items::ItemRegistry item_registry;
+    lcu::items::ItemDefinition stone_item_def;
+    stone_item_def.namespaced_id = "game:stone";
+    stone_item_def.display_name = "Stone";
+    stone_item_def.max_stack_size = 64;
+    const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
+
+    lcu::items::Inventory player_inventory(kInventorySlotCount);
 
     lcu::jobs::JobSystem job_system;
 
@@ -291,18 +313,33 @@ int main() {
                 for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
                     remesh_and_upload(neighbor);
                 }
+                // The broken block hands the player its item - block-break's
+                // first real item consumer (see DECISIONS.md). Only
+                // "game:stone" exists to break today, so this is a direct
+                // 1:1 mapping; a real block->item drop table is added once
+                // more than one droppable block exists (Phase 9-ish).
+                if (hit->block == stone_id) {
+                    const lcu::u32 leftover = player_inventory.add_item(item_registry, {stone_item_id, 1});
+                    if (leftover == 0) {
+                        LCU_LOG_INFO("Picked up 1 game:stone (inventory: {})",
+                                     player_inventory.count_item(stone_item_id));
+                    } else {
+                        LCU_LOG_INFO("Inventory full, game:stone drop lost");
+                    }
+                }
             } else {
                 LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
             }
         }
 
-        if (place_pressed && hit) {
+        if (place_pressed && hit && player_inventory.remove_item(stone_item_id, 1) == 1) {
             const lcu::voxel::BlockWorldCoord place_pos{
                 hit->world.x + static_cast<lcu::i64>(hit->normal.x),
                 hit->world.y + static_cast<lcu::i64>(hit->normal.y),
                 hit->world.z + static_cast<lcu::i64>(hit->normal.z),
             };
-            LCU_LOG_INFO("Placing block at world ({}, {}, {})", place_pos.x, place_pos.y, place_pos.z);
+            LCU_LOG_INFO("Placing block at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
+                         place_pos.z, player_inventory.count_item(stone_item_id));
             const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
             if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                 target->set_block(split.local.x, split.local.y, split.local.z, stone_id);
@@ -311,7 +348,8 @@ int main() {
                     remesh_and_upload(neighbor);
                 }
             } else {
-                LCU_LOG_DEBUG("Place target's chunk isn't loaded, ignoring");
+                LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
+                player_inventory.add_item(item_registry, {stone_item_id, 1});
             }
         }
 

@@ -15,6 +15,9 @@ add_executable(VoxelTests
     serialization/chunk_serializer_test.cpp
     physics/raycast_test.cpp
     physics/collision_test.cpp
+    items/item_registry_test.cpp
+    items/inventory_test.cpp
+    items/recipe_registry_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
