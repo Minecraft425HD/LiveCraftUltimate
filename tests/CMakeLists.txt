@@ -18,6 +18,7 @@ add_executable(VoxelTests
     items/item_registry_test.cpp
     items/inventory_test.cpp
     items/recipe_registry_test.cpp
+    ecs/registry_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
