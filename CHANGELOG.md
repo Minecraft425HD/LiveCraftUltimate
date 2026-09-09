@@ -2,7 +2,40 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5
+
+### Phase 5
+
+- `engine/items::{ItemRegistry, ItemDefinition, ItemId, kNoItemId}`:
+  namespaced, datadriven item registry mirroring `engine/voxel`'s
+  `BlockRegistry`/`BlockDefinition` pattern - `kNoItemId` (0) is always
+  "no item", auto-registered by the constructor. 5 unit tests.
+- `engine/items::{ItemStack, Inventory}`: fixed-size slot-based item
+  storage. `add_item` tops up existing matching partial stacks before
+  spilling into empty slots, respecting each item's
+  `ItemDefinition::max_stack_size`, and returns any leftover that
+  didn't fit; `remove_item`/`count_item` round it out. No UI/drag-drop
+  yet - no inventory screen exists to need one. 10 unit tests.
+- `engine/items::{RecipeRegistry, ShapedRecipe, ShapelessRecipe}`:
+  shaped recipes matched by trimming the *queried* crafting grid to its
+  bounding box and comparing cell-for-cell at a single orientation (no
+  mirroring - a documented simplification, no recipe has needed it
+  yet); shapeless recipes matched by exact ingredient-multiset
+  comparison (extra unrelated items in the grid correctly fail to
+  match, same as real crafting games). No crafting-UI caller yet -
+  tested standalone, same as `BlockRegistry`/`ItemRegistry` were before
+  their first real callers existed. 9 unit tests.
+- `VoxelClient`: block-break now has a real item consumer. Breaking
+  registers and drops one `game:stone` item into a new 9-slot player
+  `Inventory`; placing now consumes one stone item instead of being
+  free, refunding it if the placement target's chunk turns out not to
+  be loaded (a real edge case found and fixed while wiring this up).
+  Verified via the existing `LCU_VERIFY_BREAK_PLACE` headless hook:
+  break logs "Picked up 1 game:stone (inventory: 1)", place logs
+  "... (inventory: 0)".
+- 24 new unit tests across `ItemRegistry`/`Inventory`/`RecipeRegistry`.
+  `VoxelTests` now at 149/149 passing (bgfx build) / 146/146 (non-bgfx
+  build).
 
 ### Phase 4
 

@@ -52,7 +52,10 @@ verified and how.
 
 ## Phase 5 — Items + inventory + crafting
 
-- [ ] ItemRegistry, Inventory component, RecipeRegistry.
+- [x] `engine/items::ItemRegistry`/`ItemDefinition` - namespaced, datadriven, mirrors `BlockRegistry` (`kNoItemId` reserved like `kAirBlockId`). 5 unit tests.
+- [x] `engine/items::Inventory` - slot-based `ItemStack` storage, `add_item`/`remove_item`/`count_item`, respects each item's `max_stack_size`. 10 unit tests incl. partial-stack top-up before spilling into a new slot, and leftover-on-full behavior.
+- [x] `engine/items::RecipeRegistry` - shaped (bounding-box-trimmed, exact orientation) and shapeless (ingredient-multiset) recipe matching. 9 unit tests. No crafting-UI caller yet (tested standalone, same as `BlockRegistry`/`ItemRegistry` were before their first real callers existed).
+- [x] `VoxelClient`: breaking a block now hands the player a real `game:stone` item via `Inventory::add_item` (block-break's first item consumer); placing a block now consumes one from the inventory via `Inventory::remove_item`, refunding it if the target chunk turns out not to be loaded. Verified end-to-end via the existing `LCU_VERIFY_BREAK_PLACE` headless hook: break picks up 1 stone (inventory: 1), place consumes it (inventory: 0).
 
 ## Phase 6 — Entities + AI + lighting + day/night
 
@@ -144,13 +147,24 @@ pipeline, not a mock of it. This closes brief section 80's slice 1
 vertical slice (save/load already existed from Phase 3, just not yet
 wired to any trigger in `VoxelClient` - see Known Limitations).
 
-Next task to pick up: **Phase 5 — Items + inventory + crafting.**
-`ItemRegistry` (datadriven, namespaced like `BlockRegistry`), an
-`Inventory` component (slot-based, stack sizes), and `RecipeRegistry`
-(shaped/shapeless crafting matching). No consumer of items exists yet
-(nothing drops items on block break, no hand/hotbar) so this phase
-also has to decide - and record in DECISIONS.md - how block-break
-loosely connects to an item drop for the first time.
+Phase 5 is now functionally complete for what this sandbox can verify:
+`engine/items::{ItemRegistry, Inventory, RecipeRegistry}` are all
+implemented and unit tested, and `VoxelClient`'s break/place loop now
+runs on a real item economy - breaking a block adds a `game:stone` item
+to a 9-slot player `Inventory`, and placing one consumes it back out
+(refunded if the placement target turns out to be unloaded). Verified
+via the same `LCU_VERIFY_BREAK_PLACE` headless hook used for Phase 4:
+"Picked up 1 game:stone (inventory: 1)" then "Placing block ...
+(inventory: 0)".
+
+Next task to pick up: **Phase 6 — Entities + AI + lighting +
+day/night.** `engine/ecs` entity/component storage, sunlight + block
+light propagation/removal (local updates, not full recompute), simple
+AI, and a day/night cycle. `RecipeRegistry` still has no crafting-UI
+caller and item drops are a direct 1:1 block->item mapping rather than
+a real loot-table system - both acceptable simplifications recorded in
+DECISIONS.md/PROJECT_STATE.md, revisit once a real consumer (a crafting
+grid, more droppable block types) needs more than this.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real

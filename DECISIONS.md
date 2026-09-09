@@ -431,3 +431,64 @@ verification. Confirmed via a real run: a block is broken and logged,
 then the next frame's raycast (now reaching the block below) is used to
 place a new block back at the exact same world coordinate the broken
 one occupied.
+
+## 2026-09-09 — Block-break item drop: a direct mapping in VoxelClient, not a loot-table system
+
+**Context:** Phase 5 added `engine/items`, and block-break needed a
+real consumer of it (an `Inventory` nobody ever adds anything to is
+dead code the same way `RecipeRegistry` still is without a crafting-UI
+caller - see below). A general loot-table system (drop-rate rolls,
+multiple possible drops per block, tool-dependent drops, fortune-style
+multipliers) is exactly the kind of thing brief section 98 warns
+against building ahead of need: there is exactly one droppable block
+type (`game:stone`) in the entire game right now.
+
+**Decision:** `VoxelClient`'s break handler checks `hit->block ==
+stone_id` directly and calls `player_inventory.add_item(...)` with a
+hardcoded `game:stone` item stack of 1 - a plain `if`, not a registry
+or table. This is real (not a placeholder / not faked) but intentionally
+not generalized. Revisit once a second droppable block type exists and
+a hardcoded `if`/`else if` chain would actually start hurting -
+likely alongside Phase 9's block/item content expansion, where a
+proper `BlockId -> ItemStack[]` drop table (probably living on
+`BlockDefinition` itself, mirroring `light_emission`) becomes the
+obviously right shape because there's real data to shape it around.
+
+## 2026-09-09 — Shaped recipe matching: single orientation, no mirroring
+
+**Context:** `RecipeRegistry`'s shaped matching trims the queried
+crafting grid to its bounding box and compares it against a recipe's
+stored pattern. Some crafting systems (Minecraft's default recipe type
+among them) also try a horizontally-mirrored version of the pattern, so
+an asymmetric recipe matches regardless of which way the player happened
+to arrange it.
+
+**Decision:** Not implemented. Every recipe this project has actually
+needed so far (none shipped yet beyond unit-test fixtures) is either
+symmetric or doesn't care about position at all (shapeless), so mirror
+matching has no real recipe to validate it against - building it now
+would be guessing at behavior brief section 98 says not to guess at.
+Adding it later is a small, contained change (try `matches_shaped`
+again against a horizontally-flipped copy of the trimmed grid) if an
+asymmetric recipe design ever actually needs it.
+
+## 2026-09-09 — Failed block placement refunds the consumed inventory item
+
+**Context:** Wiring `Inventory` into `VoxelClient`'s place-block path,
+the natural order is "remove the item from inventory, then place the
+block" (so a short-circuiting `if` can bail out early if the player
+doesn't have the item). But the block placement itself can still fail
+afterward - specifically, if the raycast hit a block right at the edge
+of the loaded chunk area and the neighbor chunk the placement would
+land in isn't loaded, `world.chunk_at_mutable()` returns null.
+Left as originally written, that path would have consumed the player's
+stone item and placed nothing - a silent item loss caught by re-reading
+the code before considering the feature done, not by a test failing.
+
+**Decision:** The chunk-not-loaded branch calls
+`player_inventory.add_item(item_registry, {stone_item_id, 1})` to
+refund exactly what was taken. This keeps the inventory's item count
+accurate under a failure this build can actually hit (see "Known
+Limitations": `VoxelClient` loads a static area, so walking to its edge
+and aiming outward reproduces this today), rather than only under
+failures that happen to not matter yet.

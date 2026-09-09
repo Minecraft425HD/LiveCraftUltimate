@@ -9,48 +9,44 @@ commands).
 
 ## Current Phase
 
-Phase 0, 1, 2, 3 complete/functionally complete for what this headless
-sandbox can verify. Phase 4 (player + physics + interaction) is also
-functionally complete: voxel DDA raycasting, AABB collision/player
-physics, a first-person camera, and `VoxelClient` block break/place
-wired against a real multi-chunk `World` are all done and tested.
+Phase 0, 1, 2, 3, 4 complete/functionally complete for what this
+headless sandbox can verify. Phase 5 (items + inventory + crafting) is
+also functionally complete: `ItemRegistry`, `Inventory`,
+`RecipeRegistry`, and `VoxelClient`'s block-break/place now running on
+a real item economy are all done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 5 — Items +
-inventory + crafting.** `ItemRegistry`, an `Inventory` component, and
-`RecipeRegistry`.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 6 — Entities + AI
++ lighting + day/night.** `engine/ecs` entity/component storage,
+sunlight/block light propagation, simple AI, day/night cycle.
 
 ## Last Completed Task
 
-Phase 4: added `engine/physics::raycast` (voxel DDA / Amanatides & Woo
-against `World`), `engine/physics::{AABB, move_and_collide,
-integrate_player}` (axis-independent Y->X->Z collision resolution,
-gravity, jump, auto-step, a dedicated ground-probe fix for a real
-stationary-player grounding bug found and fixed before it ever
-shipped - see DECISIONS.md), and `engine/player::{FirstPersonCamera,
-movement_direction_from_input}` (yaw/pitch camera matching the existing
-`Mat4::look_at` convention, WASD-relative movement direction).
+Phase 5: added `engine/items::ItemRegistry`/`ItemDefinition`
+(namespaced, datadriven, mirrors `BlockRegistry` - `kNoItemId`
+auto-registered like `kAirBlockId`), `engine/items::Inventory`
+(slot-based `ItemStack` storage; `add_item` tops up existing partial
+stacks before spilling into empty slots, respecting each item's
+`max_stack_size`; `remove_item`/`count_item`), and
+`engine/items::RecipeRegistry` (shaped recipes matched via
+bounding-box-trimming the query grid then exact cell comparison;
+shapeless recipes matched via ingredient-multiset comparison - no
+mirrored-orientation matching, a documented simplification with no
+recipe needing it yet).
 
-Rewrote `client/main.cpp` from Phase 2's single hardcoded placeholder
-chunk to a real vertical slice: loads a 36-chunk area of `World`-driven
-terrain around spawn, spawns a physics-driven player resting on the
-generated surface, drives the camera from arrow-key look input
-(`LookUp/Down/Left/Right`, an interim stand-in for mouse-look - see
-DECISIONS.md) and WASD movement through `integrate_player`, raycasts
-from the camera every frame, and mutates the world on edge-detected
-Interact (break, `E`)/PlaceBlock (place, `F`) presses - remeshing and
-re-uploading not just the edited chunk but any neighbor chunk sharing
-the mutated block's boundary, so cross-chunk face culling stays
-correct. Verified via a real headless run using a synthetic input hook
-(`LCU_VERIFY_BREAK_PLACE`): breaks a block, logs it, then places a new
-block back at the exact same world position on the next raycast - a
-real round-trip through mutate-world -> remesh -> re-upload, not a
-mock.
+Gave block-break a real item consumer: `VoxelClient` now registers a
+"game:stone" item, spawns the player with a 9-slot `Inventory`, and
+breaking a block adds one stone item to it; placing a block now
+requires (and consumes) one stone item from the inventory instead of
+placing for free, refunding it if the placement target's chunk turns
+out not to be loaded (a real edge case caught and fixed while wiring
+this up, not just documented away). Verified end-to-end with the
+existing `LCU_VERIFY_BREAK_PLACE` headless hook: break logs "Picked up
+1 game:stone (inventory: 1)", place logs "... (inventory: 0)".
 
-12 new unit tests for camera/movement (39 total for raycast/collision/
-camera/movement across Phase 4). `ctest` 125/125 passing (bgfx build) /
-122/122 (non-bgfx build).
+24 new unit tests (`ItemRegistry`/`Inventory`/`RecipeRegistry`). `ctest`
+149/149 passing (bgfx build) / 146/146 (non-bgfx build).
 
 ## Build Status
 
@@ -64,16 +60,17 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 125/125 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 149/149 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 122/122 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 146/146 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
 ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
-PlayerPhysics/AABB, FirstPersonCamera, MovementInput. JobSystem
+PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
+Inventory, RecipeRegistry. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
@@ -119,9 +116,19 @@ None currently tracked.
   plumbing doesn't exist yet (see `engine/platform/include/lcu/platform/
   input.h` and DECISIONS.md). A real, usable interim control scheme, not
   a placeholder that does nothing.
-- No item drops on block break, no hotbar/hand - breaking a block simply
-  removes it; there is no item system yet to hand the player anything
-  (Phase 5).
+- Block-break's item drop is a direct, hardcoded 1:1 mapping
+  (`stone block -> stone item`) written into `VoxelClient` itself, not a
+  general loot-table/drop-rate system - there's only one droppable block
+  type to motivate one, so a real table is deferred until more than one
+  exists (see DECISIONS.md).
+- `Inventory` has no UI - no hotbar rendering, no drag-drop, no way for
+  a player to see or rearrange their items (needs `engine/ui`, a later
+  phase). `player_inventory` in `VoxelClient` is currently only
+  observable via log lines.
+- `RecipeRegistry` has no crafting-grid caller anywhere - implemented
+  and unit-tested standalone, same as `BlockRegistry`/`ItemRegistry`
+  were before `VoxelClient` used them. No crafting table/UI exists yet
+  to feed it a real grid.
 - Only one block type (`game:stone`) exists anywhere outside unit tests;
   placing a block always places stone.
 - `VoxelServer`'s tick loop is a placeholder (sleeps at 20 TPS, no actual
@@ -174,15 +181,19 @@ None currently tracked.
 
 ## Next Task
 
-1. Phase 5: `engine/items::ItemRegistry` — datadriven, namespaced item
-   definitions (same pattern as `BlockRegistry`).
-2. `engine/items::Inventory` component — slot-based storage, stack
-   sizes/limits.
-3. `engine/items::RecipeRegistry` — shaped/shapeless crafting matching
-   against an inventory/crafting grid.
-4. Decide (and record in DECISIONS.md) the first real connection between
-   block-break and an item - e.g. broken blocks drop a corresponding
-   item into the world/inventory - since nothing produces items yet.
+1. Phase 6: `engine/ecs` — a minimal entity/component storage (data-
+   oriented, matching the rest of the engine's style - see
+   ARCHITECTURE.md). No entities exist anywhere yet outside the player,
+   which today is just a `PlayerPhysicsState`/`FirstPersonCamera` pair
+   in `VoxelClient`, not an ECS entity.
+2. Sunlight + block light propagation/removal (local BFS-style updates
+   on placement/removal, not a full per-chunk recompute every edit) -
+   `BlockDefinition::light_emission` already exists (brief section 24)
+   but nothing reads it yet.
+3. Simple AI (a passive mob or two) and a day/night cycle driving the
+   sunlight propagation's light level over time.
+4. Update state docs and commit after each step, same as every prior
+   one.
 5. Update state docs and commit after each step, same as every prior
    one.
 
