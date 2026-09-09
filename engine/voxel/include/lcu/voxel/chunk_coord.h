@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
+
 #include "lcu/core/types.h"
 
 namespace lcu::voxel {
@@ -50,3 +53,22 @@ struct ChunkAndLocal {
 ChunkAndLocal world_to_chunk_and_local(BlockWorldCoord world, u32 edge_length);
 
 }  // namespace lcu::voxel
+
+namespace std {
+
+// Lets ChunkCoord be used directly as an unordered_map/unordered_set key
+// (engine/world::World keys its chunk table by ChunkCoord). A simple
+// mix of the three axes via odd multipliers - good enough distribution
+// for chunk coordinates clustered near the origin/player, not a
+// cryptographic hash.
+template <>
+struct hash<lcu::voxel::ChunkCoord> {
+    std::size_t operator()(const lcu::voxel::ChunkCoord& coord) const noexcept {
+        std::size_t h = static_cast<std::size_t>(static_cast<lcu::u32>(coord.x));
+        h = h * 486187739u + static_cast<std::size_t>(static_cast<lcu::u32>(coord.y));
+        h = h * 486187739u + static_cast<std::size_t>(static_cast<lcu::u32>(coord.z));
+        return h;
+    }
+};
+
+}  // namespace std

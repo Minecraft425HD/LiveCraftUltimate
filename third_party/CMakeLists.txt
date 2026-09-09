@@ -98,6 +98,25 @@ if(LCU_BUILD_CLIENT AND LCU_ENABLE_BGFX)
     endif()
 endif()
 
-# Lua (scripting, Phase 9) and a compression library (save system, Phase 3)
-# are intentionally not fetched yet — added when the systems that need them
-# land, per "no dependency without a concrete user" (brief section 66/86).
+# ---------------------------------------------------------------------------
+# zstd — chunk save-file compression (engine/serialization, Phase 3). See
+# DECISIONS.md for why zstd specifically. Static lib only; no CLI, no
+# tests, no multithreading support needed for a library-only consumer.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG        v1.5.7
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  build/cmake
+)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zstd)
+
+# Lua (scripting, Phase 9) is intentionally not fetched yet — added when
+# modding/scripting lands, per "no dependency without a concrete user"
+# (brief section 66/86).

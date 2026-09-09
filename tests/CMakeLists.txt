@@ -10,6 +10,9 @@ add_executable(VoxelTests
     voxel/block_registry_test.cpp
     voxel/greedy_mesher_test.cpp
     jobs/job_system_test.cpp
+    world/world_test.cpp
+    world/worldgen_test.cpp
+    serialization/chunk_serializer_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
