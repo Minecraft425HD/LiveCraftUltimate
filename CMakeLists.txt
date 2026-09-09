@@ -28,6 +28,7 @@ option(LCU_BUILD_SERVER "Build VoxelServer (headless, no GPU deps)" ON)
 option(LCU_BUILD_TOOLS  "Build tools/ executables" OFF)
 option(LCU_BUILD_TESTS  "Build VoxelTests (GoogleTest)" ON)
 option(LCU_ENABLE_BGFX  "Enable bgfx rendering backend for the client" ON)
+option(LCU_BUILD_SHADER_TOOLS "Build bgfx's shaderc shader compiler (needed to compile .sc shaders for actual draw calls, not just headless buffer-upload verification)" OFF)
 option(LCU_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 message(STATUS "LiveCraftUltimate configuration:")

@@ -67,9 +67,18 @@ if(LCU_BUILD_CLIENT AND LCU_ENABLE_BGFX)
         GIT_SHALLOW    TRUE
     )
     set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(BGFX_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
     set(BGFX_INSTALL OFF CACHE BOOL "" FORCE)
     set(BGFX_CUSTOM_TARGETS OFF CACHE BOOL "" FORCE)
+    if(LCU_BUILD_SHADER_TOOLS)
+        # shaderc alone (not geometryc/texturec - no use for those yet,
+        # and they'd add build time for nothing this repo needs).
+        set(BGFX_BUILD_TOOLS ON CACHE BOOL "" FORCE)
+        set(BGFX_BUILD_TOOLS_SHADER ON CACHE BOOL "" FORCE)
+        set(BGFX_BUILD_TOOLS_GEOMETRY OFF CACHE BOOL "" FORCE)
+        set(BGFX_BUILD_TOOLS_TEXTURE OFF CACHE BOOL "" FORCE)
+    else()
+        set(BGFX_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    endif()
     FetchContent_MakeAvailable(bgfx.cmake)
 endif()
 
