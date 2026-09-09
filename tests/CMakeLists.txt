@@ -2,6 +2,7 @@ include(GoogleTest)
 
 add_executable(VoxelTests
     core/log_test.cpp
+    core/quality_profile_test.cpp
     math/vec3_test.cpp
     math/mat4_test.cpp
     debug/frame_stats_test.cpp
@@ -54,7 +55,7 @@ target_link_libraries(VoxelTests PRIVATE
 # built when engine/platform exists (LCU_BUILD_CLIENT=ON), since that's
 # the only configuration LcuPlatform (and the SDL3 it links) is built in.
 if(TARGET Lcu::Platform)
-    target_sources(VoxelTests PRIVATE platform/input_test.cpp)
+    target_sources(VoxelTests PRIVATE platform/input_test.cpp platform/touch_input_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Platform)
 endif()
 
