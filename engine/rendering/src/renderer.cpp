@@ -44,6 +44,7 @@ bool Renderer::init(const RendererDesc& desc) {
 
     bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x303030ff, 1.0f, 0);
     bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+    bgfx::setDebug(BGFX_DEBUG_TEXT);
 
     initialized_ = true;
     return true;
@@ -78,6 +79,20 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
 u32 Renderer::end_frame() {
     LCU_ASSERT(initialized_);
     return bgfx::frame();
+}
+
+void Renderer::clear_debug_text() {
+    LCU_ASSERT(initialized_);
+    bgfx::dbgTextClear();
+}
+
+void Renderer::draw_debug_text(u16 x, u16 y, u8 color_attr, const std::string& text) {
+    LCU_ASSERT(initialized_);
+    // "%s" (not `text.c_str()` directly as the format string) - text may
+    // come from mod-registered content or other data callers don't fully
+    // control, and printf-family functions treat their format argument as
+    // executable-ish (a stray "%s"/"%n" inside it would misbehave).
+    bgfx::dbgTextPrintf(x, y, color_attr, "%s", text.c_str());
 }
 
 void Renderer::resize(u32 width, u32 height) {

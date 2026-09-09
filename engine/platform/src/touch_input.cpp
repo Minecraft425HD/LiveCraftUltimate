@@ -1,35 +1,13 @@
 #include "lcu/platform/touch_input.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
+
+#include "lcu/platform/touch_control_layout.h"
 
 namespace lcu::platform {
 
 namespace {
-
-struct ButtonRect {
-    Action action;
-    f32 x0, y0, x1, y1;  // normalized screen space, inclusive
-};
-
-// Bottom-right thumb cluster (Jump/Interact/PlaceBlock/Sprint/Crouch) plus a
-// top-right menu button (Inventory) - the standard mobile-FPS overlay
-// layout, kept out of both drag regions' way (movement is the left half,
-// look drag only starts where no button rect claims the touch first, see
-// update() below).
-constexpr std::array<ButtonRect, 6> kButtons = {{
-    {Action::Jump, 0.86f, 0.78f, 1.00f, 0.92f},
-    {Action::Interact, 0.72f, 0.78f, 0.86f, 0.92f},
-    {Action::PlaceBlock, 0.72f, 0.62f, 0.86f, 0.76f},
-    {Action::Sprint, 0.86f, 0.62f, 1.00f, 0.76f},
-    {Action::Crouch, 0.58f, 0.78f, 0.72f, 0.92f},
-    {Action::Inventory, 0.90f, 0.02f, 1.00f, 0.12f},
-}};
-
-bool inside(const ButtonRect& rect, f32 x, f32 y) {
-    return x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1;
-}
 
 const TouchPoint* find_touch(const std::vector<TouchPoint>& touches, u64 id) {
     auto it = std::find_if(touches.begin(), touches.end(), [id](const TouchPoint& t) { return t.id == id; });
@@ -70,8 +48,8 @@ void TouchInputBackend::update(const std::vector<TouchPoint>& active_touches, In
     // that action, regardless of drag state, and is removed from
     // consideration for starting/continuing a drag.
     for (usize i = 0; i < active_touches.size(); ++i) {
-        for (const ButtonRect& button : kButtons) {
-            if (inside(button, active_touches[i].x, active_touches[i].y)) {
+        for (const TouchButtonRect& button : kTouchButtonLayout) {
+            if (touch_button_contains(button, active_touches[i].x, active_touches[i].y)) {
                 state.set_down(button.action, true);
                 consumed[i] = true;
                 break;

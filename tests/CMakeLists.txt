@@ -74,6 +74,14 @@ if(TARGET Lcu::Rendering)
     target_link_libraries(VoxelTests PRIVATE Lcu::Rendering)
 endif()
 
+# Waveform/positional-audio math is pure logic (no real audio device
+# needed); only built alongside engine/audio (LCU_BUILD_CLIENT - see
+# engine/audio/CMakeLists.txt).
+if(TARGET Lcu::Audio)
+    target_sources(VoxelTests PRIVATE audio/waveform_test.cpp audio/positional_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Audio)
+endif()
+
 lcu_apply_common_options(VoxelTests)
 
 gtest_discover_tests(VoxelTests)

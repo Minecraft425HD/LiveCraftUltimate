@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <bgfx/bgfx.h>
 
 #include "lcu/core/types.h"
@@ -51,6 +53,19 @@ class Renderer : public NonCopyable {
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
     u32 end_frame();
+
+    // Real on-screen text (Phase 12, brief section 60's debug overlay/
+    // engine/ui): bgfx's built-in VGA-style debug-text character buffer
+    // (BGFX_DEBUG_TEXT, enabled in init()) - no font/texture-atlas
+    // renderer exists yet (see DECISIONS.md), but this is genuinely
+    // rendered on screen, not a log line. `x`/`y` are character-cell
+    // coordinates (8x16 cells from the top-left), not pixels. This is the
+    // only place besides submit_chunk_mesh() that touches bgfx per frame -
+    // engine/ui (and anything else) calls through here rather than
+    // including bgfx itself, keeping ARCHITECTURE.md's "only
+    // engine/rendering includes bgfx headers" rule intact.
+    void clear_debug_text();
+    void draw_debug_text(u16 x, u16 y, u8 color_attr, const std::string& text);
 
     void resize(u32 width, u32 height);
 
