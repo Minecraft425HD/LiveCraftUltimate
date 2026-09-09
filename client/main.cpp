@@ -14,6 +14,7 @@
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/replication_protocol.h"
 #include "lcu/core/log.h"
+#include "lcu/core/quality_profile.h"
 #include "lcu/debug/frame_stats.h"
 #include "lcu/ecs/registry.h"
 #include "lcu/items/inventory.h"
@@ -72,17 +73,24 @@ std::optional<lcu::u64> max_frames_from_env() {
 // worldgen.h).
 constexpr lcu::u32 kWorldSeed = 1337;
 
-// How far (in chunks, Chebyshev distance) around spawn to keep loaded.
-// Small and fixed for this vertical slice - real streaming driven by the
+// How far around spawn (in chunks) to keep loaded, and the vertical chunk
+// range (covering worldgen's height range: kBaseHeight=32 +/-
+// kHeightVariation=24 => world Y in [8,56]; edge length 16 means chunk Y
+// in [0,3] covers world Y in [0,63]). Real streaming driven by the
 // player's current position/view direction (brief section 22) is a later
 // refinement once World::update_streaming has a moving center to react to
-// every frame; this client loads a static area once at startup.
-constexpr lcu::i32 kLoadRadiusXZ = 1;
-// Vertical range of chunks to load, covering worldgen's height range
-// (kBaseHeight=32 +/- kHeightVariation=24 => world Y in [8,56]; edge
-// length 16 means chunk Y in [0,3] covers world Y in [0,63]).
-constexpr lcu::i32 kMinChunkY = 0;
-constexpr lcu::i32 kMaxChunkY = 3;
+// every frame; this client loads a static area once at startup, sized by
+// LCU_QUALITY_PROFILE (Phase 10, see lcu::core::QualityProfile) -
+// defaults to Desktop, which is numerically identical to this vertical
+// slice's original hardcoded 1/0/3 values.
+lcu::core::ChunkLoadSettings load_settings_from_env() {
+    const char* profile_name = std::getenv("LCU_QUALITY_PROFILE");
+    lcu::core::QualityProfile profile = lcu::core::QualityProfile::Desktop;
+    if (profile_name != nullptr) {
+        profile = lcu::core::parse_quality_profile(profile_name).value_or(lcu::core::QualityProfile::Desktop);
+    }
+    return lcu::core::chunk_load_settings_for(profile);
+}
 
 constexpr lcu::f32 kPlayerHalfWidth = 0.3f;   // 0.6-block-wide AABB, Minecraft-like
 constexpr lcu::f32 kPlayerHeight = 1.8f;
@@ -381,10 +389,12 @@ int main() {
 #endif
     };
 
-    LCU_LOG_INFO("Loading world (seed={}) around spawn...", kWorldSeed);
-    for (lcu::i32 cx = -kLoadRadiusXZ; cx <= kLoadRadiusXZ; ++cx) {
-        for (lcu::i32 cz = -kLoadRadiusXZ; cz <= kLoadRadiusXZ; ++cz) {
-            for (lcu::i32 cy = kMinChunkY; cy <= kMaxChunkY; ++cy) {
+    const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
+    LCU_LOG_INFO("Loading world (seed={}) around spawn (radius_xz={}, chunk_y=[{},{}])...", kWorldSeed,
+                 load_settings.radius_xz, load_settings.min_chunk_y, load_settings.max_chunk_y);
+    for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
+        for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
+            for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                 const lcu::voxel::ChunkCoord coord{cx, cy, cz};
                 world.load_chunk(coord);
                 compute_initial_light(coord);

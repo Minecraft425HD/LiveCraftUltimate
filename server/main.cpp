@@ -14,6 +14,7 @@
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/replication_protocol.h"
 #include "lcu/core/log.h"
+#include "lcu/core/quality_profile.h"
 #include "lcu/core/types.h"
 #include "lcu/ecs/registry.h"
 #include "lcu/items/item_registry.h"
@@ -66,9 +67,19 @@ std::optional<lcu::u64> max_ticks_from_env() {
 }
 
 constexpr lcu::u32 kWorldSeed = 1337;
-constexpr lcu::i32 kLoadRadiusXZ = 1;
-constexpr lcu::i32 kMinChunkY = 0;
-constexpr lcu::i32 kMaxChunkY = 3;
+
+// Sized by LCU_QUALITY_PROFILE (Phase 10, see lcu::core::QualityProfile) -
+// defaults to Desktop, numerically identical to this vertical slice's
+// original hardcoded 1/0/3 radius/min/max values.
+lcu::core::ChunkLoadSettings load_settings_from_env() {
+    const char* profile_name = std::getenv("LCU_QUALITY_PROFILE");
+    lcu::core::QualityProfile profile = lcu::core::QualityProfile::Desktop;
+    if (profile_name != nullptr) {
+        profile = lcu::core::parse_quality_profile(profile_name).value_or(lcu::core::QualityProfile::Desktop);
+    }
+    return lcu::core::chunk_load_settings_for(profile);
+}
+
 constexpr int kAiEntityCount = 3;
 constexpr lcu::u32 kAiRngSeed = 20260909;
 constexpr int kTicksPerSecond = 20;
@@ -146,9 +157,10 @@ int main(int argc, char** argv) {
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, stone_id);
     });
-    for (lcu::i32 cx = -kLoadRadiusXZ; cx <= kLoadRadiusXZ; ++cx) {
-        for (lcu::i32 cz = -kLoadRadiusXZ; cz <= kLoadRadiusXZ; ++cz) {
-            for (lcu::i32 cy = kMinChunkY; cy <= kMaxChunkY; ++cy) {
+    const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
+    for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
+        for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
+            for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                 world.load_chunk({cx, cy, cz});
             }
         }

@@ -1,6 +1,7 @@
 add_library(LcuCore STATIC
     src/log.cpp
     src/assert.cpp
+    src/quality_profile.cpp
 )
 add_library(Lcu::Core ALIAS LcuCore)
 
