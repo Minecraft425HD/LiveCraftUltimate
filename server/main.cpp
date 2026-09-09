@@ -16,6 +16,7 @@
 #include "lcu/core/log.h"
 #include "lcu/core/types.h"
 #include "lcu/ecs/registry.h"
+#include "lcu/items/item_registry.h"
 #include "lcu/network/connection.h"
 #include "lcu/network/udp_socket.h"
 #include "lcu/physics/collision.h"
@@ -23,6 +24,13 @@
 #include "lcu/voxel/chunk.h"
 #include "lcu/world/world.h"
 #include "lcu/world/worldgen.h"
+
+#if defined(LCU_ENABLE_SCRIPTING)
+#include "lcu/modding/event_bus.h"
+#include "lcu/modding/mod_loader.h"
+#include "lcu/modding/registry_bindings.h"
+#include "lcu/scripting/lua_state.h"
+#endif
 
 namespace {
 
@@ -107,6 +115,33 @@ int main(int argc, char** argv) {
     stone_def.is_transparent = false;
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
+
+    // Not otherwise used by the server yet (no inventories, no item drops -
+    // see NETWORKING.md "what's deferred": block edits aren't replicated).
+    // It exists here purely so mods share one namespaced id space across
+    // client and server (see the LCU_ENABLE_SCRIPTING block below) - a mod
+    // that calls register_item must not fail to load on the server just
+    // because nothing server-side reads the result yet.
+    lcu::items::ItemRegistry item_registry;
+
+#if defined(LCU_ENABLE_SCRIPTING)
+    // Mods run here too (Phase 9) so a mod's registered blocks/items exist
+    // in the server's authoritative registries, not just the client's -
+    // ids otherwise silently drift between the two (registries aren't
+    // synced over the wire yet, so both sides still have to load the same
+    // mods locally to agree). EventBus is constructed and exposed even
+    // though the server never calls emit_block_broken() itself (block
+    // edits aren't replicated) - a mod script is shared between client and
+    // server, so lcu.subscribe(...) has to exist on both or a mod that
+    // calls it unconditionally fails to load on whichever host lacks it.
+    lcu::scripting::LuaState mod_lua;
+    lcu::modding::EventBus mod_event_bus(mod_lua);
+    mod_event_bus.expose_to_lua();
+    lcu::modding::bind_block_registry(mod_lua, block_registry);
+    lcu::modding::bind_item_registry(mod_lua, item_registry);
+    lcu::modding::ModLoader mod_loader(mod_lua);
+    mod_loader.load_all("mods");
+#endif
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, stone_id);

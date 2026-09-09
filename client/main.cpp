@@ -39,6 +39,13 @@
 #include "lcu/world/world.h"
 #include "lcu/world/worldgen.h"
 
+#if defined(LCU_ENABLE_SCRIPTING)
+#include "lcu/modding/event_bus.h"
+#include "lcu/modding/mod_loader.h"
+#include "lcu/modding/registry_bindings.h"
+#include "lcu/scripting/lua_state.h"
+#endif
+
 #if defined(LCU_ENABLE_BGFX)
 #include "lcu/math/mat4.h"
 #include "lcu/platform/native_handle.h"
@@ -207,6 +214,21 @@ int main() {
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
+
+#if defined(LCU_ENABLE_SCRIPTING)
+    // Modding stack (Phase 9, brief section 84): one Lua VM shared by every
+    // loaded mod. Bound to block_registry/item_registry before mods load,
+    // so a mod's register_block/register_item calls land in the same
+    // registries the base game content above just populated - mod content
+    // and base content are otherwise indistinguishable (brief section 52).
+    lcu::scripting::LuaState mod_lua;
+    lcu::modding::EventBus mod_event_bus(mod_lua);
+    mod_event_bus.expose_to_lua();
+    lcu::modding::bind_block_registry(mod_lua, block_registry);
+    lcu::modding::bind_item_registry(mod_lua, item_registry);
+    lcu::modding::ModLoader mod_loader(mod_lua);
+    mod_loader.load_all("mods");
+#endif
 
     lcu::jobs::JobSystem job_system;
 
@@ -620,6 +642,9 @@ int main() {
                 for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
                     remesh_and_upload(neighbor);
                 }
+#if defined(LCU_ENABLE_SCRIPTING)
+                mod_event_bus.emit_block_broken(hit->world.x, hit->world.y, hit->world.z, old_id);
+#endif
                 // The broken block hands the player its item - block-break's
                 // first real item consumer (see DECISIONS.md). Only
                 // "game:stone" exists to break today, so this is a direct

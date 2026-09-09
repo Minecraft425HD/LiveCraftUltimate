@@ -9,6 +9,18 @@ target_link_libraries(VoxelClient PRIVATE
 
 lcu_apply_common_options(VoxelClient)
 
+# mods/ is loaded relative to the working directory at run time (same
+# convention as "shaders/chunk" below) - copy it next to the executable so
+# a build/<preset>/bin run picks up the repo's mods without needing cwd ==
+# repo root.
+if(LCU_BUILD_SCRIPTING)
+    add_custom_command(TARGET VoxelClient POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/mods
+            $<TARGET_FILE_DIR:VoxelClient>/mods
+    )
+endif()
+
 # SDL3 (shared lib build, see third_party/CMakeLists.txt) needs to be next
 # to the executable at run time on platforms without an rpath/install step
 # wired up yet.
