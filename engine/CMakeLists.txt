@@ -8,10 +8,11 @@
 
 add_subdirectory(core)
 add_subdirectory(math)
+add_subdirectory(debug)
 
 add_library(LcuEngineCore INTERFACE)
 add_library(Lcu::EngineCore ALIAS LcuEngineCore)
-target_link_libraries(LcuEngineCore INTERFACE Lcu::Core Lcu::Math)
+target_link_libraries(LcuEngineCore INTERFACE Lcu::Core Lcu::Math Lcu::Debug)
 
 if(LCU_BUILD_CLIENT)
     add_subdirectory(platform)

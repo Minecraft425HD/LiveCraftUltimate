@@ -1,6 +1,7 @@
 add_library(LcuPlatform STATIC
     src/window.cpp
     src/native_handle.cpp
+    src/input.cpp
 )
 add_library(Lcu::Platform ALIAS LcuPlatform)
 

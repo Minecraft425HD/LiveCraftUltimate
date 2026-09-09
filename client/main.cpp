@@ -1,7 +1,10 @@
+#include <chrono>
 #include <cstdlib>
 #include <optional>
 
 #include "lcu/core/log.h"
+#include "lcu/debug/frame_stats.h"
+#include "lcu/platform/input.h"
 #include "lcu/platform/window.h"
 
 #if defined(LCU_ENABLE_BGFX)
@@ -52,13 +55,33 @@ int main() {
     }
 #endif
 
+    lcu::platform::KeyboardInputBackend keyboard;
+    lcu::platform::InputState input;
+    lcu::debug::FrameStats frame_stats;
+
     const std::optional<lcu::u64> max_frames = max_frames_from_env();
     lcu::u64 frame = 0;
+    auto last_tick = std::chrono::steady_clock::now();
 
     while (window.pump_events()) {
+        keyboard.update(input);
+        if (input.is_down(lcu::platform::Action::Interact)) {
+            LCU_LOG_DEBUG("Interact held");
+        }
+
 #if defined(LCU_ENABLE_BGFX)
         renderer.render_clear_frame(0x303030ff);
 #endif
+
+        const auto now = std::chrono::steady_clock::now();
+        const lcu::f32 delta_seconds =
+            std::chrono::duration<lcu::f32>(now - last_tick).count();
+        last_tick = now;
+        if (const auto report = frame_stats.update(delta_seconds)) {
+            LCU_LOG_INFO("fps={:.1f} frame_ms={:.2f} total_frames={}", report->fps,
+                         report->avg_frame_ms, report->frame_count);
+        }
+
         ++frame;
         if (max_frames && frame >= *max_frames) {
             LCU_LOG_INFO("LCU_MAX_FRAMES reached ({} frames), exiting", frame);
