@@ -8,6 +8,7 @@ add_executable(VoxelTests
     voxel/chunk_test.cpp
     voxel/chunk_coord_test.cpp
     voxel/block_registry_test.cpp
+    voxel/greedy_mesher_test.cpp
     jobs/job_system_test.cpp
 )
 
