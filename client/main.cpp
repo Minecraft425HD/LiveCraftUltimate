@@ -13,6 +13,9 @@
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/replication_protocol.h"
+#include "lcu/audio/audio_engine.h"
+#include "lcu/audio/positional.h"
+#include "lcu/audio/waveform.h"
 #include "lcu/core/log.h"
 #include "lcu/core/quality_profile.h"
 #include "lcu/debug/frame_stats.h"
@@ -53,6 +56,7 @@
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
+#include "lcu/ui/debug_overlay.h"
 #endif
 
 namespace {
@@ -239,6 +243,16 @@ int main() {
 #endif
 
     lcu::jobs::JobSystem job_system;
+
+    // Real, own-created audio content (Phase 12, brief section 12's
+    // GPL-3.0/own-IP-only requirement) - a procedurally generated tone,
+    // not a checked-in asset (see waveform.h). Failing to open a device
+    // (no speakers in this sandbox, most CI) is expected and non-fatal -
+    // play() below is simply a no-op when that happens.
+    lcu::audio::AudioEngine audio_engine;
+    audio_engine.init();
+    const std::vector<lcu::f32> break_sound = lcu::audio::generate_sine_wave(220.0f, 0.08f, 44100);
+    const std::vector<lcu::f32> place_sound = lcu::audio::generate_sine_wave(330.0f, 0.08f, 44100);
 
     namespace protocol = game::systems::protocol;
     const char* connect_port_env = std::getenv("LCU_CONNECT_PORT");
@@ -511,6 +525,9 @@ int main() {
     lcu::platform::InputState input;
     lcu::platform::InputState previous_input;
     lcu::debug::FrameStats frame_stats;
+#if defined(LCU_ENABLE_BGFX)
+    lcu::f32 last_known_fps = 0.0f;  // updated only on frame_stats' periodic reports (see below); drives the on-screen debug overlay
+#endif
 
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
 
@@ -655,6 +672,16 @@ int main() {
 #if defined(LCU_ENABLE_SCRIPTING)
                 mod_event_bus.emit_block_broken(hit->world.x, hit->world.y, hit->world.z, old_id);
 #endif
+                {
+                    const lcu::math::Vec3 block_center{static_cast<lcu::f32>(hit->world.x) + 0.5f,
+                                                         static_cast<lcu::f32>(hit->world.y) + 0.5f,
+                                                         static_cast<lcu::f32>(hit->world.z) + 0.5f};
+                    const lcu::audio::StereoGain pan =
+                        lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
+                    const lcu::f32 attenuation =
+                        lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
+                    audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
+                }
                 // The broken block hands the player its item - block-break's
                 // first real item consumer (see DECISIONS.md). Only
                 // "game:stone" exists to break today, so this is a direct
@@ -691,6 +718,16 @@ int main() {
                 for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
                     remesh_and_upload(neighbor);
                 }
+                {
+                    const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
+                                                         static_cast<lcu::f32>(place_pos.y) + 0.5f,
+                                                         static_cast<lcu::f32>(place_pos.z) + 0.5f};
+                    const lcu::audio::StereoGain pan =
+                        lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
+                    const lcu::f32 attenuation =
+                        lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
+                    audio_engine.play(place_sound, {pan.left * attenuation, pan.right * attenuation});
+                }
             } else {
                 LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
                 player_inventory.add_item(item_registry, {stone_item_id, 1});
@@ -719,12 +756,16 @@ int main() {
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
             renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj);
         }
+        lcu::ui::draw_debug_overlay(renderer, renderer_desc.width, renderer_desc.height, last_known_fps);
         renderer.end_frame();
 #endif
 
         if (const auto report = frame_stats.update(delta_seconds)) {
             LCU_LOG_INFO("fps={:.1f} frame_ms={:.2f} total_frames={}", report->fps, report->avg_frame_ms,
                          report->frame_count);
+#if defined(LCU_ENABLE_BGFX)
+            last_known_fps = report->fps;
+#endif
         }
 
         ++frame;
