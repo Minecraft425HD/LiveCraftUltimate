@@ -10,10 +10,11 @@ add_subdirectory(core)
 add_subdirectory(math)
 add_subdirectory(debug)
 add_subdirectory(voxel)
+add_subdirectory(jobs)
 
 add_library(LcuEngineCore INTERFACE)
 add_library(Lcu::EngineCore ALIAS LcuEngineCore)
-target_link_libraries(LcuEngineCore INTERFACE Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel)
+target_link_libraries(LcuEngineCore INTERFACE Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel Lcu::Jobs)
 
 if(LCU_BUILD_CLIENT)
     add_subdirectory(platform)
