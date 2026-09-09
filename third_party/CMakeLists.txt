@@ -117,6 +117,36 @@ set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
 set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(zstd)
 
-# Lua (scripting, Phase 9) is intentionally not fetched yet — added when
-# modding/scripting lands, per "no dependency without a concrete user"
-# (brief section 66/86).
+# ---------------------------------------------------------------------------
+# Lua 5.4 — modding/scripting (engine/scripting, Phase 9). Official
+# lua.org source via its GitHub mirror; upstream ships no CMakeLists.txt
+# (it's a plain-Makefile C project) so FetchContent_Populate() just
+# fetches the source, and a library target is added by hand over
+# onelua.c (Lua's own supported "amalgamation" build: the whole
+# interpreter/library in one translation unit, compiled with -DMAKE_LIB
+# to get the embeddable library with no standalone main() - see
+# DECISIONS.md). No LUA_USE_LINUX/LUA_USE_POSIX etc. are defined, so
+# this builds in Lua's portable ANSI C mode on every platform without
+# per-OS flags - dynamic C-module loading (`package.loadlib`) is the
+# only capability that trades away, which nothing here needs (mods are
+# pure Lua, loaded by our own mod loader, not compiled Lua extensions).
+# ---------------------------------------------------------------------------
+if(LCU_BUILD_SCRIPTING)
+    FetchContent_Declare(
+        lua
+        GIT_REPOSITORY https://github.com/lua/lua.git
+        GIT_TAG        v5.4.7
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(lua)
+    if(NOT lua_POPULATED)
+        FetchContent_Populate(lua)
+    endif()
+
+    add_library(LuaLib STATIC ${lua_SOURCE_DIR}/onelua.c)
+    target_include_directories(LuaLib PUBLIC ${lua_SOURCE_DIR})
+    target_compile_definitions(LuaLib PRIVATE MAKE_LIB)
+    if(NOT WIN32)
+        target_link_libraries(LuaLib PUBLIC m)
+    endif()
+endif()

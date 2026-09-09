@@ -3,8 +3,10 @@ cmake_minimum_required(VERSION 3.24)
 project(LiveCraftUltimate
     VERSION 0.0.1
     DESCRIPTION "Cross-platform voxel sandbox game engine"
-    LANGUAGES CXX
+    LANGUAGES CXX C
 )
+# C is only needed for Lua's onelua.c (engine/scripting, Phase 9) - every
+# other target in this repo is C++. See third_party/CMakeLists.txt.
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +31,7 @@ option(LCU_BUILD_TOOLS  "Build tools/ executables" OFF)
 option(LCU_BUILD_TESTS  "Build VoxelTests (GoogleTest)" ON)
 option(LCU_ENABLE_BGFX  "Enable bgfx rendering backend for the client" ON)
 option(LCU_BUILD_SHADER_TOOLS "Build bgfx's shaderc shader compiler (needed to compile .sc shaders for actual draw calls, not just headless buffer-upload verification)" OFF)
+option(LCU_BUILD_SCRIPTING "Build engine/scripting (Lua modding support)" ON)
 option(LCU_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 message(STATUS "LiveCraftUltimate configuration:")
@@ -37,6 +40,7 @@ message(STATUS "  LCU_BUILD_SERVER     = ${LCU_BUILD_SERVER}")
 message(STATUS "  LCU_BUILD_TOOLS      = ${LCU_BUILD_TOOLS}")
 message(STATUS "  LCU_BUILD_TESTS      = ${LCU_BUILD_TESTS}")
 message(STATUS "  LCU_ENABLE_BGFX      = ${LCU_ENABLE_BGFX}")
+message(STATUS "  LCU_BUILD_SCRIPTING  = ${LCU_BUILD_SCRIPTING}")
 message(STATUS "  CMAKE_BUILD_TYPE     = ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CMAKE_SYSTEM_NAME    = ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  CMAKE_SYSTEM_PROCESSOR = ${CMAKE_SYSTEM_PROCESSOR}")

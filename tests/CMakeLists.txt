@@ -32,6 +32,18 @@ add_executable(VoxelTests
     replication/prediction_buffer_test.cpp
 )
 
+# Only built when LCU_BUILD_SCRIPTING pulled in Lua - see
+# engine/scripting/CMakeLists.txt and engine/modding/CMakeLists.txt.
+if(TARGET Lcu::Scripting)
+    target_sources(VoxelTests PRIVATE
+        scripting/lua_state_test.cpp
+        modding/event_bus_test.cpp
+        modding/registry_bindings_test.cpp
+        modding/mod_loader_test.cpp
+    )
+    target_link_libraries(VoxelTests PRIVATE Lcu::Scripting Lcu::Modding)
+endif()
+
 target_link_libraries(VoxelTests PRIVATE
     Lcu::EngineCore
     Lcu::Game
