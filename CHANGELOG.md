@@ -69,5 +69,19 @@ All notable changes to this project are recorded here, newest first.
   to motivate their face rules). Registry-driven opacity. Triangle
   winding verified via a geometric cross-product check against each
   triangle's stored normal. 8 new unit tests; `VoxelTests` now at 59/59
-  passing. Not yet dispatched through the job system (still synchronous)
-  and not yet uploaded to bgfx (still plain CPU-side vertex/index data).
+  passing.
+- `engine/rendering::upload_chunk_mesh_layer`/`destroy_gpu_chunk_mesh`:
+  real bgfx `VertexBuffer`/`IndexBuffer` creation from a `ChunkMeshLayer`
+  (`Lcu::Rendering` now links bgfx `PUBLIC` instead of `PRIVATE`, since
+  this header exposes bgfx types). No shader/draw-call yet - bgfx needs
+  a compiled shader program to draw anything, and no shader compiler is
+  built in this repo; documented as the explicit next step. 3 new unit
+  tests.
+- `VoxelClient` now exercises the full Phase 2 pipeline end-to-end:
+  registers a placeholder `"game:stone"` block, builds a flat ground
+  slab `Chunk`, dispatches `mesh_chunk_greedy` through
+  `engine/jobs::JobSystem` (its first real caller), and uploads the
+  result to GPU buffers. Verified via a real headless run: "Meshed
+  placeholder chunk: opaque 24 vertices / 36 indices" then "Uploaded
+  chunk mesh to GPU buffers: valid=true index_count=36". `VoxelTests`
+  now at 62/62 passing (bgfx build) / 59/59 (non-bgfx build).

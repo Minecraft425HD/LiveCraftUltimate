@@ -12,37 +12,40 @@ commands).
 Phase 0 complete. Phase 1 functionally complete for what this headless
 sandbox can verify. Phase 2 (voxel storage + chunk + meshing +
 rendering) in progress: chunk storage, coordinate math, BlockRegistry,
-job system, and greedy meshing are all done and tested. Meshing isn't
-dispatched through the job system yet (still called synchronously), and
-nothing uploads a `ChunkMesh` to the GPU yet (`engine/rendering` clears
-a frame but draws no geometry).
+job system, greedy meshing, and GPU buffer upload are all done, tested,
+and wired together end-to-end in `VoxelClient`. What's left before an
+actual on-screen cube: a compiled bgfx shader program and a real
+`bgfx::submit()` draw call.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: dispatch
-`mesh_chunk_greedy` through `engine/jobs::JobSystem` instead of calling
-it synchronously, then upload the resulting `ChunkMesh` into
-`engine/rendering`/bgfx as real vertex/index buffers for a
-textured-cube-on-screen milestone.
+None in flight. Next up per `TASK_QUEUE.md`: get a real draw call
+working. Needs a compiled bgfx shader program - most likely means
+enabling `BGFX_BUILD_TOOLS=ON` to build bgfx's `shaderc` and writing
+minimal `.sc` shaders; evaluate alternatives and record the choice in
+`DECISIONS.md` when this starts.
 
 ## Last Completed Task
 
-Added `engine/voxel::mesh_chunk_greedy<EdgeLength>()`: axis-sweep greedy
-meshing producing a renderer-agnostic `ChunkMesh` (opaque layer only for
-now - transparent/water layers exist structurally but stay empty until
-a transparent block exists to motivate their face rules, see
-DECISIONS.md). Registry-driven opacity, not a hardcoded air check.
+Wired the full Phase 2 pipeline together in `VoxelClient`: registers a
+placeholder `"game:stone"` block, builds a flat ground-slab `Chunk`,
+dispatches `mesh_chunk_greedy` through `engine/jobs::JobSystem` (its
+first real caller outside its own tests), and uploads the result into
+real bgfx GPU buffers via the new
+`engine/rendering::upload_chunk_mesh_layer`/`destroy_gpu_chunk_mesh`
+(bgfx is now a PUBLIC link dependency of `Lcu::Rendering`, since the new
+header exposes bgfx handle types).
 
-The trickiest part to get right without a display to check visually -
-triangle winding - is verified structurally: every emitted triangle's
-`cross(edge1, edge2)` is asserted to match its stored vertex normal. 8
-new unit tests (empty chunk, isolated block producing 6 unmerged faces,
-same-type blocks merging into fewer/larger quads, different-type blocks
-NOT merging across the boundary, a transparent neighbor culling
-identically to air, two transparent blocks producing no face, a
-boundary block, and a full 16x16 slab collapsing to exactly 6 quads).
-`ctest` 59/59 passing in both build configs; `VoxelServer` still
-SDL/bgfx-free per `ldd`.
+Verified via an actual headless run, not just unit tests: `"Meshed
+placeholder chunk: opaque 24 vertices / 36 indices"` then `"Uploaded
+chunk mesh to GPU buffers: valid=true index_count=36"` - real numbers
+from a real 256-block slab greedy-meshed to 6 quads. 3 new unit tests
+(empty layer, a manually-built quad, full chunk-to-GPU pipeline), each
+exercising its own headless bgfx init/shutdown cycle within one test
+binary (confirms bgfx supports that cleanly). `ctest` 62/62 passing
+(bgfx build) / 59/59 (non-bgfx build); `VoxelServer` still SDL/bgfx-free
+per `ldd`. No shader/draw-call yet - documented as the explicit next
+step, not skipped silently.
 
 ## Build Status
 
@@ -56,15 +59,16 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx` (or `build/dev-nobgfx`): 59/59 passing
-(Log, Vec3, Mat4, FrameStats, InputState, Chunk, ChunkStorage, ChunkCoord,
-BlockRegistry, GreedyMesher, JobSystem unit tests). JobSystem additionally
-verified via 200 repeated `ctest`-suite runs and 50 runs under
-ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing under
-ThreadSanitizer" for the exact commands. GreedyMesher's triangle winding
-is verified via a geometric cross-product check, not just vertex counts.
-No integration tests yet (no networking/save system exists yet to
-integration-test).
+`ctest --test-dir build/dev-bgfx`: 62/62 passing. `ctest --test-dir
+build/dev-nobgfx`: 59/59 passing (`ChunkMeshUpload.*` only exists in the
+bgfx build, since it needs a real bgfx context). Covers Log, Vec3, Mat4,
+FrameStats, InputState, Chunk, ChunkStorage, ChunkCoord, BlockRegistry,
+GreedyMesher, JobSystem, ChunkMeshUpload. JobSystem additionally verified
+via 200 repeated `ctest`-suite runs and 50 runs under ThreadSanitizer,
+zero failures/races - see `BUILDING.md` "Testing under ThreadSanitizer"
+for the exact commands. GreedyMesher's triangle winding is verified via
+a geometric cross-product check, not just vertex counts. No integration
+tests yet (no networking/save system exists yet to integration-test).
 
 ## Known Bugs
 
@@ -72,9 +76,10 @@ None currently tracked.
 
 ## Known Limitations
 
-- `VoxelClient` opens a window and clears a frame via bgfx but draws no
-  geometry yet — `mesh_chunk_greedy` produces a `ChunkMesh` in plain CPU
-  memory, but nothing uploads it into bgfx vertex/index buffers yet.
+- `VoxelClient` uploads a real chunk mesh into real bgfx GPU buffers but
+  never draws them — no shader program exists (no shader compiler
+  built), so there's no `bgfx::submit()` call yet. The buffers just sit
+  there, created and eventually destroyed, unused this frame.
 - No world, no gameplay of any kind yet — intentionally still
   pre-vertical-slice (see `ROADMAP.md` "Vertical slice targets"). Zero
   blocks are registered anywhere outside unit tests.
@@ -97,11 +102,6 @@ None currently tracked.
 - No palette/run-length compression on chunk storage — flat array only,
   deferred until Phase 3 world streaming gives real memory numbers to
   profile (brief section 76).
-- `engine/jobs::JobSystem` still has no real consumer wired in —
-  `mesh_chunk_greedy` is currently called directly/synchronously, not
-  dispatched as a job. It's exercised by its own unit tests plus now
-  `GreedyMesher`'s tests call it directly, but nothing submits it to the
-  scheduler yet.
 - `JobSystem` scheduling is a single mutex + condition variable, not
   lock-free or work-stealing — correctness-first, unoptimized (see
   DECISIONS.md). Fine at today's job volumes (its own tests); revisit
@@ -117,17 +117,20 @@ None currently tracked.
 - No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
   populated (quad-local, in block units) but nothing downstream
   consumes or checks them yet, since there's no atlas (Phase 12).
+- No shader program or draw call exists — `GpuChunkMesh` buffers are
+  created and destroyed but never submitted for rendering. bgfx's
+  shader compiler (shaderc) isn't built (`BGFX_BUILD_TOOLS=OFF`); no
+  `.sc` shader source exists anywhere in the repo yet.
 
 ## Next Task
 
-1. Phase 2: dispatch `mesh_chunk_greedy` through
-   `engine/jobs::JobSystem` (its first real consumer) instead of calling
-   it synchronously.
-2. Upload the resulting `ChunkMesh` into `engine/rendering`/bgfx as real
-   vertex/index GPU buffers, for a textured-cube-on-screen milestone.
-   Needs at least one real `BlockDefinition` registered somewhere for
-   `VoxelClient` to have something to mesh (a trivial "game:stone"
-   placeholder is enough — real content isn't the point yet).
+1. Phase 2: get a real draw call working. Requires a compiled bgfx
+   shader program - most likely path is enabling `BGFX_BUILD_TOOLS=ON`
+   to build `shaderc` and writing minimal `.sc` vertex/fragment shaders;
+   evaluate alternatives and record the choice in `DECISIONS.md` when
+   this starts.
+2. Wire `bgfx::submit()` into `VoxelClient`'s render loop for the
+   already-uploaded `GpuChunkMesh`.
 3. Update state docs and commit after each step, same as every prior one.
 
 ## Current Architecture
