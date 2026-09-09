@@ -2,7 +2,33 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11
+
+### Phase 11
+
+- Added Google Benchmark as a build dependency (FetchContent, pinned to
+  v1.9.1, opt-in alongside the rest of `tools/` via `LCU_BUILD_TOOLS`) -
+  same vendor/ecosystem as GoogleTest, no new justification needed for
+  exactly this job.
+- `tools/benchmark::VoxelBenchmarks`: 15 benchmark cases against real
+  engine code (not synthetic stand-ins) covering every area this
+  phase's task list named - voxel access (`ChunkStorage::set_block`/
+  `block_at`), chunk gen (`worldgen::generate_terrain_chunk`), meshing
+  (`mesh_chunk_greedy` on both a fully-solid and a checkerboard chunk),
+  lighting (`compute_block_light`/`compute_sky_light`), physics
+  (`raycast`/`move_and_collide`), serialization+compression
+  (`save_chunk_to_file`/`load_chunk_from_file` - zstd runs inside
+  these), network (a `Connection` `ReliableOrdered` send+deliver round
+  trip), and entity sim (`update_ai_wander` at 10/100/1000 entities).
+- Actually run in this sandbox, in both a `Development` build (flagged
+  "Library was built as DEBUG" by Google Benchmark itself, since this
+  project's `Development` build type applies no optimization flags) and
+  a `Release` build (clean run, real optimized numbers - see
+  `BUILD_STATUS.md`). One concrete finding: greedy-meshing a
+  checkerboard chunk (no face-merging possible) takes ~15x longer than
+  a fully-solid chunk of the same size (1.45ms vs. 94us) - real evidence
+  the algorithm's merging step does substantial work. No code changed
+  based on these numbers yet - nothing has shown a need to.
 
 ### Phase 10
 

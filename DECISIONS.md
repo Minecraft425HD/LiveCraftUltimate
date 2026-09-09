@@ -888,3 +888,34 @@ eventually use - carries its own weight without a hollow project shell
 wrapped around it. Revisit once an actual NDK/Xcode toolchain (a CI
 runner or a developer's machine) is available to build and exercise a
 real mobile project against.
+
+## 2026-09-09 — Google Benchmark for tools/benchmark, opt-in via LCU_BUILD_TOOLS
+
+**Context:** Phase 11 needs real, repeatable micro-benchmarks (brief
+section 96/98: measure before optimizing, no guessed numbers). A
+hand-rolled `std::chrono` timing loop would work but reinvents warm-up
+handling, statistical iteration-count selection, and reporting that a
+mature library already solves correctly.
+
+**Decision:** Google Benchmark, FetchContent-pinned to v1.9.1, mirroring
+exactly how GoogleTest is already fetched (same vendor, same pattern) -
+no new justification burden the way a less-established dependency would
+need. Declared inside `if(LCU_BUILD_TOOLS)` in `third_party/
+CMakeLists.txt`, so a default build (where `LCU_BUILD_TOOLS` is OFF)
+never fetches or builds it - matches `LCU_BUILD_SHADER_TOOLS`'s existing
+opt-in-for-extra-build-time precedent. `BENCHMARK_DOWNLOAD_DEPENDENCIES`
+is forced OFF - benchmark's own CMake would otherwise try to fetch a
+second, independently-pinned copy of GoogleTest for its own test suite,
+duplicating the one this repo already fetches; `BENCHMARK_ENABLE_TESTING`
+is also OFF since this repo doesn't run benchmark's own tests.
+
+Benchmarked the real engine functions client/server actually call
+(`mesh_chunk_greedy`, `compute_block_light`, `move_and_collide`, ...),
+not toy re-implementations - a benchmark against a fake stand-in would
+measure the wrong thing and give false confidence. Ran in both this
+project's default `Development` build type and a real `Release` build:
+`Development` sets no optimizer flags (it exists for fast
+iteration/debuggability, not speed), so Google Benchmark's own "Library
+was built as DEBUG" warning on that run is correct and expected, not a
+bug - the `Release` numbers are the ones worth comparing future changes
+against, and both are recorded in `BUILD_STATUS.md` for that reason.

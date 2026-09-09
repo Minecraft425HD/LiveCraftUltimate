@@ -94,7 +94,7 @@ verified and how.
 
 ## Phase 11 — Optimization + profiling
 
-- [ ] Benchmarks (tools/benchmark) for voxel access, chunk gen, meshing, lighting, physics, serialization, compression, network, entity sim.
+- [x] Benchmarks (`tools/benchmark`, `VoxelBenchmarks`, opt-in via `LCU_BUILD_TOOLS=ON`) using Google Benchmark (FetchContent-pinned, same vendor/pattern as GoogleTest) against the real engine functions - not synthetic stand-ins: `ChunkStorage::set_block`/`block_at` (voxel access), `worldgen::generate_terrain_chunk` (chunk gen), `mesh_chunk_greedy` on both a fully-solid and a checkerboard chunk (meshing - worst vs. best case for face-merging), `compute_block_light`/`compute_sky_light` (lighting), `raycast`/`move_and_collide` (physics), `save_chunk_to_file`/`load_chunk_from_file` (serialization, zstd compression happens inside these - no separate zstd micro-benchmark), `Connection` send+deliver on `ReliableOrdered` (network), and `update_ai_wander` at 10/100/1000 entities (entity sim). Real measured numbers from a `-DCMAKE_BUILD_TYPE=Release` build in this sandbox (4-core, 2.1GHz) are in `BUILD_STATUS.md`. One real finding from actually running these: the checkerboard-pattern chunk mesh takes ~15x longer than the fully-solid chunk (1.45ms vs. 94us) - greedy meshing's face-merging is doing real, measurable work, not just extra code with no effect.
 
 ## Phase 12 — UI + audio + content + polish
 
@@ -227,10 +227,21 @@ presets were re-verified structurally sound. Real Android Gradle/iOS
 Xcode project generation remains BLOCKED here - needs an actual
 toolchain, not attempted speculatively (see DECISIONS.md).
 
-Next task to pick up: **Phase 11 — Optimization + profiling.**
-Benchmarks (`tools/benchmark`) for voxel access, chunk gen, meshing,
-lighting, physics, serialization, compression, network, entity sim -
-real measurements from this sandbox's CPU, not guessed numbers.
+Phase 11 is now functionally complete for what this sandbox can verify:
+`VoxelBenchmarks` (Google Benchmark) exercises every system this
+phase's task list named, against real engine code, and was actually run
+in both a `Development` build (flagged by Google Benchmark itself as
+unoptimized - a real, useful observation about this project's own
+default build type) and a `Release` build (real optimized numbers, see
+`BUILD_STATUS.md`). No code changed as a result yet - this phase is
+about having real measurements to point at, not guessing at
+optimizations nothing has shown are needed (brief section 98 "no
+overengineering ahead of need" applies to premature optimization too).
+
+Next task to pick up: **Phase 12 — UI + audio + content + polish.**
+SDL3 audio backend + positional audio, and a UI system usable from
+desktop/gamepad/touch (the last of which now has a real `Action`
+source to draw controls for, per Phase 10's `TouchInputBackend`).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no

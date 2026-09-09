@@ -71,6 +71,7 @@ over `https://github.com/...` works; `https://api.github.com` is blocked
 | `engine/platform::TouchInputBackend` | **TESTED** (logic) / **UNTESTED** (real hardware) | Twin-virtual-stick touch-to-`Action` mapping (movement/look drags with a dead zone, fixed button rects for Jump/Interact/PlaceBlock/Sprint/Crouch/Inventory), writing into the same `InputState` `KeyboardInputBackend` does. 13 unit tests against synthetic `TouchPoint` lists. Not wired to any real `SDL_EVENT_FINGER_*` source yet - no touchscreen in this sandbox to test that against. |
 | `lcu::core::{QualityProfile, chunk_load_settings_for}` | **TESTED** | `Desktop` numerically matches this project's pre-existing hardcoded chunk-load radius/vertical range (zero behavior change by default); `MobileLow`/`MobileMedium`/`MobileHigh` each load strictly fewer chunks. 4 unit tests. Wired into both `VoxelClient`/`VoxelServer` via `LCU_QUALITY_PROFILE`; verified via real runs: default and an invalid env var value both still log "Loaded 36 chunks"; `mobile_low`/`mobile_high` log "Loaded 1 chunks"/"Loaded 27 chunks". |
 | Android build (`CMakePresets.json` `android-arm64`) | **BLOCKED here** | No Android NDK installed in this sandbox; preset requires `ANDROID_NDK_HOME`. Re-verified this phase: `cmake --preset android-arm64` reaches and fails only at Android's own NDK-detection step ("Neither the NDK or a standalone toolchain was found") - confirms the preset itself is structurally correct, not broken CMake. Untested, not un-buildable — needs a machine/CI runner with the NDK. No Gradle project/AndroidManifest.xml exists - deferred until there's a toolchain to build one against (see DECISIONS.md). |
+| `tools/benchmark::VoxelBenchmarks` | **TESTED** (built and run for real numbers) | Google Benchmark (FetchContent, opt-in via `LCU_BUILD_TOOLS=ON`), 15 benchmark cases against real engine code: `ChunkStorage::set_block`/`block_at`, `worldgen::generate_terrain_chunk`, `mesh_chunk_greedy` (solid + checkerboard chunks), `compute_block_light`/`compute_sky_light`, `raycast`/`move_and_collide`, `save_chunk_to_file`/`load_chunk_from_file` (zstd compression happens inside these), a `Connection` `ReliableOrdered` round trip, and `update_ai_wander` at 10/100/1000 entities. Run in both `Development` (this project's default - Google Benchmark itself flags it "Library was built as DEBUG", since `Development` applies no optimization flags) and `Release` (clean, optimized) configurations in this sandbox (4-core, 2.1GHz container) - see the Release numbers in the reproduce section below. This sandbox's numbers only - not representative of any other machine. |
 | iOS build (`CMakePresets.json` `ios`) | **BLOCKED here** | Requires Xcode on a macOS host; this sandbox is Linux. Untested. |
 | Windows (MSVC preset) | **BLOCKED here** | Requires a Windows host/toolchain; this sandbox is Linux. Untested. |
 | macOS preset | **BLOCKED here** | Requires a macOS host (Metal via bgfx); this sandbox is Linux. Untested. |
@@ -129,6 +130,27 @@ LCU_MAX_TICKS=3 LCU_QUALITY_PROFILE=mobile_high ./build/dev-nobgfx/bin/VoxelServ
 # NDK detection, not a broken preset):
 cmake --preset android-arm64
 # Expect: "CMake Error ... Neither the NDK or a standalone toolchain was found."
+
+# Exercises the real Phase 11 benchmark suite (opt-in, LCU_BUILD_TOOLS=ON;
+# a Release build gives meaningful numbers - Development applies no
+# optimization flags and Google Benchmark will warn about it):
+cmake -S . -B build/release-tools -G Ninja -DCMAKE_BUILD_TYPE=Release -DLCU_ENABLE_BGFX=OFF -DLCU_BUILD_TOOLS=ON
+cmake --build build/release-tools --target VoxelBenchmarks -j4
+./build/release-tools/bin/VoxelBenchmarks --benchmark_min_time=0.2s
+# Measured in this sandbox (4-core, 2.1GHz container), Release build:
+#   BM_ChunkStorage_SetBlock                  1445 ns   2.84G items/s
+#   BM_ChunkStorage_BlockAt                    600 ns   6.84G items/s
+#   BM_Worldgen_GenerateTerrainChunk         17934 ns
+#   BM_GreedyMesher_SolidChunk               94426 ns
+#   BM_GreedyMesher_CheckerboardChunk      1445606 ns   (~15x the solid case - no face merging possible)
+#   BM_Lighting_ComputeBlockLight            71538 ns
+#   BM_Lighting_ComputeSkyLight                9564 ns
+#   BM_Physics_Raycast                        1010 ns
+#   BM_Physics_MoveAndCollide                  288 ns
+#   BM_Serialization_SaveChunk               52578 ns
+#   BM_Serialization_LoadChunk               20047 ns
+#   BM_Network_ReliableOrderedRoundTrip        241 ns
+#   BM_EntitySim_UpdateAiWander/1000         20125 ns   (49.7M entity-updates/s)
 
 # Full build with bgfx (default; see BUILDING.md for required system packages):
 cmake -S . -B build/dev-bgfx -G Ninja -DCMAKE_BUILD_TYPE=Development

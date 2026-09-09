@@ -10,18 +10,18 @@ commands).
 
 ## Current Phase
 
-Phase 0 through 9 complete/functionally complete for what this headless
-sandbox can verify. Phase 10 (mobile + touch + Android + iOS) is also
-functionally complete for what this sandbox can verify:
-`engine/platform::TouchInputBackend` and `lcu::core::QualityProfile` are
-real, tested code; real Android/iOS project generation stays BLOCKED
-here for lack of a toolchain.
+Phase 0 through 10 complete/functionally complete for what this
+headless sandbox can verify. Phase 11 (optimization + profiling) is
+also functionally complete: `tools/benchmark`'s `VoxelBenchmarks` (real
+Google Benchmark micro-benchmarks against actual engine code) exists,
+builds, and was run for real numbers in both a Development and a
+Release configuration.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 11 — Optimization +
-profiling.** Benchmarks for voxel access, chunk gen, meshing, lighting,
-physics, serialization, compression, network, entity sim.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 12 — UI + audio +
+content + polish.** SDL3 audio backend + positional audio, and a UI
+system usable from desktop/gamepad/touch.
 
 ## Last Completed Task
 
@@ -74,6 +74,41 @@ actual NDK/Xcode toolchain to exercise it against.
 17 new unit tests (`TouchInputBackend`, `QualityProfile`/
 `parse_quality_profile`). `ctest` 291/291 passing (bgfx build) /
 288/288 (non-bgfx build).
+
+Phase 11: added `tools/benchmark` (`VoxelBenchmarks`), opt-in via the
+existing `LCU_BUILD_TOOLS` option, using Google Benchmark (FetchContent,
+pinned, same vendor/pattern as GoogleTest - `third_party/CMakeLists.txt`)
+against real engine functions, not synthetic stand-ins:
+`ChunkStorage::set_block`/`block_at` (voxel access),
+`worldgen::generate_terrain_chunk` (chunk gen), `mesh_chunk_greedy` on
+both a fully-solid and a checkerboard chunk (meshing), `compute_block_
+light`/`compute_sky_light` (lighting), `raycast`/`move_and_collide`
+(physics), `save_chunk_to_file`/`load_chunk_from_file` (serialization -
+zstd compression happens inside these, so no separate compression
+micro-benchmark was written), a `Connection` `ReliableOrdered` send +
+deliver round trip (network), and `update_ai_wander` at 10/100/1000
+entities (entity sim - `SetItemsProcessed` reports entities/sec).
+
+Actually run, twice: once in this project's default `Development` build
+type (Google Benchmark's own output flagged it "Library was built as
+DEBUG" - `Development` sets no optimization flags, a real and useful
+observation about the difference between this repo's dev build and an
+optimized one), and once in a real `-DCMAKE_BUILD_TYPE=Release` build
+(clean run, no such warning) - see `BUILD_STATUS.md` for the exact
+numbers from both. One concrete finding from the Release numbers: greedy
+meshing a checkerboard-pattern chunk (no two neighbors share a block
+type, so no face merging is possible) took ~15x longer than meshing a
+fully-solid chunk of the same size (1.45ms vs. 94us) - real, measured
+evidence that the algorithm's face-merging is doing substantial,
+non-decorative work. No code was changed based on these numbers this
+phase - the point was having real measurements to point at, not
+guessing at an optimization nothing has shown is actually needed (brief
+section 98 applies to premature optimization too, not just premature
+abstraction).
+
+15 benchmark cases covering all 8 named areas (not unit tests -
+`VoxelBenchmarks` is a separate opt-in executable; `ctest` counts are
+unchanged by this phase, still 291/291 / 288/288).
 
 ## Build Status
 
@@ -323,15 +358,29 @@ None currently tracked.
   deferred until there's an actual NDK/Xcode toolchain in the
   environment to build and run against (this sandbox is Linux-only, no
   GPU/display either way).
+- `VoxelBenchmarks` numbers are from this sandbox's specific CPU (a
+  4-core 2.1GHz container) — not representative of a real player's
+  desktop, a real Android/iOS device, or this sandbox's own numbers
+  under load from something else. They're a baseline to compare future
+  changes against, not an absolute performance claim.
+- No code was changed based on the Phase 11 benchmark numbers — nothing
+  has shown a need to yet (every measured time is well under a 16ms
+  frame budget at the tested scales). The benchmarks exist so a future
+  optimization has something real to point at, not because anything is
+  currently known to be slow.
+- Benchmark coverage is one representative scenario per system (e.g.
+  one fully-solid and one checkerboard chunk for meshing), not a sweep
+  across chunk fill ratios/entity counts/world sizes — broader coverage
+  is added if a specific scenario ever needs profiling, not
+  speculatively now.
 
 ## Next Task
 
-1. Phase 11: optimization + profiling. Benchmarks (`tools/benchmark`)
-   for voxel access, chunk gen, meshing, lighting, physics,
-   serialization, compression, network, entity sim — real measurements
-   from this sandbox's CPU.
-2. Phase 12: UI + audio + content + polish.
-3. Update state docs and commit after each step, same as every prior
+1. Phase 12: UI + audio + content + polish. SDL3 audio backend +
+   positional audio; a UI system usable from desktop/gamepad/touch (the
+   last of which now has a real input source via Phase 10's
+   `TouchInputBackend`).
+2. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture
