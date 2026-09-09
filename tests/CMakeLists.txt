@@ -27,6 +27,8 @@ add_executable(VoxelTests
     network/connection_test.cpp
     network/udp_socket_test.cpp
     network/loopback_integration_test.cpp
+    replication/position_interpolator_test.cpp
+    replication/prediction_buffer_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
