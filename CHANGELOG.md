@@ -2,7 +2,41 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10
+
+### Phase 10
+
+- `engine/platform::TouchInputBackend`: maps a frame's active finger
+  touches onto the existing `Action`/`InputState` abstraction
+  `KeyboardInputBackend` already drives - a twin-virtual-stick layout
+  (movement drag on the screen's left half, look drag on the right,
+  both dead-zone-thresholded into the existing discrete Move*/Look*
+  actions) plus fixed button rects for Jump/Interact/PlaceBlock/Sprint/
+  Crouch/Inventory. `MovementInput`/`FirstPersonCamera`/the break-place
+  loop need zero changes - they only ever read `InputState`. Pure
+  logic, no SDL dependency. 13 new unit tests.
+- `lcu::core::{QualityProfile, chunk_load_settings_for,
+  parse_quality_profile}`: device performance tiers (MobileLow/
+  MobileMedium/MobileHigh/Desktop). Lives in `engine/core`, not
+  `engine/platform`, since `VoxelServer` needs it too and must stay
+  SDL/bgfx-free. `Desktop` matches this project's pre-existing
+  hardcoded chunk-load radius/vertical range exactly - `kLoadRadiusXZ`/
+  `kMinChunkY`/`kMaxChunkY` in `VoxelClient`/`VoxelServer` are now
+  computed from this instead. 4 new unit tests.
+- `VoxelClient`/`VoxelServer`: new `LCU_QUALITY_PROFILE` env var
+  selects a quality profile (falls back to `Desktop` for an
+  unrecognized value). Verified via real runs: default and an invalid
+  value both still log "Loaded 36 chunks" exactly as before this
+  phase; `mobile_low`/`mobile_high` log "Loaded 1 chunks"/"Loaded 27
+  chunks".
+- Re-verified `CMakePresets.json`'s `android-arm64`/`ios` presets:
+  `cmake --preset android-arm64` reaches and fails only at Android's
+  own NDK-detection step, confirming the preset is structurally sound.
+  No Gradle/Xcode project generated - deliberately deferred until an
+  actual toolchain exists to build/run one against (see DECISIONS.md).
+- `ctest` 291/291 passing (bgfx build) / 288/288 (non-bgfx build), up
+  from 274/274 / 271/271 - 17 new tests across `TouchInputBackend` and
+  `QualityProfile`/`parse_quality_profile`.
 
 ### Phase 9
 

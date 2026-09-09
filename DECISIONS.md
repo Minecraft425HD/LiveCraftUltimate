@@ -832,3 +832,59 @@ speculative one; the corresponding `ItemRegistry` was added to the
 server for the identical reason (its absence broke the same mod's
 `register_item` call the same way, caught first during this same
 verification pass).
+
+## 2026-09-09 — QualityProfile lives in engine/core, not engine/platform
+
+**Context:** Phase 10 needs a device-performance-tier concept (brief
+section 60's MOBILE_LOW/MEDIUM/HIGH) that scales how much world gets
+streamed. The obvious home is `engine/platform`, next to `InputState`/
+`TouchInputBackend` - except `engine/platform` is only built when
+`LCU_BUILD_CLIENT` is on, and `server/CMakeLists.txt` explicitly
+forbids `VoxelServer` from linking `Lcu::Platform` (see ARCHITECTURE.md
+"Server has zero GPU/window dependency", enforced and `ldd`-verified
+since Phase 7). `VoxelServer` needs the same chunk-load-radius scaling
+`VoxelClient` does - a dedicated server for a mobile-heavy player base
+plausibly wants smaller regions too - so a platform-gated home would be
+wrong.
+
+**Decision:** `lcu::core::QualityProfile`/`chunk_load_settings_for`/
+`parse_quality_profile` live in `engine/core` instead - the one module
+every target in this repo already links unconditionally. The type
+itself has nothing platform-specific about it (it's an enum and a
+struct of integers); only the *name* "quality profile" evokes
+`engine/platform`. `Desktop` is defined to numerically match this
+project's pre-existing hardcoded `kLoadRadiusXZ=1`/`kMinChunkY=0`/
+`kMaxChunkY=3` exactly, so introducing the whole profile system changes
+zero default behavior - confirmed via a real run showing "Loaded 36
+chunks" unchanged before and after this phase.
+
+## 2026-09-09 — No Android Gradle project / iOS Xcode project this phase
+
+**Context:** Phase 10 nominally includes "real Android Gradle/NDK
+project structure, real iOS Xcode project generation" (see
+`TASK_QUEUE.md`'s original phase description). This sandbox is
+Linux-only with no Android NDK and no Xcode/macOS host - `cmake
+--preset android-arm64` was actually run to confirm this, and fails
+exactly at CMake's own NDK-detection step, not from any error in this
+repo's CMake.
+
+**Decision:** Do not write a Gradle project (`build.gradle.kts`,
+`AndroidManifest.xml`, a `SDLActivity`-based entry point, NDK
+`CMakeLists.txt` glue beyond what already exists) or an Xcode project/
+scheme/`Info.plist` this phase. Both would be substantial, genuinely
+untestable code in this environment - not "harder to verify," but
+*impossible* to configure, build, or run here, meaning any bug in it
+(a wrong Gradle DSL call, a missing NDK ABI filter, a malformed
+Info.plist key) would go undetected indefinitely and could sit in the
+repository looking finished while being silently broken. That is
+precisely what brief section 96 ("never claim done beyond what was
+verified") and this project's running precedent (bgfx's real GPU
+backend, SDL relative-mouse-mode, chunk network streaming - all
+deferred at points where this sandbox genuinely cannot verify them)
+say not to do. What *is* real and delivered this phase - the
+`CMakePresets.json` entries (pre-existing, re-verified reachable) and
+the touch-input/quality-profile abstractions the mobile app would
+eventually use - carries its own weight without a hollow project shell
+wrapped around it. Revisit once an actual NDK/Xcode toolchain (a CI
+runner or a developer's machine) is available to build and exercise a
+real mobile project against.

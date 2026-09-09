@@ -88,9 +88,9 @@ verified and how.
 
 ## Phase 10 — Mobile + touch + Android + iOS
 
-- [ ] Real Android Gradle/NDK project structure, real iOS Xcode project generation. Only after CMakePresets.json android-arm64/ios presets have been exercised on an actual toolchain (this sandbox cannot; needs CI or a dev machine).
-- [ ] Touch input mapped through the same input-action abstraction as desktop.
-- [ ] Quality profiles (MOBILE_LOW/MEDIUM/HIGH).
+- [x] Touch input mapped through the same input-action abstraction as desktop: `engine/platform::TouchInputBackend` (twin-virtual-stick layout - movement drag on the left half of the screen, look drag on the right, fixed button rects for Jump/Interact/PlaceBlock/Sprint/Crouch/Inventory) writes into the same `InputState` `KeyboardInputBackend` does, so `MovementInput`/`FirstPersonCamera`/the break-place loop are unmodified and unaware of the input source. Pure logic, no SDL dependency (real finger events aren't available to wire up in this sandbox - see Known Limitations) - fully unit tested (13 tests) via synthetic `TouchPoint` lists.
+- [x] Quality profiles (MOBILE_LOW/MEDIUM/HIGH, plus Desktop): `lcu::core::QualityProfile`/`chunk_load_settings_for` (in `engine/core`, not `engine/platform`, since `VoxelServer` needs it too and must stay SDL/bgfx-free). `Desktop` matches this project's pre-existing hardcoded chunk-load radius/vertical-range exactly (zero behavior change by default); each Mobile tier trims both, down to a single chunk for `MobileLow`. Wired into both `VoxelClient` and `VoxelServer` via a new `LCU_QUALITY_PROFILE` env var. 4 unit tests, plus verified via real runs: default (`Desktop`, and an unrecognized `LCU_QUALITY_PROFILE` value falling back to it) still logs "Loaded 36 chunks" exactly as before; `mobile_low`/`mobile_high` log "Loaded 1 chunks"/"Loaded 27 chunks" respectively.
+- [ ] Real Android Gradle/NDK project structure, real iOS Xcode project generation. `CMakePresets.json`'s `android-arm64`/`ios` presets were re-verified this phase - `cmake --preset android-arm64` correctly reaches and fails only at Android's own NDK-detection step ("Neither the NDK or a standalone toolchain was found"), confirming the preset itself is structurally sound, not broken CMake. Writing a full Gradle/Xcode project wrapper around it is deferred: this sandbox has no NDK/Xcode to build or run it against, and unverifiable native-mobile-project boilerplate is exactly the kind of code the project's own discipline (brief section 96, DECISIONS.md precedent - e.g. bgfx's real GPU backend, SDL relative-mouse-mode) says not to write speculatively. Needs an actual toolchain/CI runner.
 
 ## Phase 11 — Optimization + profiling
 
@@ -218,10 +218,19 @@ exact moment a real block is broken - the full register -> load ->
 subscribe -> emit loop exercised end to end. 27 new unit tests. `ctest`
 274/274 (bgfx build) / 271/271 (non-bgfx build).
 
-Next task to pick up: **Phase 10 — Mobile + touch + Android + iOS.**
-Architecture and `CMakePresets.json` entries only in this Linux-only
-sandbox - no Android NDK/Xcode toolchain here, so anything requiring one
-is documented as BLOCKED/UNTESTED rather than attempted.
+Phase 10 is now functionally complete for what this sandbox can verify:
+`engine/platform::TouchInputBackend` and `lcu::core::QualityProfile`
+are implemented and tested, both real, usable, tested code (not
+placeholders) despite the sandbox having no real touchscreen or mobile
+device to exercise them end to end. `CMakePresets.json`'s Android/iOS
+presets were re-verified structurally sound. Real Android Gradle/iOS
+Xcode project generation remains BLOCKED here - needs an actual
+toolchain, not attempted speculatively (see DECISIONS.md).
+
+Next task to pick up: **Phase 11 — Optimization + profiling.**
+Benchmarks (`tools/benchmark`) for voxel access, chunk gen, meshing,
+lighting, physics, serialization, compression, network, entity sim -
+real measurements from this sandbox's CPU, not guessed numbers.
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no

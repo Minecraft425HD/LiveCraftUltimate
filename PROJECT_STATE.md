@@ -10,69 +10,70 @@ commands).
 
 ## Current Phase
 
-Phase 0 through 8 complete/functionally complete for what this headless
-sandbox can verify. Phase 9 (modding + registries + Lua + events) is
-also functionally complete: `engine/scripting`'s sandboxed `LuaState`,
-`engine/modding`'s `EventBus`/registry bindings/`ModLoader`, and a real,
-verified `example_mod` are done and tested.
+Phase 0 through 9 complete/functionally complete for what this headless
+sandbox can verify. Phase 10 (mobile + touch + Android + iOS) is also
+functionally complete for what this sandbox can verify:
+`engine/platform::TouchInputBackend` and `lcu::core::QualityProfile` are
+real, tested code; real Android/iOS project generation stays BLOCKED
+here for lack of a toolchain.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 10 — Mobile + touch
-+ Android + iOS.** Architecture/CMake presets only in this Linux-only
-sandbox - honestly documented as BLOCKED/UNTESTED for anything that
-needs a real mobile toolchain.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 11 — Optimization +
+profiling.** Benchmarks for voxel access, chunk gen, meshing, lighting,
+physics, serialization, compression, network, entity sim.
 
 ## Last Completed Task
 
-Phase 9: embedded official upstream Lua 5.4.7 (`github.com/lua/lua`,
-which ships no CMake support) via its own `onelua.c` amalgamation built
-with `-DMAKE_LIB`, fetched through `FetchContent_Populate` since there's
-no `CMakeLists.txt` to `FetchContent_MakeAvailable`. Added
-`engine/scripting::LuaState` - an RAII Lua VM wrapper that only opens the
-base/table/string/math standard libraries (no `io`/`os`/`package`, so a
-mod script has no filesystem/process access by default) and forward-
-declares `lua_State` so `<lua.h>` is only ever `#include`d inside
-`engine/scripting`'s and `engine/modding`'s own `.cpp` files (mirrors the
-existing "only `engine/rendering` includes bgfx headers" rule).
+Phase 10: `engine/platform::TouchInputBackend` maps a frame's active
+finger touches onto the same `Action`/`InputState` abstraction
+`KeyboardInputBackend` already drives (brief section 28) - a
+twin-virtual-stick layout (movement drag on the screen's left half,
+look drag on the right, both dead-zone-thresholded into the existing
+discrete Move*/Look* actions) plus fixed button rects for
+Jump/Interact/PlaceBlock/Sprint/Crouch/Inventory. `MovementInput`/
+`FirstPersonCamera`/the break-place loop need zero changes to work with
+it - they only ever read `InputState`. Pure logic with no SDL
+dependency (there's no real touchscreen in this sandbox to wire a real
+`SDL_EVENT_FINGER_*` pump against, so that plumbing is honestly
+deferred - see Known Limitations), fully exercised by 13 unit tests
+against synthetic `TouchPoint` lists (single-finger drag, dead zone,
+two simultaneous drags, button-vs-drag disambiguation, release
+clearing state).
 
-Added `engine/modding`: `EventBus` (a named pub/sub bus - mod scripts
-call `lcu.subscribe("block_broken", fn)`, the engine calls
-`emit_block_broken(x, y, z, block_id)` at the real break site; an
-erroring handler is logged and skipped without blocking the rest),
-`bind_block_registry`/`bind_item_registry` (expose `register_block`/
-`register_item` to Lua, writing straight into the same `BlockRegistry`/
-`ItemRegistry` the base game populates - mod content and base content
-are otherwise indistinguishable), and `ModLoader` (enumerates immediate
-subdirectories of a mods directory, running each one's fixed
-`<mod>/init.lua` entry point; a mod that errors is logged and skipped,
-not fatal to the others). All bindings use the standard
-`lua_pushlightuserdata` + `lua_pushcclosure` upvalue technique to attach
-a stateful C++ object to Lua's C-style callback ABI.
+Added `lcu::core::QualityProfile`/`chunk_load_settings_for` (brief
+section 60's MOBILE_LOW/MEDIUM/HIGH, plus `Desktop`) - deliberately
+placed in `engine/core`, not `engine/platform`, since `VoxelServer`
+needs it too and `engine/platform` is gated behind `LCU_BUILD_CLIENT`
+and off-limits to the server (see ARCHITECTURE.md "Server has zero
+GPU/window dependency"). `Desktop` is numerically identical to this
+project's pre-existing hardcoded chunk-load radius/vertical-range
+(`kLoadRadiusXZ`/`kMinChunkY`/`kMaxChunkY`, now removed in favor of
+this), so nothing changes by default; each Mobile tier trims both,
+down to a single loaded chunk for `MobileLow`. Wired into both
+`VoxelClient` and `VoxelServer` via a new `LCU_QUALITY_PROFILE` env
+var (an unrecognized value falls back to `Desktop`, not a crash). 4
+unit tests plus real-run verification: default and an invalid env var
+value both still log "Loaded 36 chunks" exactly as before this phase;
+`LCU_QUALITY_PROFILE=mobile_low`/`mobile_high` log "Loaded 1 chunks"/
+"Loaded 27 chunks" respectively - a real behavioral change, not just a
+label, confirmed by an actual run.
 
-Wrote `mods/example_mod/init.lua` as a real, working mod: registers
-`example_mod:magic_stone`/`example_mod:magic_wand`, subscribes to
-`block_broken`, and logs every block it sees broken. Wired the full
-modding stack into both `VoxelClient` and `VoxelServer` (each
-constructs its own `LuaState`, binds its own registries, loads `mods/`
-at startup) - the server also gets an `EventBus` and `ItemRegistry`
-purely so a mod script shared between both hosts has a uniform API
-surface and doesn't fail to load on whichever host doesn't yet consume
-one of its calls (documented in `server/main.cpp`; block edits aren't
-replicated yet, so the server never itself calls `emit_block_broken`).
+Re-verified `CMakePresets.json`'s `android-arm64`/`ios` presets:
+`cmake --preset android-arm64` correctly reaches and fails only at
+Android's own NDK-detection step, confirming the preset itself parses
+and is structurally correct - not broken CMake, just genuinely blocked
+on a missing toolchain in this environment. A full Android Gradle
+project / iOS Xcode project wrapper around these presets is
+deliberately not written this phase - unverifiable native-mobile
+project boilerplate this sandbox can't build or run is exactly what
+the project's "never claim done beyond what's verified" discipline
+argues against (see DECISIONS.md); it's real work for whoever has the
+actual NDK/Xcode toolchain to exercise it against.
 
-Verified via real runs, not just unit tests: `VoxelServer` logs
-`[example_mod] registered block ... -> id 2`, `registered item ... -> id
-1`, `[example_mod] loaded`, `Loaded 1 mod(s) from 'mods'`; `VoxelClient`
-(under `LCU_VERIFY_BREAK_PLACE`) logs the same registration lines plus,
-on the synthesized break, `[example_mod] block_broken #1: block id 1
-broken at (0, 28, -1)` immediately after `Breaking block at world (0,
-28, -1)` - the event fires with the correct coordinates and block id at
-the exact moment a real block is broken.
-
-27 new unit tests (`LuaState`, `EventBus`, `RegistryBindings`,
-`ModLoader`). `ctest` 274/274 passing (bgfx build) / 271/271 (non-bgfx
-build).
+17 new unit tests (`TouchInputBackend`, `QualityProfile`/
+`parse_quality_profile`). `ctest` 291/291 passing (bgfx build) /
+288/288 (non-bgfx build).
 
 ## Build Status
 
@@ -86,14 +87,15 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 274/274 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 291/291 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 271/271 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 288/288 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
-real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
-Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
+real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
+InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
+BlockRegistry, GreedyMesher, JobSystem,
 ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
@@ -296,17 +298,40 @@ None currently tracked.
   infinite loop hangs the host process); resource-limiting a Lua VM is
   deferred until a real need (untrusted third-party mods, not just this
   repo's own `example_mod`) exists.
+- `TouchInputBackend` has no real input source wired up — nothing in
+  `VoxelClient` calls it yet, and there's no `SDL_EVENT_FINGER_*` pump
+  in `engine/platform::Window` to feed it real touches from (this
+  sandbox has no touchscreen to test that against anyway). The
+  touch-to-`Action` mapping logic itself is real and unit tested; only
+  the "read real hardware touches and call `update()`" wiring is
+  missing.
+- Button/drag-region layout in `TouchInputBackend` is a fixed set of
+  normalized-screen-space rectangles, not configurable/skinnable, and
+  has no on-screen visual representation (no `engine/ui` yet to draw
+  the virtual joystick/buttons a player would actually see) — a player
+  would currently be dragging/tapping blind.
+- `QualityProfile` only controls chunk-load radius/vertical range so
+  far — no render-distance-vs-loaded-distance split (both are the same
+  number today), no texture/shadow/particle quality tiers, since none
+  of those systems have more than one quality level to choose between
+  yet (no texture atlas, no shadows, no particles).
+- Android/iOS: only `CMakePresets.json` entries exist and were
+  re-verified structurally reachable (`android-arm64` fails only at
+  NDK detection, as expected without one installed). No Gradle project,
+  no `AndroidManifest.xml`, no Xcode project/Info.plist, no mobile
+  entry point wiring `SDL_main`/touch events on either platform — all
+  deferred until there's an actual NDK/Xcode toolchain in the
+  environment to build and run against (this sandbox is Linux-only, no
+  GPU/display either way).
 
 ## Next Task
 
-1. Phase 10: mobile/touch/Android/iOS. Architecture and `CMakePresets.json`
-   entries only — this Linux-only sandbox has no Android NDK/Xcode
-   toolchain, so anything requiring one is documented as BLOCKED/UNTESTED
-   here, not attempted.
-2. Phase 11: optimization + profiling once Phase 10's architecture work
-   is settled.
-3. Phase 12: UI + audio + content + polish.
-4. Update state docs and commit after each step, same as every prior
+1. Phase 11: optimization + profiling. Benchmarks (`tools/benchmark`)
+   for voxel access, chunk gen, meshing, lighting, physics,
+   serialization, compression, network, entity sim — real measurements
+   from this sandbox's CPU.
+2. Phase 12: UI + audio + content + polish.
+3. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture
