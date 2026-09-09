@@ -13,6 +13,8 @@ add_executable(VoxelTests
     world/world_test.cpp
     world/worldgen_test.cpp
     serialization/chunk_serializer_test.cpp
+    physics/raycast_test.cpp
+    physics/collision_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE

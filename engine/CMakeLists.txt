@@ -13,11 +13,12 @@ add_subdirectory(voxel)
 add_subdirectory(jobs)
 add_subdirectory(world)
 add_subdirectory(serialization)
+add_subdirectory(physics)
 
 add_library(LcuEngineCore INTERFACE)
 add_library(Lcu::EngineCore ALIAS LcuEngineCore)
 target_link_libraries(LcuEngineCore INTERFACE
-    Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel Lcu::Jobs Lcu::World Lcu::Serialization
+    Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel Lcu::Jobs Lcu::World Lcu::Serialization Lcu::Physics
 )
 
 if(LCU_BUILD_CLIENT)
