@@ -71,7 +71,12 @@ verified and how.
 
 ## Phase 8 — Replication + prediction + interpolation
 
-- [ ] Client-side prediction + reconciliation, remote entity interpolation, interest management, chunk network streaming + compression.
+- [x] Client-side prediction + reconciliation: `engine/replication::PredictionBuffer<State, Input>` (generic; predicts immediately, replays pending inputs on top of a server correction). Wired into `VoxelClient`/`VoxelServer` for real player movement - server runs the same physics per `PlayerInput` it receives and reports back via `PlayerCorrection`.
+- [x] Remote entity interpolation: `engine/replication::PositionInterpolator` (buffered timestamped samples, linear interpolation at a small render delay, no extrapolation). Wired into `VoxelClient`: when connected, AI entities are rendered from server `EntityState` samples through this instead of being simulated locally.
+- [x] Interest management: `VoxelServer` filters each client's `EntityState` broadcast to entities within `kInterestRadius` of that client's own position - real filtering logic (see NETWORKING.md for why it isn't visibly exercised yet in this small a world).
+- [ ] Chunk network streaming + compression - deferred: needs message fragmentation (a compressed chunk doesn't fit in one UDP datagram) which `engine/network::Connection` doesn't implement yet. See DECISIONS.md/NETWORKING.md.
+- [x] `game::systems::protocol`: shared client/server wire messages (`Welcome`, `Heartbeat`, `EntityState`, `PlayerInput`, `PlayerCorrection`), 11 unit tests.
+- [x] Real two-process multiplayer verification: `VoxelClient` connects to a running `VoxelServer` over real loopback UDP - Welcome received, remote AI positions interpolated, player input sent and a server correction received and reconciled.
 
 ## Phase 9 — Modding + registries + Lua + events
 
@@ -179,23 +184,39 @@ sockets with deliberately simulated packet loss) and a real two-process
 run: a standalone Python UDP client received a genuine Welcome message
 and live Heartbeats from a running `VoxelServer`.
 
-Next task to pick up: **Phase 8 — Replication + prediction +
-interpolation.** Client-side prediction + reconciliation, remote entity
-interpolation, interest management, chunk network streaming +
-compression. This is the phase that finally connects `VoxelClient` to
-`VoxelServer` over the transport Phase 7 built - `VoxelClient` still
-runs entirely single-player/local today, with no network code of its
-own at all.
+Phase 8 is now functionally complete for what this sandbox can verify:
+`engine/replication::{PredictionBuffer, PositionInterpolator}` are
+implemented, tested, and wired into a real `VoxelClient`<->`VoxelServer`
+connection (`LCU_CONNECT_PORT`) - client-side prediction with
+server-reconciliation for the local player, server-driven AI rendered
+through client-side interpolation instead of local simulation, and
+per-client interest-managed entity broadcasts. Verified via a real
+two-process run: a `VoxelClient` connected to a running `VoxelServer`
+over loopback UDP, received a genuine Welcome, rendered all 3 remote AI
+entities via real interpolation, and had its player position
+predicted-then-reconciled against the server's authoritative correction.
+Chunk network streaming/compression is explicitly deferred (needs
+message fragmentation `engine/network::Connection` doesn't have yet -
+see NETWORKING.md), and block edits still aren't replicated at all - see
+NETWORKING.md "What's deferred" for the complete list.
+
+Next task to pick up: **Phase 9 — Modding + registries + Lua + events.**
+Add a Lua dependency (decision recorded when this starts - see
+DECISIONS.md), expand registries (Block/Item/Entity/Biome/Recipe/
+Structure/Sound/Command) to be genuinely mod-extensible (not just
+hardcoded `game:*` entries), an event system, a mod loader, and
+`example_mod` per brief section 91.
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
 crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
 a loot-table system; lighting is single-chunk scoped (no cross-chunk
-bleed); `World::update_streaming` still isn't called by `VoxelClient`
-(a static area is loaded once at startup); `engine/network`'s reliable
-channel has no RTT estimation/congestion control, and its server
-connection model has no authentication - see
-NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
+bleed); `World::update_streaming` still isn't called by either
+`VoxelClient` or `VoxelServer` (a static area is loaded once at
+startup); `engine/network`'s reliable channel has no RTT
+estimation/congestion control, and its server connection model has no
+authentication; chunk data and block edits aren't replicated over the
+network yet - see NETWORKING.md/DECISIONS.md/PROJECT_STATE.md for each.
 
 **Not done, and out of scope for this sandbox regardless of what's
 built next**: confirming what any of this actually looks like on a real

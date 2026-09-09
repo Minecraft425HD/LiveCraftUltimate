@@ -658,3 +658,78 @@ revisit once player identity (an account/profile system) exists to
 authenticate against at all - there's nothing to check credentials
 against yet, so building an auth handshake now would be securing a door
 with nothing behind it.
+
+## 2026-09-09 — Chunk streaming deferred: fragmentation prerequisite
+
+**Context:** `engine/serialization::chunk_serializer` already produces
+zstd-compressed chunk bytes (Phase 3) - reusing it to send a chunk to a
+connecting client looked, at first glance, like a small Phase 8 addition
+(the compression work is already done). It isn't: a compressed 16^3
+chunk is realistically a few KB, and `engine/network::kMaxDatagramSize`
+is 1200 bytes - a single chunk doesn't fit in one UDP datagram.
+`Connection` has no concept of "one logical message split across
+several packets and reassembled in order," only whole-packet
+channels.
+
+**Decision:** Not implemented this phase. Building message fragmentation
+correctly (splitting, numbering fragments, detecting a complete set,
+reassembling, handling a fragment lost mid-transfer) is a real,
+independent protocol feature - the kind of thing worth getting right
+with its own focused test coverage, the same rigor already given to
+`Connection`'s ack/retransmit logic, not bolted on hastily as a means to
+an unrelated end (chunk streaming). Both `VoxelClient` and `VoxelServer`
+currently generate their own local copy of the world from the same
+hardcoded seed instead, which is sufficient for this phase's actual
+goal (proving prediction/interpolation/interest-management work over a
+real connection) without needing chunk data to cross the wire at all.
+Revisit when fragmentation is built for its own sake (a natural
+Phase 8-follow-up or Phase 9 item), then chunk streaming becomes a
+straightforward consumer of it.
+
+## 2026-09-09 — Server-authoritative player physics trusts client dt (clamped)
+
+**Context:** `VoxelServer` now runs real physics
+(`apply_gravity`/`integrate_player`) per `PlayerInput` it receives,
+using the `dt` the client itself reports for that input. A more
+rigorous authoritative server would derive its own timestep from
+message arrival timing rather than trusting a client-supplied number at
+all (a malicious client could report a huge `dt` to move far in one
+input).
+
+**Decision:** Clamp `dt` to `kMaxAcceptedInputDt` (0.25s) rather than
+building real server-side input-timing derivation or a full movement
+validator (speed/acceleration limits, raycasting the claimed path
+against solid blocks, etc.). The clamp closes the most obvious abuse
+(an absurd single-frame jump) with one line; the deeper anti-cheat
+problem (a client that sends many small, individually-plausible but
+cumulatively-wrong inputs) is real and unaddressed, appropriate for a
+sandbox with no untrusted network exposure and not yet for a public
+deployment - see `PROJECT_STATE.md` "Known Limitations". Revisit once
+there's an actual adversarial testing need (a real deployment, or
+Phase 9's modding surface making server trust boundaries matter more).
+
+## 2026-09-09 — VoxelClient doesn't yet use the server's replicated world seed
+
+**Context:** `VoxelServer`'s `Welcome` message carries a `world_seed` -
+the intent (see `ROADMAP.md`'s vertical-slice thinking) is that a
+connecting client should generate the *same* world the server is
+running, from that seed, rather than assuming both sides happen to
+agree on a hardcoded constant. `VoxelClient`'s current structure builds
+its `World` (and loads/meshes/lights every starting chunk) well before
+the main loop - and thus well before any network round-trip to receive
+a `Welcome` could possibly complete.
+
+**Decision:** Not restructured this phase. `VoxelClient` still calls its
+own compile-time `kWorldSeed` (1337) for `World` construction, and
+merely logs the received `Welcome.world_seed` to confirm the message
+itself decodes correctly - a real, verified round-trip of the *message*,
+just not yet acted on. Both client and server hardcode the same 1337
+today, so there is no observable mismatch to motivate the restructuring
+under real testing pressure yet. Deferring `World` construction until
+after a network round-trip is a real, somewhat invasive structural
+change (every piece of `VoxelClient` startup that currently runs
+synchronously and unconditionally would need to become conditional on
+"networked or not, and if networked, has Welcome arrived yet") - proportionate
+to do once there's an actual reason two peers' seeds would differ (e.g.
+Phase 9 server-side world configuration a client can't already guess),
+not preemptively.

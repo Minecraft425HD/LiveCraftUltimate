@@ -2,7 +2,57 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8
+
+### Phase 8
+
+- `engine/replication::PositionInterpolator`: buffers timestamped
+  position samples and linearly interpolates between them for a
+  slightly-delayed render time, clamping (never extrapolating) past
+  either end of the buffer. 9 new unit tests.
+- `engine/replication::PredictionBuffer<State, Input>`: generic
+  client-side prediction + server reconciliation - `predict_and_record`
+  applies an input immediately and remembers it; `reconcile` discards
+  acknowledged history and replays what's left on top of an
+  authoritative correction. Generic over any pure step function, not
+  tied to player movement. 6 new unit tests, including one wiring the
+  real `lcu::physics::PlayerPhysicsState`/`integrate_player` as the
+  concrete step function with a hand-computed expected result.
+- `game::systems::protocol`: the shared application-level messages
+  `VoxelClient` and `VoxelServer` both use now
+  (`Welcome`/`Heartbeat`/`EntityState`/`PlayerInput`/`PlayerCorrection`),
+  replacing `VoxelServer`'s own local copies from Phase 7 - one
+  definition instead of two that could silently drift apart. 11 new
+  unit tests (round-trips, negative floats, malformed-payload
+  rejection).
+- `VoxelServer`: tracks one real `lcu::physics::PlayerPhysicsState` per
+  connected client now, driven by received `PlayerInput` messages
+  through the same physics `VoxelClient` runs (server-authoritative
+  movement, not an echo), with a `dt` ceiling clamp as a light
+  anti-cheat measure. Broadcasts a per-client `EntityState` filtered by
+  a real interest-management distance check (`kInterestRadius`), and a
+  periodic `PlayerCorrection`.
+- `VoxelClient`: new `LCU_CONNECT_PORT` env var enables a real networked
+  mode (loopback IPv4 only) alongside the existing single-player path,
+  which is completely unaffected when unset. When networked: connects,
+  logs the real `Welcome`; predicts local player movement immediately
+  via `PredictionBuffer` and reconciles against `PlayerCorrection`;
+  stops simulating AI locally and instead renders each remote entity's
+  `EntityState` samples through its own `PositionInterpolator`.
+- Verified via a real two-process run: an actual `VoxelClient` connected
+  to an actual `VoxelServer` over real loopback UDP, received a genuine
+  Welcome (`world_seed=1337 tick_rate=20`), rendered all 3 remote AI
+  entities' interpolated positions matching the server's live
+  simulation, and had its player position predicted, sent, and
+  reconciled - the full loop exercised end to end, not simulated.
+  Single-player mode reverified byte-for-byte unchanged in both build
+  configs.
+- New `NETWORKING.md` sections documenting the replication protocol,
+  prediction/reconciliation flow, interest management, and what's
+  deferred (chunk streaming - needs message fragmentation `Connection`
+  doesn't have; block-edit replication).
+- 26 new unit tests. `VoxelTests` now at 247/247 passing (bgfx build) /
+  244/244 (non-bgfx build).
 
 ### Phase 7
 

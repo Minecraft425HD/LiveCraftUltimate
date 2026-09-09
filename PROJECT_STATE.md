@@ -10,51 +10,62 @@ commands).
 
 ## Current Phase
 
-Phase 0, 1, 2, 3, 4, 5, 6 complete/functionally complete for what this
-headless sandbox can verify. Phase 7 (networking + dedicated server) is
-also functionally complete: `engine/network`'s four-channel transport
-and `VoxelServer`'s real world/AI simulation + network handshake are
-done and tested.
+Phase 0 through 7 complete/functionally complete for what this headless
+sandbox can verify. Phase 8 (replication + prediction + interpolation)
+is also functionally complete: `engine/replication`'s prediction buffer
+and position interpolator, the shared `game::systems::protocol` wire
+messages, and a real, verified `VoxelClient`<->`VoxelServer` multiplayer
+connection are done and tested.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: **Phase 8 — Replication +
-prediction + interpolation.** Client-side prediction/reconciliation,
-remote entity interpolation, interest management, chunk network
-streaming/compression - the phase that finally connects `VoxelClient` to
-`VoxelServer` over the Phase 7 transport (`VoxelClient` still has no
-network code of its own today).
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 9 — Modding +
+registries + Lua + events.** A Lua dependency, genuinely mod-extensible
+registries, an event system, a mod loader, and `example_mod`.
 
 ## Last Completed Task
 
-Phase 7: added `engine/network` - a UDP transport (`UdpSocket`,
-cross-platform POSIX/Winsock, non-blocking) with a hand-rolled
-ack/retransmit protocol (`Connection`) implementing all four channel
-semantics `ARCHITECTURE.md` commits to (`UnreliableUnordered`,
-`UnreliableSequenced`, `ReliableUnordered`, `ReliableOrdered`) - see the
-new `NETWORKING.md` for the wire format. `Connection` never touches a
-socket directly (it only produces/consumes raw byte packets), so the
-protocol logic - ordering, deduplication, retransmission timing - is
-fully unit-tested with zero real I/O, on top of real loopback-socket
-integration tests, including one that deliberately drops the first real
-UDP datagram sent and confirms retransmission recovers it.
+Phase 8: added `engine/replication::PositionInterpolator` (buffers
+timestamped position samples, linearly interpolates at a small render
+delay behind the latest arrival, clamps rather than extrapolates past
+it) and `engine/replication::PredictionBuffer<State, Input>` (generic
+client-side prediction + server reconciliation: applies an input
+immediately and records it, then on a later authoritative correction
+discards acknowledged history and replays what's left on top of it).
+Both fully unit-tested, the latter against both a hand-verifiable plain
+value instantiation and a real `PlayerPhysicsState`/`integrate_player`
+instantiation with hand-computed expected results.
 
-`VoxelServer` was rewritten from the Phase 0 sleep-only placeholder to a
-real simulation loop: generates/loads a real `World`, runs the same
-wandering-AI simulation as `VoxelClient` (`engine/ecs` +
-`game::systems::update_ai_wander`), and listens for real UDP
-connections - a peer is "connected" the moment the server receives any
-datagram from its address, receives a real `ReliableOrdered` Welcome
-message (world seed + tick rate), and gets a per-tick
-`UnreliableSequenced` Heartbeat (tick number + live entity count) from
-then on. Verified via a real two-process test: a standalone Python UDP
-client connects to a running `VoxelServer` and receives a genuine
-Welcome (`world_seed=1337 tick_rate=20`) followed by live heartbeats
-(`tick=8 entity_count=3`) - the server's own log corroborates. `ldd`
-reconfirmed `VoxelServer` still carries zero SDL/bgfx dependency.
+Added `game::systems::protocol` - the shared wire-message definitions
+(`Welcome`, `Heartbeat`, `EntityState`, `PlayerInput`, `PlayerCorrection`)
+`VoxelClient` and `VoxelServer` both use, so the two executables can't
+independently drift out of sync. `VoxelServer` now tracks one real
+`PlayerPhysicsState` per connected client, driven by received
+`PlayerInput` messages through the same physics `VoxelClient` runs, and
+periodically reports it back via `PlayerCorrection`; its `EntityState`
+broadcast is filtered per-client by a real interest-management distance
+check. `VoxelClient` gained a `LCU_CONNECT_PORT`-gated networked mode
+(loopback IPv4 only for now, single-player behavior completely
+unchanged when unset): predicts local player movement immediately and
+reconciles against the server's corrections, and renders server-driven
+AI entities through client-side interpolation instead of simulating
+them locally.
 
-46 new unit/integration tests. `ctest` 221/221 passing (bgfx build) /
-218/218 (non-bgfx build).
+Verified via a real two-process run: a `VoxelClient` process connected
+to a running `VoxelServer` process over real loopback UDP, received a
+genuine Welcome (`world_seed=1337 tick_rate=20`), rendered all 3 remote
+AI entities' positions through real interpolation, and had its player
+position predicted, sent, and reconciled against the server's
+authoritative correction - the entire prediction -> network ->
+correction -> reconciliation loop actually exercised end to end.
+Single-player mode reverified byte-for-byte unchanged in both build
+configs. Chunk network streaming and block-edit replication are
+explicitly deferred - see NETWORKING.md.
+
+26 new unit tests (`PositionInterpolator`, `PredictionBuffer`,
+`ReplicationProtocol`), plus the real two-process multiplayer run above
+(not an automated `ctest` case - see BUILD_STATUS.md for the reproduce
+steps). `ctest` 247/247 passing (bgfx build) / 244/244 (non-bgfx build).
 
 ## Build Status
 
@@ -68,11 +79,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 221/221 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 247/247 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 218/218 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 244/244 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, Vec3, Mat4, FrameStats, InputState,
 Chunk, ChunkStorage, ChunkCoord, BlockRegistry, GreedyMesher, JobSystem,
@@ -80,18 +91,21 @@ ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
 AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
-UdpSocket, Address, LoopbackIntegration. JobSystem
+UdpSocket, Address, LoopbackIntegration, PositionInterpolator,
+PredictionBuffer, ReplicationProtocol. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
 winding is verified via a geometric cross-product check, not just
-vertex counts. Real integration tests now exist for networking
+vertex counts. Real integration tests exist for networking
 (`LoopbackIntegration.*`: two `Connection`s over real loopback UDP
-sockets, one deliberately dropping the first real datagram sent);
-save/load is still unit-tested only, not yet exercised through a full
-server-save/client-load cycle since there's no server-side world-save
-trigger yet, and `VoxelClient`/`VoxelServer` don't call it either - see
-Known Limitations.
+sockets, one deliberately dropping the first real datagram sent) and,
+outside the automated suite, a real two-process `VoxelClient`<->
+`VoxelServer` multiplayer run (see BUILD_STATUS.md); save/load is still
+unit-tested only, not yet exercised through a full server-save/
+client-load cycle since there's no server-side world-save trigger yet,
+and `VoxelClient`/`VoxelServer` don't call it either - see Known
+Limitations.
 
 ## Known Bugs
 
@@ -163,9 +177,23 @@ None currently tracked.
   target pick), no combat/interaction. The 3 spawned entities in
   `VoxelClient` have no visual representation (no mesh/model system for
   entities yet) - only logged positions.
-- `VoxelClient` has no network code at all - it still runs entirely
-  single-player/local, never connecting to a `VoxelServer`. Replication,
-  client-side prediction, and interpolation are Phase 8's job.
+- `VoxelClient`'s networked mode (`LCU_CONNECT_PORT`) only connects to
+  `127.0.0.1` - there is no hostname/IP-string parser anywhere yet, and
+  no in-game "connect to a server" UI. A real "join by address" flow is
+  later work.
+- Chunk data and block edits aren't replicated over the network at all.
+  Both a connected client and the server generate their own independent
+  copy of the world from the same hardcoded seed; break/place still only
+  mutates the client's own local `World`, invisible to the server or any
+  other client. Chunk streaming specifically needs message
+  fragmentation `engine/network::Connection` doesn't implement yet (a
+  compressed chunk doesn't fit in one UDP datagram) - see NETWORKING.md.
+- `VoxelClient`'s networked mode logs the `Welcome` message's
+  `world_seed` but doesn't actually use it for world generation - it
+  still calls its own compile-time `kWorldSeed`, which by construction
+  runs before any network round-trip could complete. Both are hardcoded
+  to 1337 today so this isn't currently observable as a mismatch - see
+  NETWORKING.md.
 - `engine/network::Connection`'s reliable channels have no RTT
   estimation, congestion control, or max-resend cutoff - a fixed
   retransmit interval, forever. Correct (tested, including under real
@@ -173,18 +201,24 @@ None currently tracked.
   NETWORKING.md/DECISIONS.md.
 - `VoxelServer`'s connection model has no authentication - any UDP
   datagram from a new address is treated as a new client connection, no
-  questions asked. Fine for this vertical slice, not for any real
-  deployment - see NETWORKING.md.
+  questions asked. A `PlayerInput`'s reported `dt` is trusted (clamped to
+  a ceiling, but not otherwise validated) - a real anti-cheat concern for
+  any public deployment, fine for this vertical slice. See NETWORKING.md.
 - `Connection`'s reorder buffer and duplicate-detection set for the two
   reliable channels use raw `u16` sequence values in
   ordered/hash containers, whose numeric ordering doesn't account for
   wraparound the way `sequence_greater_than` does - only matters past
   65536 messages on a single channel of one connection, far beyond this
   vertical slice's traffic volume. See NETWORKING.md.
-- `VoxelServer`'s AI/world simulation runs identically whether or not
-  any client is connected, but nothing is actually replicated to a
-  connected client beyond the Welcome/Heartbeat handshake messages -
-  entity positions, block edits, etc. aren't sent anywhere yet (Phase 8).
+- Interest management (`VoxelServer`'s per-client `EntityState`
+  distance filter) is real logic but never actually exercised excluding
+  an entity in any verification run so far - this vertical slice's
+  world and AI wander radius are small enough that everything stays
+  within `kInterestRadius` of any client near spawn. See NETWORKING.md.
+- Every multiplayer verification run so far has used exactly one
+  connected client - multiple simultaneous clients are structurally
+  supported (`VoxelServer` already keys everything by `Address` in a
+  map) but untested together.
 - bgfx's real GPU backend (Vulkan/GL/Metal/D3D) selection is untested —
   only the `Noop` headless fallback has been exercised, since this sandbox
   has no GPU/display.
@@ -233,25 +267,22 @@ None currently tracked.
 
 ## Next Task
 
-1. Phase 8: give `VoxelClient` real network code for the first time -
-   connect to a `VoxelServer` over `engine/network`, parse the Welcome
-   message it already sends (world seed, tick rate - currently only
-   `VoxelServer` speaks this protocol; nothing on the client side reads
-   it back yet).
-2. Server-authoritative state replication: decide (and record in
-   DECISIONS.md) what the server sends each tick and on what channel -
-   likely entity positions on `UnreliableSequenced` (matching the
-   existing Heartbeat's channel choice) and block edits on
-   `ReliableOrdered` (an edit can't be allowed to just go missing the
-   way a stale position update can).
-3. Client-side prediction + reconciliation for local player movement
-   (predict locally, correct against the server's authoritative state
-   when it disagrees) and interpolation for remote entities (smooth
-   between received position updates rather than snapping).
-4. Interest management (brief section 22/64) and chunk network
-   streaming/compression - only sending a client the chunks/entities
-   actually near it, not the whole loaded world.
-5. Update state docs and commit after each step, same as every prior
+1. Phase 9: add a Lua dependency (decide the exact library - e.g. Lua
+   5.4 itself vs. LuaJIT vs. sol2/LuaBridge as a binding layer - and
+   record the choice and rationale in DECISIONS.md when this starts).
+2. Expand registries (`BlockRegistry`/`ItemRegistry` already exist and
+   are namespaced/datadriven; add `EntityRegistry`/`BiomeRegistry`/
+   `RecipeRegistry` is already done/`StructureRegistry`/`SoundRegistry`/
+   `CommandRegistry`) to be genuinely mod-extensible - callable from Lua,
+   not just C++ call sites.
+3. Event system: something a mod can subscribe to (block broken, entity
+   spawned, player joined, ...) without the engine knowing mods exist.
+4. Mod loader: discover/load mod manifests and their Lua scripts at
+   startup.
+5. `example_mod` (brief section 91) exercising the above - a real,
+   working mod, not just the loader infrastructure with nothing loaded
+   into it.
+6. Update state docs and commit after each step, same as every prior
    one.
 
 ## Current Architecture
