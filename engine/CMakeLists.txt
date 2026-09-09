@@ -19,6 +19,8 @@ add_subdirectory(ecs)
 add_subdirectory(lighting)
 add_subdirectory(network)
 add_subdirectory(replication)
+add_subdirectory(scripting)
+add_subdirectory(modding)
 
 add_library(LcuEngineCore INTERFACE)
 add_library(Lcu::EngineCore ALIAS LcuEngineCore)
@@ -26,6 +28,10 @@ target_link_libraries(LcuEngineCore INTERFACE
     Lcu::Core Lcu::Math Lcu::Debug Lcu::Voxel Lcu::Jobs Lcu::World Lcu::Serialization Lcu::Physics Lcu::Items Lcu::Ecs
     Lcu::Lighting Lcu::Network Lcu::Replication
 )
+if(LCU_BUILD_SCRIPTING)
+    target_link_libraries(LcuEngineCore INTERFACE Lcu::Scripting Lcu::Modding)
+    target_compile_definitions(LcuEngineCore INTERFACE LCU_ENABLE_SCRIPTING)
+endif()
 
 if(LCU_BUILD_CLIENT)
     add_subdirectory(platform)
