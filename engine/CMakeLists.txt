@@ -23,10 +23,11 @@ target_link_libraries(LcuEngineCore INTERFACE
 
 if(LCU_BUILD_CLIENT)
     add_subdirectory(platform)
+    add_subdirectory(player)
 
     add_library(LcuEngine INTERFACE)
     add_library(Lcu::Engine ALIAS LcuEngine)
-    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform)
+    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform Lcu::Player)
 
     if(LCU_ENABLE_BGFX)
         add_subdirectory(rendering)

@@ -30,6 +30,13 @@ if(TARGET Lcu::Platform)
     target_link_libraries(VoxelTests PRIVATE Lcu::Platform)
 endif()
 
+# Camera/movement-input math; only built alongside engine/platform (see
+# engine/player/CMakeLists.txt).
+if(TARGET Lcu::Player)
+    target_sources(VoxelTests PRIVATE player/camera_test.cpp player/movement_input_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Player)
+endif()
+
 # Only built when bgfx is actually enabled (LCU_BUILD_CLIENT and
 # LCU_ENABLE_BGFX both ON) - these tests initialize a real (headless
 # Noop-backend) bgfx context to upload GPU buffers.

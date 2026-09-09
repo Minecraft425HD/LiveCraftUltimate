@@ -20,6 +20,16 @@ enum class Action : u8 {
     Sprint,
     Interact,
     Inventory,
+    // Arrow-key camera look, standing in for mouse-look until SDL
+    // relative-mouse-mode plumbing exists (bound to a real device; not
+    // meaningfully testable/verifiable in this sandbox either way -
+    // arrow keys are a real, immediately usable interim control scheme,
+    // not a placeholder that does nothing). See DECISIONS.md.
+    LookUp,
+    LookDown,
+    LookLeft,
+    LookRight,
+    PlaceBlock,
     Count,
 };
 
