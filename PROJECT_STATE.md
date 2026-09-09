@@ -11,41 +11,50 @@ commands).
 
 Phase 0 complete. Phase 1 functionally complete for what this headless
 sandbox can verify. Phase 2 (voxel storage + chunk + meshing +
-rendering) in progress: chunk storage, coordinate math, BlockRegistry,
-job system, greedy meshing, and GPU buffer upload are all done, tested,
-and wired together end-to-end in `VoxelClient`. What's left before an
-actual on-screen cube: a compiled bgfx shader program and a real
-`bgfx::submit()` draw call.
+rendering) functionally complete for what this sandbox can verify: chunk
+storage, coordinate math, BlockRegistry, job system, greedy meshing, GPU
+buffer upload, shader compilation, and a real `bgfx::submit()` draw call
+are all done, tested, and wired together end-to-end in `VoxelClient`.
+What's *not* verified is what any of it looks like - no GPU/display
+exists in this sandbox.
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: get a real draw call
-working. Needs a compiled bgfx shader program - most likely means
-enabling `BGFX_BUILD_TOOLS=ON` to build bgfx's `shaderc` and writing
-minimal `.sc` shaders; evaluate alternatives and record the choice in
-`DECISIONS.md` when this starts.
+None in flight. Phase 2 is functionally done for this environment; next
+up per `TASK_QUEUE.md` is choosing between Phase 3 world
+storage/streaming or Phase 4 physics/camera as the next foundational
+piece (leaning toward world storage first, since physics/raycast need
+more than one hardcoded chunk to be meaningful) - record the choice in
+`DECISIONS.md` when starting.
 
 ## Last Completed Task
 
-Wired the full Phase 2 pipeline together in `VoxelClient`: registers a
-placeholder `"game:stone"` block, builds a flat ground-slab `Chunk`,
-dispatches `mesh_chunk_greedy` through `engine/jobs::JobSystem` (its
-first real caller outside its own tests), and uploads the result into
-real bgfx GPU buffers via the new
-`engine/rendering::upload_chunk_mesh_layer`/`destroy_gpu_chunk_mesh`
-(bgfx is now a PUBLIC link dependency of `Lcu::Rendering`, since the new
-header exposes bgfx handle types).
+Got a real bgfx draw call working, opt-in via `LCU_BUILD_SHADER_TOOLS`
+(builds bgfx's `shaderc` - confirmed feasible first via a scratch-build
+probe before committing to it, ~700 extra build steps pulling in
+glslang/SPIRV-Tools/SPIRV-Cross/Dawn-Tint). Added minimal
+`client/shaders/{vs_chunk,fs_chunk}.sc` (directional+ambient lighting,
+no texturing - no atlas yet), compiled via bgfx.cmake's
+`bgfx_compile_shaders()` into spirv/glsl/essl binaries, loaded at
+runtime by the new `engine/rendering::load_chunk_program` (profile
+selected by active bgfx renderer type). Split `Renderer::render_clear_frame`
+into `begin_frame`/`submit_chunk_mesh`/`end_frame` so a draw call can be
+submitted between clear and frame advance.
 
-Verified via an actual headless run, not just unit tests: `"Meshed
-placeholder chunk: opaque 24 vertices / 36 indices"` then `"Uploaded
-chunk mesh to GPU buffers: valid=true index_count=36"` - real numbers
-from a real 256-block slab greedy-meshed to 6 quads. 3 new unit tests
-(empty layer, a manually-built quad, full chunk-to-GPU pipeline), each
-exercising its own headless bgfx init/shutdown cycle within one test
-binary (confirms bgfx supports that cleanly). `ctest` 62/62 passing
-(bgfx build) / 59/59 (non-bgfx build); `VoxelServer` still SDL/bgfx-free
-per `ldd`. No shader/draw-call yet - documented as the explicit next
-step, not skipped silently.
+The first attempt at this was committed as WIP (per repo policy on
+uncommitted changes, while a long background build was still running)
+and had two real bugs the actual build then caught: a missing
+`lcu/core/types.h` include (`u8`/`u32`/`usize` undeclared), and a
+`VARYING_DEF` path passed relative to `client/` when
+`bgfx_compile_shaders()`'s generated custom command actually runs with
+the *build* directory as its working directory (silently produced
+confusing HLSL-parser errors, not a "file not found"). Both fixed in a
+follow-up commit, then verified for real: full rebuild produces all 6
+shader binaries, `ctest` 62/62 passing, and a real `VoxelClient` run
+logs `"Chunk shader program valid=true"` followed by 3 clean frames with
+the draw call actually executing via `bgfx::submit()`, under the `Noop`
+backend. Non-bgfx build (59/59 ctest) and `VoxelServer` (still
+SDL/bgfx-free per `ldd`) both confirmed unaffected.
 
 ## Build Status
 
@@ -59,9 +68,13 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 62/62 passing. `ctest --test-dir
-build/dev-nobgfx`: 59/59 passing (`ChunkMeshUpload.*` only exists in the
-bgfx build, since it needs a real bgfx context). Covers Log, Vec3, Mat4,
+`ctest --test-dir build/dev-bgfx`: 62/62 passing (this build dir is now
+configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
+compiled chunk shaders - `ctest` itself doesn't test shader compilation
+directly, that's verified by actually running `VoxelClient`, see
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 59/59 passing
+(`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
+real bgfx context). Covers Log, Vec3, Mat4,
 FrameStats, InputState, Chunk, ChunkStorage, ChunkCoord, BlockRegistry,
 GreedyMesher, JobSystem, ChunkMeshUpload. JobSystem additionally verified
 via 200 repeated `ctest`-suite runs and 50 runs under ThreadSanitizer,
@@ -76,10 +89,10 @@ None currently tracked.
 
 ## Known Limitations
 
-- `VoxelClient` uploads a real chunk mesh into real bgfx GPU buffers but
-  never draws them — no shader program exists (no shader compiler
-  built), so there's no `bgfx::submit()` call yet. The buffers just sit
-  there, created and eventually destroyed, unused this frame.
+- `VoxelClient` draws its one hardcoded placeholder chunk with a fixed
+  camera — no player/camera control, no visual verification possible
+  (no GPU/display here). Real content and an actual camera come with
+  Phase 3/4.
 - No world, no gameplay of any kind yet — intentionally still
   pre-vertical-slice (see `ROADMAP.md` "Vertical slice targets"). Zero
   blocks are registered anywhere outside unit tests.
@@ -117,21 +130,28 @@ None currently tracked.
 - No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
   populated (quad-local, in block units) but nothing downstream
   consumes or checks them yet, since there's no atlas (Phase 12).
-- No shader program or draw call exists — `GpuChunkMesh` buffers are
-  created and destroyed but never submitted for rendering. bgfx's
-  shader compiler (shaderc) isn't built (`BGFX_BUILD_TOOLS=OFF`); no
-  `.sc` shader source exists anywhere in the repo yet.
+- Shader compilation (`LCU_BUILD_SHADER_TOOLS`) is opt-in and OFF by
+  default — most builds/CI runs won't have a real draw call unless this
+  is explicitly turned on, since it adds real build time (shaderc +
+  glslang/SPIRV-Tools/SPIRV-Cross/Dawn-Tint).
+- Chunk shaders have no texturing — flat lit color only. `MeshVertex.u`/
+  `.v` are populated but unused downstream until a texture atlas exists
+  (Phase 12).
+- No visual verification of any rendering exists or can exist in this
+  sandbox — every claim above about the draw call is about the API
+  calls succeeding (valid handles, no crash, bgfx accepts the shader
+  binaries), not about correct-looking output on a screen.
 
 ## Next Task
 
-1. Phase 2: get a real draw call working. Requires a compiled bgfx
-   shader program - most likely path is enabling `BGFX_BUILD_TOOLS=ON`
-   to build `shaderc` and writing minimal `.sc` vertex/fragment shaders;
-   evaluate alternatives and record the choice in `DECISIONS.md` when
-   this starts.
-2. Wire `bgfx::submit()` into `VoxelClient`'s render loop for the
-   already-uploaded `GpuChunkMesh`.
-3. Update state docs and commit after each step, same as every prior one.
+1. Phase 3 or Phase 4 (pick one, record the choice and why in
+   `DECISIONS.md`): either `engine/world` (a `World` owning multiple
+   chunks by `ChunkCoord`, load/unload by distance, the chunk lifecycle
+   state machine from `ARCHITECTURE.md`), or `engine/physics` (AABB
+   collision, voxel DDA raycaster, first-person camera). Leaning toward
+   world first since physics/raycast want more than one hardcoded chunk
+   to be meaningful against.
+2. Update state docs and commit after each step, same as every prior one.
 
 ## Current Architecture
 

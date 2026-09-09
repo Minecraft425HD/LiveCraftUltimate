@@ -33,7 +33,8 @@ verified and how.
 - [x] BlockRegistry (landed in `engine/voxel` — recorded in DECISIONS.md; revisit only if `engine/modding`'s registry needs pull it elsewhere later). Namespaced ids (`game:stone`), air always id 0, datadriven `BlockDefinition` (hardness/transparency/collision/light_emission). Block *tags* and full mod-facing registration API are Phase 9 work.
 - [x] Greedy meshing, hidden-face removal, opaque layer. `mesh_chunk_greedy<EdgeLength>()`: axis-sweep algorithm, registry-driven opacity (not hardcoded air checks), merges same-block same-facing coplanar faces. Transparent/water layers exist structurally (`ChunkMesh::transparent`/`::water`) but are always empty — no transparent block exists yet to mesh, and transparent-vs-transparent face rules are deliberately deferred (see DECISIONS.md) rather than guessed. Winding verified via a geometric cross-product check on every emitted triangle (no display available to check visually). 8 unit tests.
 - [x] Job system (engine/jobs) — `JobSystem`: worker pool, priority scheduling, dependency graphs with cascading cancellation, cancellation of not-yet-started jobs. Correctness-first (one mutex+condvar), not yet lock-free/work-stealing — revisit only if Phase 11 profiling shows it matters (see DECISIONS.md). 12 unit tests covering ordering/dependencies/cancellation/priority, plus 200 repeated runs and 50 runs under ThreadSanitizer with zero failures/races. Now has a real consumer: `VoxelClient` dispatches `mesh_chunk_greedy` through it.
-- [x] Wire meshing through `JobSystem` and feed `ChunkMesh` into `engine/rendering` -> bgfx as actual GPU vertex/index buffers. `upload_chunk_mesh_layer`/`destroy_gpu_chunk_mesh`, 3 unit tests, and a real end-to-end `VoxelClient` run (256-block slab -> job-dispatched mesh -> 6 merged quads -> real bgfx buffer handles, `valid=true index_count=36`). **Not done**: an actual draw call — bgfx needs a compiled shader program, and this repo has no shader compiler (shaderc) built and no `.sc` shader source written. That's the next task, not skipped.
+- [x] Wire meshing through `JobSystem` and feed `ChunkMesh` into `engine/rendering` -> bgfx as actual GPU vertex/index buffers. `upload_chunk_mesh_layer`/`destroy_gpu_chunk_mesh`, 3 unit tests, and a real end-to-end `VoxelClient` run (256-block slab -> job-dispatched mesh -> 6 merged quads -> real bgfx buffer handles, `valid=true index_count=36`).
+- [x] Real draw call. `client/shaders/{vs_chunk,fs_chunk}.sc` (minimal directional+ambient lighting, no texturing - no atlas yet), compiled via bgfx's `shaderc` (opt-in `LCU_BUILD_SHADER_TOOLS`, see DECISIONS.md), loaded at runtime (`engine/rendering::load_chunk_program`, profile selected by active bgfx renderer type), submitted every frame via `Renderer::submit_chunk_mesh()`. Verified: `"Chunk shader program valid=true"` and 3 clean frames with the draw call actually executing, under bgfx's `Noop` backend. **What's not verified**: what it looks like on a real GPU/display - none exists in this sandbox.
 
 ## Phase 3 — World generation + streaming + save
 
@@ -106,17 +107,35 @@ and uploads the result into real bgfx vertex/index buffers (verified
 headlessly via the `Noop` backend - confirmed `valid=true index_count=36`
 from a real run, not a mock).
 
-Next task to pick up: **get a real draw call working**, which needs a
-compiled bgfx shader program. This means either (a) enabling
-`BGFX_BUILD_TOOLS=ON` in `third_party/CMakeLists.txt` to build bgfx's
-`shaderc` tool and writing minimal `.sc` vertex/fragment shaders (the
-"correct" long-term path, brief section 12/66's reproducibility bar), or
-(b) some other route to a valid `bgfx::ProgramHandle` - evaluate at that
-point and record the choice in `DECISIONS.md`. Once a program exists,
-wire `bgfx::submit()` into `VoxelClient`'s render loop for the uploaded
-`GpuChunkMesh`. This is the last piece needed before "does a cube
-actually render" can be checked (still requires a real display/GPU to
-verify visually - this sandbox can only confirm the API calls succeed).
+A real draw call is now working: `LCU_BUILD_SHADER_TOOLS=ON` builds
+bgfx's `shaderc` (confirmed buildable: glslang/SPIRV-Tools/SPIRV-Cross/
+Dawn-Tint, ~700 extra build steps, see DECISIONS.md), compiles
+`client/shaders/{vs_chunk,fs_chunk}.sc` into spirv/glsl/essl binaries via
+`bgfx_compile_shaders()`, and `VoxelClient` loads them into a real
+`bgfx::ProgramHandle` and calls `Renderer::submit_chunk_mesh()` ->
+`bgfx::submit()` every frame. Verified via a real run: `"Chunk shader
+program valid=true"` followed by 3 clean frames with the draw call
+actually submitted, under bgfx's `Noop` backend (no GPU/display here).
+
+Next task to pick up: **Phase 2 is functionally complete for what this
+sandbox can verify.** The vertical slice (brief section 80) needs a
+player/camera to look through and a raycast/break/place loop next -
+that's Phase 4 territory, but doing it well wants at least a minimal
+Phase 3 (a world holding more than one hardcoded chunk, even if world
+*generation* proper waits) so there's something for a camera to move
+around in. Reasonable next steps, pick one and record the choice:
+(a) Phase 3 world: a `World` owning a sparse map of `ChunkCoord ->
+Chunk`, chunk lifecycle state machine (ARCHITECTURE.md), load/unload by
+distance from a point - all pure logic, thoroughly testable here; or
+(b) Phase 4 physics/camera: AABB collision, voxel DDA raycaster, a
+first-person camera - also pure logic, testable without a display. Both
+are legitimate next moves; world streaming is probably the more
+foundational one since physics/raycast need something to raycast
+*against* beyond one hardcoded chunk.
+
+**Not done, and out of scope for this sandbox regardless of order
+chosen**: confirming what any of this actually looks like on a real
+GPU/display, since none exists here.
 
 Also outstanding from Phase 1, lower priority, revisit opportunistically:
 confirm the bgfx build on a machine/CI runner with a real display and

@@ -85,3 +85,15 @@ All notable changes to this project are recorded here, newest first.
   placeholder chunk: opaque 24 vertices / 36 indices" then "Uploaded
   chunk mesh to GPU buffers: valid=true index_count=36". `VoxelTests`
   now at 62/62 passing (bgfx build) / 59/59 (non-bgfx build).
+- `LCU_BUILD_SHADER_TOOLS` (opt-in, default OFF): builds bgfx's
+  `shaderc` and compiles `client/shaders/{vs_chunk,fs_chunk}.sc` (a
+  minimal directional+ambient lit shader, no texturing yet) into
+  spirv/glsl/essl binaries. `engine/rendering::load_chunk_program` loads
+  them at runtime; `Renderer` gained `begin_frame`/`submit_chunk_mesh`/
+  `end_frame` (replacing `render_clear_frame`) so a real
+  `bgfx::submit()` draw call happens between clear and frame advance.
+  Verified via a real `VoxelClient` run: "Chunk shader program
+  valid=true" followed by 3 clean frames with the draw call executing
+  under bgfx's `Noop` backend - the full chunk -> mesh -> GPU buffers ->
+  shader -> draw call pipeline now runs end to end. What it looks like
+  on a real GPU/display remains unverified (no display in this sandbox).

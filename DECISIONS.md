@@ -229,6 +229,53 @@ speculatively risks guessing the wrong rules. Documented explicitly (not
 silently) via a `TwoAdjacentTransparentBlocksProduceNoOpaqueFaces` test
 and this entry, per brief section 96 (no fake completion).
 
+## 2026-09-09 — Shader compilation: build bgfx's shaderc, opt-in
+
+**Context:** An actual `bgfx::submit()` draw call needs a compiled
+shader program; bgfx has no runtime shader compilation, only offline
+compilation via its `shaderc` tool. Building `shaderc` pulls in
+glslang, SPIRV-Tools, SPIRV-Cross, and Dawn/Tint (WGSL) - a meaningfully
+heavier build than bgfx's runtime library alone (~700 additional build
+steps in this sandbox).
+
+**Decision:** Added `LCU_BUILD_SHADER_TOOLS` (default OFF) rather than
+folding shader compilation into the default `LCU_ENABLE_BGFX` path.
+Verified feasible first (a scratch build succeeded, ~700 steps, no
+dependency failures) before committing to it as the real path, per
+brief section 76 (baseline before committing time). When ON,
+`third_party/CMakeLists.txt` builds only `BGFX_BUILD_TOOLS_SHADER`
+(not geometryc/texturec, which nothing here needs) and includes
+bgfx.cmake's `bgfxToolUtils.cmake` (not auto-included via FetchContent
+the way `find_package(bgfx)` would) to get the `bgfx_compile_shaders()`
+CMake helper, plus manually sets `BGFX_SHADER_INCLUDE_PATH` (also only
+auto-set by the installed-package path).
+
+**Follow-up for other environments/CI:** a full clean build with
+`LCU_BUILD_SHADER_TOOLS=ON` takes real, non-trivial time (tint/dawn
+alone is substantial). CI machines building the client with real shaders
+should budget for this; the default `LCU_ENABLE_BGFX=ON` path without
+shader tools stays fast for iterating on non-rendering code.
+
+## 2026-09-09 — Chunk shaders: minimal placeholder, no texturing
+
+**Decision:** `client/shaders/{vs_chunk,fs_chunk}.sc` implement the
+simplest correct thing: transform position, pass the vertex normal
+through, shade with one fixed directional light plus ambient. No
+texture sampling - there is no texture atlas (Phase 12) or per-block
+color/material data flowing through yet. `MeshVertex.u`/`.v` already
+carry quad-local UVs (see `greedy_mesher.h`) for whenever texturing
+lands, so the vertex format won't need to change, only the shaders and
+the material/texture binding around them.
+
+**bgfx_compile_shaders() gotcha recorded for future reference:** its
+`VARYING_DEF` argument is NOT resolved to an absolute path internally
+(unlike `SHADERS`, which is), but the generated custom command runs
+with the CMake *build* directory as its working directory. A
+source-relative `VARYING_DEF` path therefore silently fails to parse at
+build time with confusing HLSL-parser errors about unknown variables,
+not a "file not found" error. Always pass it as an absolute path (e.g.
+via `CMAKE_CURRENT_SOURCE_DIR`).
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a
