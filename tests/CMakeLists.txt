@@ -5,6 +5,9 @@ add_executable(VoxelTests
     math/vec3_test.cpp
     math/mat4_test.cpp
     debug/frame_stats_test.cpp
+    voxel/chunk_test.cpp
+    voxel/chunk_coord_test.cpp
+    voxel/block_registry_test.cpp
 )
 
 target_link_libraries(VoxelTests PRIVATE
