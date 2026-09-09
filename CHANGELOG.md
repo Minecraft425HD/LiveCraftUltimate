@@ -32,3 +32,12 @@ All notable changes to this project are recorded here, newest first.
   Verified headlessly: 5-frame clear loop completes cleanly against the
   `Noop` backend. Real GPU backend rendering to an actual screen is not
   yet verified (no GPU/display in the dev sandbox).
+- `engine/platform::InputState`/`KeyboardInputBackend`: action-based
+  input (`MoveForward`/`Jump`/`Interact`/...) decoupled from raw SDL
+  scancodes. Keyboard backend only; gamepad/touch deferred to when
+  something needs them (Phase 4/10).
+- `engine/debug::FrameStats`: minimal FPS/frame-time accumulator, wired
+  into `VoxelClient`'s loop as a once-per-second log line. Verified with
+  a real running loop, not just unit tests.
+- `VoxelTests` now at 18/18 passing (added `InputState.*`,
+  `FrameStats.*`).

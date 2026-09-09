@@ -23,8 +23,8 @@ verified and how.
 - [x] VoxelClient: opens window, runs loop, clean shutdown. Verified headless (SDL_VIDEODRIVER=dummy); **not** verified with a real display/GPU (none available in this sandbox) — needs confirmation on a machine with a display.
 - [x] bgfx integration: fetch + build validation of the bgfx.cmake wrapper. Required installing libgl1-mesa-dev/libglu1-mesa-dev/mesa-common-dev/libwayland-dev in this sandbox (see DECISIONS.md); documented in BUILDING.md for other environments.
 - [x] engine/rendering: bgfx init against the SDL3 native window handle (engine/platform::get_native_window_handle, X11/Wayland/Win32/Cocoa/UIKit/Android branches), first cleared frame. Verified headless: falls back to bgfx::RendererType::Noop when no native handle is available (dummy SDL driver) and completes a 5-frame clear/frame loop cleanly. **Not** verified: real Vulkan/GL backend actually presenting on a real display — no GPU/display in this sandbox.
-- [ ] Input abstraction (engine/platform or new engine/input): actions (MoveForward, Jump, ...) decoupled from raw keys; keyboard/mouse backend first.
-- [ ] Debug overlay skeleton (FPS/frame time) per section 60 — minimal text output is enough to start.
+- [x] Input abstraction (engine/platform): Action enum (MoveForward/Jump/Interact/...) + InputState + KeyboardInputBackend (SDL_GetKeyboardState-based). Gamepad/touch backends deferred to Phase 10 (brief sections 27-28) — not built speculatively now. Unit tested (InputState set/is_down); KeyboardInputBackend itself untested by unit test (needs a live SDL keyboard state) but exercised every VoxelClient run.
+- [x] Debug overlay skeleton (engine/debug::FrameStats): FPS/avg frame time text line, reported once per second. Pure accumulator, no SDL/bgfx dependency (reusable by VoxelServer for tick-rate reporting later). Unit tested; also verified via a real 2-second VoxelClient run producing actual fps=60165.4 frame_ms=0.02 output. CPU/GPU/RAM/chunks/entities/ping/bandwidth/draw-calls/jobs lines from brief section 60 are added once the systems producing those numbers exist — not stubbed out now.
 
 ## Phase 2 — Voxel storage + chunk + meshing + rendering
 
@@ -90,11 +90,21 @@ verified and how.
 
 ---
 
-Next task to pick up: Phase 1 input abstraction (action-based, not raw
-key checks in gameplay code) — keyboard/mouse backend first, per brief
-section 27. After that: debug overlay skeleton (FPS/frame time text
-output), then Phase 2 voxel storage.
+Phase 1 is functionally complete for what a headless sandbox can verify:
+window, event loop, bgfx rendering bootstrap, action-based input, minimal
+debug overlay. Mouse-look (camera control) is intentionally not built yet
+— there is no camera/player entity until Phase 2-4 give it something to
+control, so a mouse-delta API would have no consumer yet (brief section
+98, no overengineering ahead of need).
 
-Also outstanding from Phase 1, lower priority than the above: confirm the
-bgfx build on a machine/CI runner with a real display and GPU (Vulkan or
-GL), since this sandbox can only verify the headless Noop path.
+Next task to pick up: **Phase 2 — engine/voxel**. Start with chunk
+storage (16x16x16 default, compact block state encoding, no per-block
+C++ instance per brief section 15-16), unit test indexing math
+thoroughly (this is exactly the kind of pure-logic code this sandbox CAN
+fully verify without a GPU). BlockRegistry can follow once there's a
+block type to register.
+
+Also outstanding from Phase 1, lower priority, revisit opportunistically:
+confirm the bgfx build on a machine/CI runner with a real display and
+GPU (Vulkan or GL) — this sandbox can only verify the headless Noop
+path.

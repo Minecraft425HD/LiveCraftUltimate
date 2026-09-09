@@ -9,28 +9,28 @@ commands).
 
 ## Current Phase
 
-Phase 0 complete. Phase 1 (SDL3 + bgfx + window + game loop + input) in
-progress: window, event loop, and bgfx rendering bootstrap are done and
-verified headlessly; input abstraction and debug overlay are not started.
+Phase 0 complete. Phase 1 (SDL3 + bgfx + window + game loop + input)
+functionally complete for what this headless sandbox can verify: window,
+event loop, bgfx rendering bootstrap, action-based input, minimal FPS
+debug overlay all done and tested. Mouse-look is deliberately deferred
+(no camera to control yet — see `TASK_QUEUE.md`).
 
 ## Current Task
 
-None in flight. Next up per `TASK_QUEUE.md`: input abstraction
-(`MoveForward`/`Jump`/... actions decoupled from raw keys, brief section
-27), keyboard/mouse backend first.
+None in flight. Next up per `TASK_QUEUE.md`: **Phase 2**, starting with
+`engine/voxel` chunk storage (16x16x16 default, compact block state
+encoding).
 
 ## Last Completed Task
 
-Wired `engine/rendering::Renderer` (bgfx init/frame/shutdown) and
-`engine/platform::get_native_window_handle` (X11/Wayland/Win32/Cocoa/
-UIKit/Android native handle extraction from the SDL3 window) into
-`VoxelClient`. Verified end-to-end under `SDL_VIDEODRIVER=dummy`: bgfx
-initializes on the `Noop` backend (no native handle available headlessly),
-runs a 5-frame clear loop, shuts down cleanly. `ctest` still 12/12 passing
-with `LCU_ENABLE_BGFX=ON`. Required installing
-`libgl1-mesa-dev`/`libglu1-mesa-dev`/`mesa-common-dev`/`libwayland-dev` in
-this sandbox for bgfx.cmake's configure/link to succeed — documented in
-`BUILDING.md` and `DECISIONS.md`.
+Added `engine/platform::InputState`/`KeyboardInputBackend` (action-based
+input: `MoveForward`/`Jump`/`Interact`/... decoupled from raw SDL
+scancodes, brief section 27) and `engine/debug::FrameStats` (minimal
+FPS/frame-time accumulator, brief section 60). Wired both into
+`VoxelClient`'s loop. Verified: `ctest` 18/18 passing (6 new cases), and a
+real 2-second `SDL_VIDEODRIVER=dummy` run produced actual
+`fps=60165.4 frame_ms=0.02 total_frames=60166` output from ~120k real
+loop iterations — not a stub, an actually-executing accumulator.
 
 ## Build Status
 
@@ -44,9 +44,9 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx` (or `build/dev-nobgfx`): 12/12 passing
-(Log, Vec3, Mat4 unit tests). No integration tests yet (no networking/save
-system exists yet to integration-test).
+`ctest --test-dir build/dev-bgfx` (or `build/dev-nobgfx`): 18/18 passing
+(Log, Vec3, Mat4, FrameStats, InputState unit tests). No integration tests
+yet (no networking/save system exists yet to integration-test).
 
 ## Known Bugs
 
@@ -66,20 +66,23 @@ None currently tracked.
 - Mobile/Windows/macOS builds are untested from this Linux-only sandbox;
   `CMakePresets.json` presets exist for them but have not been exercised
   on their native toolchains.
-- No input abstraction yet — the game loop doesn't read input at all yet,
-  so there's nothing to abstract prematurely.
+- Input abstraction covers keyboard only (`KeyboardInputBackend`); no
+  mouse-look, gamepad or touch backend yet — none has a consumer to drive
+  until a camera/player exists (Phase 4) or mobile work starts (Phase 10).
+- Debug overlay is a log line, not an on-screen overlay — needs
+  `engine/ui`/text rendering (later phase) to actually draw on screen.
 
 ## Next Task
 
-1. Input abstraction: define actions (`MoveForward`, `Jump`, `Interact`,
-   ...) in a new `engine/platform` (or `engine/input`, decide + record in
-   `DECISIONS.md` when starting) header, backed by SDL3 keyboard/mouse
-   first. Gamepad/touch backends come later (brief sections 27-28) — don't
-   build them speculatively now.
-2. Minimal debug overlay (FPS/frame time as text output is enough to
-   start, brief section 60).
-3. Update state docs and commit after each, same as every prior step.
-4. Then Phase 2: `engine/voxel` chunk storage.
+1. Phase 2: `engine/voxel` chunk storage — 16x16x16 default (brief
+   section 15), configurable chunk size, compact block state encoding
+   (brief section 17), no per-block C++ instance (brief section 15).
+   Thoroughly unit test indexing/encoding math — this is exactly the kind
+   of pure-logic work this sandbox can fully verify without a GPU.
+2. BlockRegistry once there's at least one block type to register (brief
+   section 16) — decide its exact home (`engine/voxel` vs
+   `engine/modding`) and record in `DECISIONS.md` when starting.
+3. Update state docs and commit after each step, same as every prior one.
 
 ## Current Architecture
 
