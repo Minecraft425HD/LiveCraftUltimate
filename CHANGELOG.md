@@ -63,3 +63,11 @@ All notable changes to this project are recorded here, newest first.
   main thread. 12 new unit tests; `VoxelTests` now at 51/51 passing.
   Additionally verified via 200 repeated test-suite runs and 50 runs
   under ThreadSanitizer, zero failures/data races either way.
+- `engine/voxel::mesh_chunk_greedy`: axis-sweep greedy meshing producing
+  a renderer-agnostic `ChunkMesh` (opaque layer; transparent/water
+  layers exist structurally, populated once a transparent block exists
+  to motivate their face rules). Registry-driven opacity. Triangle
+  winding verified via a geometric cross-product check against each
+  triangle's stored normal. 8 new unit tests; `VoxelTests` now at 59/59
+  passing. Not yet dispatched through the job system (still synchronous)
+  and not yet uploaded to bgfx (still plain CPU-side vertex/index data).

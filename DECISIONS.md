@@ -209,6 +209,26 @@ installed in this sandbox) - zero failures, zero race reports either
 way. See `BUILDING.md` "Testing under ThreadSanitizer" for the exact
 commands; re-run this whenever `engine/jobs` changes.
 
+## 2026-09-09 — Greedy meshing: transparent-vs-transparent never draws a face yet
+
+**Context:** Standard opaque-culling logic (draw a face where exactly one
+side is opaque) means two adjacent transparent blocks - even of
+*different* materials, e.g. glass touching water - never get a face
+between them. A "complete" transparent-layer mesher would need
+same-material vs. different-material rules (glass-glass: no face;
+glass-water: draw a face) to look right.
+
+**Decision:** Ship opaque-layer meshing now, with `ChunkMesh::transparent`
+and `::water` present as real (currently always-empty) members so the
+layer separation the brief asks for (section 18) already exists
+structurally. Defer transparent-vs-transparent face rules until an
+actual transparent block is registered somewhere (Phase 9's example mod
+is the likely first case) - there is no way to validate that logic
+correctly today with zero transparent content, and building it
+speculatively risks guessing the wrong rules. Documented explicitly (not
+silently) via a `TwoAdjacentTransparentBlocksProduceNoOpaqueFaces` test
+and this entry, per brief section 96 (no fake completion).
+
 ## 2026-09-09 — Logging: fmt (not spdlog) for Phase 0
 
 **Decision:** Start with `fmt` only for formatted logging output, add a
