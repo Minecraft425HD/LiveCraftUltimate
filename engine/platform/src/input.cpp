@@ -29,6 +29,7 @@ constexpr Binding kDefaultBindings[] = {
     {SDL_SCANCODE_RIGHT, Action::LookRight},
     {SDL_SCANCODE_F, Action::PlaceBlock},
     {SDL_SCANCODE_R, Action::CycleHotbar},
+    {SDL_SCANCODE_C, Action::Craft},
 };
 
 }  // namespace

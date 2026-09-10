@@ -24,6 +24,7 @@
 #include "lcu/ecs/registry.h"
 #include "lcu/items/inventory.h"
 #include "lcu/items/item_registry.h"
+#include "lcu/items/recipe_registry.h"
 #include "lcu/jobs/job_system.h"
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
@@ -120,6 +121,35 @@ constexpr lcu::u64 kVerifyPlaceFrame = 6;
 // proves PlaceBlock now places whatever's selected, not just the
 // hardcoded game:stone default - see "Hotbar item selection" below.
 constexpr lcu::u64 kVerifyCycleHotbarFrame = 5;
+
+// A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
+// breaks the grass block the player spawns on, then the dirt block
+// beneath it (two real Interact presses, an edge each), then presses
+// Craft - exercising the real quick-craft path end to end (see
+// "Quick-craft" below). Kept separate from LCU_VERIFY_BREAK_PLACE
+// above (different frame numbers, not meant to run in the same
+// process) since the two exercise unrelated inventory states.
+// Real elapsed-time gates, not frame numbers, for the same reason
+// LCU_VERIFY_MOVE_SECONDS (Phase 16) uses wall-clock time: this main
+// loop is unthrottled and can run many thousands of iterations before
+// a real network round trip completes. In networked mode a break
+// doesn't mutate this client's own World until the server's
+// BlockChange broadcast round-trips back (block edits are never
+// client-predicted - see DECISIONS.md), so the second break's raycast
+// needs the first break's round trip to have genuinely settled in real
+// time, or it would still see the old (unbroken) grass block and
+// double-request breaking the same position - confirmed by an earlier,
+// frame-count-gated version of this hook actually hitting exactly that
+// race in a real networked run. Single-player mutates instantly, so
+// these delays cost it nothing but a bit of wall-clock time.
+constexpr lcu::f32 kVerifyCraftSecondBreakDelaySeconds = 1.0f;
+constexpr lcu::f32 kVerifyCraftFirstCraftDelaySeconds = 1.2f;
+// A second Craft press after the first one succeeds: by now the player
+// holds only game:compost (grass/dirt were fully consumed) - a single
+// distinct item type matches no registered recipe, so this exercises
+// the real rejection path ("No recipe matches...") in the same run,
+// not just the match path.
+constexpr lcu::f32 kVerifyCraftRejectDelaySeconds = 1.5f;
 
 // Hotbar-sized (Minecraft-like); the rest of a real inventory (a
 // separate main storage grid, armor slots, ...) has no consumer yet -
@@ -275,7 +305,31 @@ int main() {
     dirt_item_def.max_stack_size = 64;
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
+    // First crafted-only item (Phase 23, closing brief section 55's
+    // "no crafting-grid caller anywhere" gap): game:compost has no
+    // corresponding block - it exists purely as RecipeRegistry's first
+    // real content, not obtainable by breaking anything. Combining the
+    // two organic surface materials (grass + dirt) into compost is a
+    // real, if simple, recipe, not a placeholder pairing.
+    lcu::items::ItemDefinition compost_item_def;
+    compost_item_def.namespaced_id = "game:compost";
+    compost_item_def.display_name = "Compost";
+    compost_item_def.max_stack_size = 64;
+    const lcu::items::ItemId compost_item_id = item_registry.register_item(compost_item_def);
+
     lcu::items::Inventory player_inventory(kInventorySlotCount);
+
+    // Crafting (Phase 23, closing RecipeRegistry's long-standing "no
+    // crafting-grid caller anywhere" gap - Phase 5 built and unit
+    // tested it, nothing ever called it). One real shapeless recipe:
+    // 1 game:grass + 1 game:dirt -> 1 game:compost. Purely client-side
+    // local inventory bookkeeping, same as item pickup itself
+    // (DECISIONS.md "Item pickup/consumption stays client-authoritative")
+    // - crafting never touches the World or needs server validation, so
+    // it behaves identically in single-player and networked mode with
+    // no protocol involvement.
+    lcu::items::RecipeRegistry recipe_registry;
+    recipe_registry.add_shapeless({{grass_item_id, dirt_item_id}, {compost_item_id, 1}});
 
     // Hotbar item selection (Phase 21, closing Phase 18/19's remaining
     // honest gap): PlaceBlock used to always place game:stone regardless
@@ -676,6 +730,9 @@ int main() {
 #endif
 
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
+    const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
+    int verify_craft_step = 0;
+    const auto verify_craft_start = std::chrono::steady_clock::now();
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -705,6 +762,31 @@ int main() {
             input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
             input.set_down(lcu::platform::Action::CycleHotbar, frame == kVerifyCycleHotbarFrame);
             input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyPlaceFrame);
+        }
+        if (verify_craft) {
+            const lcu::f32 verify_craft_elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_craft_start).count();
+            bool interact_now = false;
+            bool craft_now = false;
+            // Each branch fires for exactly one frame (the frame its
+            // threshold is first crossed) since verify_craft_step
+            // advances immediately, giving InputState a clean edge each
+            // time rather than holding the action down indefinitely.
+            if (verify_craft_step == 0) {
+                interact_now = true;  // break the grass block the player spawns on
+                verify_craft_step = 1;
+            } else if (verify_craft_step == 1 && verify_craft_elapsed >= kVerifyCraftSecondBreakDelaySeconds) {
+                interact_now = true;  // break the dirt block beneath it
+                verify_craft_step = 2;
+            } else if (verify_craft_step == 2 && verify_craft_elapsed >= kVerifyCraftFirstCraftDelaySeconds) {
+                craft_now = true;  // should match: 1 grass + 1 dirt held
+                verify_craft_step = 3;
+            } else if (verify_craft_step == 3 && verify_craft_elapsed >= kVerifyCraftRejectDelaySeconds) {
+                craft_now = true;  // should reject: only compost held now
+                verify_craft_step = 4;
+            }
+            input.set_down(lcu::platform::Action::Interact, interact_now);
+            input.set_down(lcu::platform::Action::Craft, craft_now);
         }
         if (verify_move_seconds > 0.0f) {
             const lcu::f32 elapsed =
@@ -971,10 +1053,53 @@ int main() {
                                     !previous_input.is_down(lcu::platform::Action::PlaceBlock);
         const bool cycle_hotbar_pressed = input.is_down(lcu::platform::Action::CycleHotbar) &&
                                            !previous_input.is_down(lcu::platform::Action::CycleHotbar);
+        const bool craft_pressed =
+            input.is_down(lcu::platform::Action::Craft) && !previous_input.is_down(lcu::platform::Action::Craft);
 
         if (cycle_hotbar_pressed) {
             selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
             LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+        }
+
+        if (craft_pressed) {
+            // Quick-craft (Phase 23): auto-assembles a query grid from
+            // one of each *distinct* item type currently held (dedup by
+            // slot scan), then asks RecipeRegistry for a real match -
+            // not a graphical crafting-grid UI (no way to arrange items
+            // into specific cells exists yet - see DECISIONS.md). This
+            // only correctly represents a recipe needing exactly one of
+            // each distinct ingredient type (true of the one recipe
+            // registered above); it isn't a stand-in for a real grid
+            // that could hold >1 of the same item in different cells.
+            std::vector<lcu::items::ItemId> craft_grid;
+            for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
+                const lcu::items::ItemId slot_item = player_inventory.slot_at(slot).item;
+                if (slot_item == lcu::items::kNoItemId) {
+                    continue;
+                }
+                if (std::find(craft_grid.begin(), craft_grid.end(), slot_item) == craft_grid.end()) {
+                    craft_grid.push_back(slot_item);
+                }
+            }
+            const lcu::items::ItemStack* result =
+                recipe_registry.find_match(craft_grid, static_cast<lcu::u32>(craft_grid.size()), 1);
+            if (result != nullptr) {
+                // Grid contents == the matched recipe's ingredient
+                // multiset exactly (matches_shapeless requires an exact
+                // multiset match) - since craft_grid holds exactly 1 of
+                // each distinct type by construction, consuming 1 of
+                // each entry consumes exactly what the recipe required,
+                // no more.
+                for (lcu::items::ItemId ingredient : craft_grid) {
+                    player_inventory.remove_item(ingredient, 1);
+                }
+                player_inventory.add_item(item_registry, *result);
+                LCU_LOG_INFO("Crafted {} {} (inventory: {})", result->count,
+                             item_registry.definition_of(result->item).namespaced_id,
+                             player_inventory.count_item(result->item));
+            } else {
+                LCU_LOG_INFO("No recipe matches your held items");
+            }
         }
 
         if (interact_pressed && hit && networked) {

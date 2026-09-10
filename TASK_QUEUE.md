@@ -594,6 +594,76 @@ platform verification, then performance work, then UI/audio polish.
 
 ---
 
+## Phase 23 — Quick-craft: RecipeRegistry's first real caller (post-original-queue; closes a Phase 5 gap long-flagged as content)
+
+`RecipeRegistry` (Phase 5) was implemented and unit tested but had zero
+real callers anywhere - "no crafting-grid caller exists yet" had been
+an honest, standing gap since Phase 5 itself, restated unchanged
+through every later phase's Known Limitations.
+
+- [x] First crafted-only content: `game:compost` - a new item with no
+  corresponding block, obtainable only by crafting (not by breaking
+  anything), registered client-side alongside stone/grass/dirt/etc.
+- [x] One real shapeless recipe: `1x game:grass + 1x game:dirt -> 1x
+  game:compost`, registered on a new `lcu::items::RecipeRegistry`
+  instance in `VoxelClient`.
+- [x] New `Action::Craft` (`engine/platform::Action`), bound to `C` on
+  keyboard and a new "CRAFT" touch button, following the same pattern
+  every other action already uses.
+- [x] Quick-craft trigger: on an edge-detected Craft press, builds a
+  query grid from one of each *distinct* item type currently held
+  (dedup by inventory-slot scan), calls `RecipeRegistry::find_match`
+  for real, and on a match consumes exactly the grid's contents (which
+  equals the matched recipe's ingredients exactly, since shapeless
+  matching requires an exact multiset match) and grants the result.
+  Logs "No recipe matches your held items" on no match - a real
+  rejection path, not silently ignored.
+- [x] Purely client-side, single-player and networked alike - crafting
+  never touches the `World` or needs server validation (same
+  client-authoritative precedent as item pickup itself, see
+  DECISIONS.md), so it needed zero protocol/server changes.
+- [x] New standalone headless hook `LCU_VERIFY_CRAFT` (wall-clock-
+  gated like `LCU_VERIFY_MOVE_SECONDS`, not frame-count-gated like
+  `LCU_VERIFY_BREAK_PLACE` - see the real bug this caught, below):
+  breaks the spawn grass block, breaks the dirt block beneath it,
+  crafts (should match), crafts again (should reject, only compost
+  held by then) - exercising both `find_match` outcomes in one run.
+- [x] A real bug caught and fixed by real networked verification, not
+  by reasoning alone: the hook's first version gated the two breaks by
+  frame count (mirroring `LCU_VERIFY_BREAK_PLACE`'s style), which
+  worked single-player but broke networked mode - the unthrottled
+  client loop ran hundreds of frames (verified: even 200 wasn't
+  enough) before the first break's `BlockChange` round-tripped back,
+  so the second break's raycast still saw the old, unbroken grass
+  block and re-requested breaking the *same* position, optimistically
+  double-granting the item before the server's rejection + inventory
+  correction arrived. Switched to a wall-clock-gated state machine
+  (same pattern `LCU_VERIFY_MOVE_SECONDS`, Phase 16, already used for
+  the identical class of problem) - confirmed fixed via a second real
+  networked run: server applies both breaks at their correct distinct
+  positions, zero warnings, craft succeeds, reject path still fires.
+
+No new unit tests - this phase is pure orchestration of already-tested
+`RecipeRegistry`/`Inventory`/`ItemRegistry` primitives, exercised by
+the real runs above. `ctest` unchanged at 347/347 (bgfx) / 344/344
+(non-bgfx).
+
+Honestly scoped: quick-craft's auto-built grid only correctly
+represents a recipe needing exactly one of each distinct ingredient
+type (true of the one recipe registered) - it isn't a stand-in for a
+real grid that could hold more than one of the same item in different
+cells; no graphical crafting-grid UI exists (no way to arrange items
+into specific cells - Craft press is the entire interaction, feedback
+is a log line); shaped-recipe matching still has zero real caller
+(only shapeless is exercised by this quick-craft design).
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task": more block/item variety, then modding depth (a second real
+event beyond `block_broken`), then platform verification, then
+performance work, then UI/audio polish.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet
@@ -855,9 +925,28 @@ two-process networked runs reproducing Phase 21's exact same log
 lines, confirming the refactor changed how the lookup works, not what
 it returns. `ctest` 344/344 (non-bgfx) / 347/347 (bgfx).
 
+Phase 23 (quick-craft, post-queue) gives `RecipeRegistry` its first
+real caller, closing a gap flagged since Phase 5: a new `Action::Craft`
+auto-assembles a query grid from one of each distinct held item type
+and calls `find_match` for real - one new recipe (1 grass + 1 dirt ->
+1 game:compost, the first crafted-only item) exercises both the match
+and reject paths in a real run. Purely client-side, no protocol
+changes. Caught and fixed a real bug along the way: the verification
+hook's first, frame-count-gated version broke under real network
+latency (the unthrottled client loop outran the server round trip,
+causing a double-break/double-grant race) - fixed by switching to the
+same wall-clock-gated pattern `LCU_VERIFY_MOVE_SECONDS` (Phase 16)
+already established for this exact class of problem. `ctest` unchanged
+at 344/344 (non-bgfx) / 347/347 (bgfx).
+
 Known simplifications carried forward, still accurate and still
-acceptable until something needs more: `RecipeRegistry` has no
-crafting-UI caller; item drops are now looked up through a real
+acceptable until something needs more: ~~`RecipeRegistry` has no
+crafting-UI caller~~ **Fixed** (Phase 23): a real quick-craft trigger
+now calls `find_match` for real, though it's still not a graphical
+crafting-grid UI (no way to arrange items into specific cells - one
+Craft press against an auto-built grid is the entire interaction) and
+only correctly represents recipes needing exactly one of each distinct
+ingredient type; item drops are now looked up through a real
 `game::items::BlockItemMapping` table (Phase 22) rather than hardcoded
 `if` chains, but that table is still populated from three explicit
 `register_pair` calls per process (client and server each maintain

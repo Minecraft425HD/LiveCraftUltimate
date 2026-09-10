@@ -21,10 +21,11 @@ edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
 mappings for grass/dirt)**, **Phase 19 (server-side inventory
 extended past game:stone)**, **Phase 20 (interest-scoped chunk
 unloading, real chunk persistence, disconnect detection)**, **Phase 21
-(hotbar item selection for placing grass/dirt)**, and **Phase 22
-(data-driven block-id-to-item-id mapping)** are done; see "Reality
-Audit" and "Last Completed Task" below for what they cover and what's
-next.
+(hotbar item selection for placing grass/dirt)**, **Phase 22
+(data-driven block-id-to-item-id mapping)**, and **Phase 23
+(quick-craft: RecipeRegistry's first real caller)** are done; see
+"Reality Audit" and "Last Completed Task" below for what they cover
+and what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -702,6 +703,58 @@ registration, not external config), not a JSON/config-file content
 pipeline (a separate, larger piece of future work if modding ever
 needs one).
 
+**Phase 23 (quick-craft: RecipeRegistry's first real caller)**: closed
+a gap honestly flagged since Phase 5 - `RecipeRegistry` was
+implemented and unit tested but had zero real callers anywhere ("no
+crafting-grid caller exists yet," restated unchanged through every
+later phase's Known Limitations).
+
+First crafted-only content: `game:compost`, a new item with no
+corresponding block, obtainable only by crafting. One real shapeless
+recipe: `1x game:grass + 1x game:dirt -> 1x game:compost`, on a new
+`lcu::items::RecipeRegistry` instance in `VoxelClient`. New
+`Action::Craft` (bound to `C`/a new "CRAFT" touch button, same pattern
+every other action uses): on an edge-detected press, builds a query
+grid from one of each *distinct* item type currently held (dedup by
+inventory-slot scan), calls `RecipeRegistry::find_match` for real, and
+on a match consumes exactly the grid's contents (which equals the
+matched recipe's ingredients exactly, since shapeless matching
+requires an exact multiset match) and grants the result. Logs "No
+recipe matches your held items" on no match - a real rejection path.
+Purely client-side, single-player and networked alike - crafting never
+touches the `World` or needs server validation (same
+client-authoritative precedent as item pickup, see DECISIONS.md), so
+it needed zero protocol/server changes.
+
+A real bug was caught and fixed by real networked verification, not by
+reasoning alone: the verification hook's first version gated its two
+block breaks by frame count (mirroring `LCU_VERIFY_BREAK_PLACE`'s
+style) - this worked single-player but broke networked mode, since the
+unthrottled client loop ran hundreds of frames (confirmed: even 200
+wasn't enough) before the first break's `BlockChange` round-tripped
+back, so the second break's raycast still saw the old, unbroken grass
+block and re-requested breaking the *same* position - optimistically
+double-granting the item client-side before the server's rejection and
+inventory correction arrived. Fixed by switching the hook to a
+wall-clock-gated state machine, the same pattern `LCU_VERIFY_MOVE_SECONDS`
+(Phase 16) already established for this exact class of problem.
+Confirmed fixed via a second real networked run: server applies both
+breaks at their correct distinct positions, zero warnings, craft
+succeeds, reject path still fires.
+
+No new unit tests - pure orchestration of already-tested
+`RecipeRegistry`/`Inventory`/`ItemRegistry` primitives, exercised by
+the real single-player and two-process networked runs above. `ctest`
+unchanged at 347/347 (bgfx) / 344/344 (non-bgfx).
+
+Honestly scoped: quick-craft's auto-built grid only correctly
+represents a recipe needing exactly one of each distinct ingredient
+type - not a stand-in for a real grid that could hold more than one of
+the same item in different cells; no graphical crafting-grid UI exists
+(a Craft press is the entire interaction, feedback is a log line);
+shaped-recipe matching still has zero real caller (only shapeless is
+exercised by this design).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -829,10 +882,16 @@ None currently tracked.
   attempt then just silently no-ops, same as any other empty-stack
   place attempt already did before this phase). No on-screen indication
   of the current selection exists either - only a log line.
-- `RecipeRegistry` has no crafting-grid caller anywhere - implemented
-  and unit-tested standalone, same as `BlockRegistry`/`ItemRegistry`
-  were before `VoxelClient` used them. No crafting table/UI exists yet
-  to feed it a real grid.
+- ~~`RecipeRegistry` has no crafting-grid caller anywhere - implemented
+  and unit-tested standalone~~ **Fixed** (Phase 23): a new
+  `Action::Craft` quick-craft trigger calls `find_match` for real
+  against a grid auto-built from held items - see PROJECT_STATE.md
+  "Phase 23" above. Still no *graphical* crafting-grid UI (no way to
+  arrange items into specific cells - one Craft press against an
+  auto-built grid is the entire interaction), the auto-built grid only
+  correctly represents a recipe needing exactly one of each distinct
+  ingredient type, and shaped-recipe matching still has zero real
+  caller (only shapeless is exercised).
 - ~~Three real block types now exist (`game:stone`/`game:grass`/
   `game:dirt`, Phase 17-18) with real terrain, collision, meshing,
   replication, and pickup-on-break - but placing a block still always
@@ -1129,14 +1188,19 @@ before content/polish):
    registered (stone/grass/dirt) and each process populates its own
    table independently (not synced), but adding a fourth is now one
    `register_pair` call per side, not a new branch in two files.
-4. Continue down brief section 10's list after that: further
-   content/gameplay systems (a real crafting-UI caller for the
-   already-implemented `RecipeRegistry`, more block/item variety), then
-   modding depth (a second real event beyond `block_broken`), then
-   platform verification (Android/iOS on an actual toolchain), then
-   performance work informed by `VoxelBenchmarks`' real numbers, then
-   UI/audio polish.
-5. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
+4. ~~A real crafting-UI caller for the already-implemented
+   `RecipeRegistry`~~ **Done (Phase 23)**: a new `Action::Craft`
+   quick-craft trigger calls `find_match` for real - see
+   PROJECT_STATE.md "Phase 23" above. Still no graphical crafting-grid
+   UI, and the auto-built query grid only correctly represents
+   one-of-each-distinct-ingredient recipes.
+5. Continue down brief section 10's list after that: more block/item
+   variety (more real recipes and content now that both RecipeRegistry
+   and BlockItemMapping have real callers), then modding depth (a
+   second real event beyond `block_broken`), then platform verification
+   (Android/iOS on an actual toolchain), then performance work informed
+   by `VoxelBenchmarks`' real numbers, then UI/audio polish.
+6. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained
    packet volume) - deferred since it needs dedicated networking-code

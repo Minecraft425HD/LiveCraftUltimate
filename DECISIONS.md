@@ -1449,3 +1449,101 @@ C++ struct literals, not JSON. An external config-file pipeline is
 real, larger future work (relevant once modding needs to declare
 block/item associations without recompiling), not something this
 phase's actual gap required.
+
+## 2026-09-10 — Quick-craft auto-builds its query grid from one of each distinct held item, not a real grid UI (Phase 23)
+
+**Context:** `RecipeRegistry` (Phase 5) was implemented and unit tested
+but had zero real callers - `find_match(grid, width, height)` expects
+a caller to hand it a grid representing what a player physically
+arranged into crafting-table cells, and no such grid (or the UI to
+fill one) exists anywhere in the project. Building a full crafting-grid
+UI (drag-drop item placement into specific cells) was out of scope -
+`engine/ui` has no texture atlas yet and no drag-drop input handling
+exists, the same blocker every other UI-shaped gap in this project
+(the hotbar, the inventory screen) already cites.
+
+**Decision:** Give the player one action, `Craft`, that auto-builds a
+query grid from the inventory itself: scan every slot, collect each
+*distinct* item id once (dedup), and call `find_match` with that as a
+1-row grid. This is a real integration, not a bypass - `find_match` is
+called with a real, correctly-shaped grid, and both its outcomes
+(match and no-match) are exercised by real gameplay states, not
+contrived inputs. The tradeoff, stated plainly: this only correctly
+represents a recipe that needs exactly one of each distinct ingredient
+type. A recipe needing e.g. two sticks would need two entries in the
+grid, and "collect each distinct item once" can never produce that -
+it would need real grid cells a player filled individually. This is
+narrower than `RecipeRegistry`'s actual generality (which already
+supports repeated ingredients and shaped recipes, both proven by
+Phase 5's own unit tests) - the one recipe this phase registers (1
+grass + 1 dirt) happens to fit the auto-grid's shape exactly, so the
+limitation isn't yet visible in practice, but it's real and documented
+(PROJECT_STATE.md Known Limitations) rather than papered over.
+
+**Why not skip `RecipeRegistry` entirely and hardcode the one recipe's
+check instead:** that would be strictly worse for the same amount of
+code - `find_match`'s shapeless matching (exact multiset comparison,
+already unit tested) is exactly the check a hardcoded version would
+have to reimplement, and routing through the real registry means a
+second recipe (even a same-shape one) is one `add_shapeless` call, not
+new branching logic.
+
+**Why `game:compost` has no corresponding block:** this phase's actual
+gap was "no crafting caller," not "need more terrain content" - adding
+a placeable block would need collision/meshing/replication/hotbar
+wiring, all real work unrelated to proving crafting itself works. A
+crafted-only item (obtainable no other way) is a real, common pattern
+in this genre and the smallest honest way to give the recipe something
+worth crafting.
+
+## 2026-09-10 — LCU_VERIFY_CRAFT is wall-clock-gated, not frame-count-gated (a real bug caught mid-phase, Phase 23)
+
+**Context:** The first version of this phase's verification hook
+mirrored `LCU_VERIFY_BREAK_PLACE`'s style exactly: fixed frame numbers
+(`frame == N`) triggering each input. It passed cleanly single-player.
+Run against a real two-process networked server, it produced a
+double-grant: the client logged `"Picked up 1 game:grass (inventory:
+2)"` (should be 1) and the server logged a `Rejected BlockAction`
+warning for a redundant second break request at the *same* world
+position as the first.
+
+**Root cause, confirmed by reading the actual sequence, not guessed:**
+in networked mode a break never mutates the client's own `World`
+directly - it sends a `BlockAction` and waits for the server's
+`BlockChange` broadcast to round-trip back before the client's local
+raycast will ever see the block as gone (see "Block edits are not
+client-predicted"). The hook's second `Interact` press was scheduled a
+fixed number of frames after the first (initially a few, later 200) -
+but this project's main loop is deliberately unthrottled, so even 200
+iterations complete in far less real time than one UDP round trip plus
+the server's own tick processing takes. The second press's raycast
+therefore still hit the *original*, not-yet-removed grass block,
+re-requesting the same break - client-side optimistic pickup (item
+pickup is client-authoritative, see the Phase 13 decision above)
+granted a second grass item before the server's rejection and
+`InventoryUpdate` correction had a chance to arrive.
+
+**Decision:** Replace the frame-count gate with a wall-clock-gated
+state machine - the same pattern `LCU_VERIFY_MOVE_SECONDS` (Phase 16)
+already established for this identical class of problem (that
+decision's own text already explains why frame-count timing doesn't
+work under an unthrottled loop with real network latency; this phase
+independently rediscovered the same failure mode from a different
+angle and applied the same fix). Each verification step now advances
+only once real elapsed time since the hook started crosses its
+threshold (1.0s before the second break, 1.2s before the first craft
+attempt, 1.5s before the second), each firing for exactly one frame
+(clean edge) via a small `verify_craft_step` counter that advances
+immediately on firing, preventing re-trigger. Confirmed fixed via a
+second real networked run showing both breaks land at their correct,
+distinct positions with zero rejections.
+
+**Why this is recorded as a decision, not just a bugfix:** it's the
+second time in this project a frame-count-indexed synthetic-input hook
+has silently assumed single-player-speed world mutation and broken
+under real network latency (Phase 16's `LCU_VERIFY_MOVE_SECONDS`
+decision was the first). Any *future* verification hook that presses
+Interact/PlaceBlock/Craft more than once in networked mode should
+default to wall-clock gating from the start, not frame counting -
+frame counting is only safe for a hook's *first* action, or for
+single-player-only verification.

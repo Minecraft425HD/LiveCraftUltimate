@@ -2,7 +2,42 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23
+
+### Phase 23
+
+- New `Action::Craft` (`engine/platform::Action`), bound to `C` on
+  keyboard and a new "CRAFT" touch button - `RecipeRegistry`'s first
+  real caller, closing a gap honestly flagged since Phase 5 ("no
+  crafting-grid caller exists yet").
+- First crafted-only item: `game:compost` (no corresponding block).
+  One real shapeless recipe on a new `lcu::items::RecipeRegistry`
+  instance in `VoxelClient`: `1x game:grass + 1x game:dirt -> 1x
+  game:compost`.
+- Quick-craft: on an edge-detected Craft press, builds a query grid
+  from one of each distinct item type currently held (dedup by
+  inventory-slot scan), calls `RecipeRegistry::find_match` for real,
+  consumes exactly the grid's contents on a match and grants the
+  result, logs "No recipe matches your held items" on no match.
+- Purely client-side (single-player and networked alike) - crafting
+  never touches the `World` or needs server validation, same
+  client-authoritative precedent as item pickup. No protocol/server
+  changes needed.
+- New standalone headless hook `LCU_VERIFY_CRAFT`. Caught and fixed a
+  real bug along the way: its first, frame-count-gated version broke
+  under real network latency (the unthrottled client loop outran the
+  server round trip by hundreds of frames, causing a double-break/
+  double-grant race) - fixed by switching to the same wall-clock-gated
+  pattern `LCU_VERIFY_MOVE_SECONDS` (Phase 16) already established for
+  this exact class of problem. Confirmed fixed via a second real
+  networked run.
+- No new unit tests - pure orchestration of already-tested
+  `RecipeRegistry`/`Inventory`/`ItemRegistry` primitives. `ctest`
+  unchanged at 347/347 (bgfx) / 344/344 (non-bgfx).
+- Honestly scoped: quick-craft's auto-built grid only correctly
+  represents a recipe needing exactly one of each distinct ingredient
+  type; no graphical crafting-grid UI; shaped-recipe matching still has
+  zero real caller.
 
 ### Phase 22
 

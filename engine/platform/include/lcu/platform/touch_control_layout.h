@@ -21,11 +21,11 @@ struct TouchButtonRect {
 // the two can never drift apart into "button is visible here but the tap
 // registers over there." Bottom-right thumb cluster (Jump/Interact/
 // PlaceBlock/Sprint/Crouch) plus a top-right menu column (Inventory,
-// CycleHotbar below it - Phase 21) - the
+// CycleHotbar, Craft below it - Phase 21/23) - the
 // standard mobile-FPS overlay layout, kept out of both drag regions' way
 // (movement is the left half of the screen, look drag only starts where
 // no button rect claims the touch first - see TouchInputBackend::update).
-inline constexpr std::array<TouchButtonRect, 7> kTouchButtonLayout = {{
+inline constexpr std::array<TouchButtonRect, 8> kTouchButtonLayout = {{
     {Action::Jump, "JUMP", 0.86f, 0.78f, 1.00f, 0.92f},
     {Action::Interact, "HIT", 0.72f, 0.78f, 0.86f, 0.92f},
     {Action::PlaceBlock, "PLACE", 0.72f, 0.62f, 0.86f, 0.76f},
@@ -33,6 +33,7 @@ inline constexpr std::array<TouchButtonRect, 7> kTouchButtonLayout = {{
     {Action::Crouch, "CROUCH", 0.58f, 0.78f, 0.72f, 0.92f},
     {Action::Inventory, "INV", 0.90f, 0.02f, 1.00f, 0.12f},
     {Action::CycleHotbar, "ITEM", 0.90f, 0.14f, 1.00f, 0.24f},
+    {Action::Craft, "CRAFT", 0.90f, 0.26f, 1.00f, 0.36f},
 }};
 
 inline bool touch_button_contains(const TouchButtonRect& button, f32 x, f32 y) {
