@@ -22,10 +22,11 @@ mappings for grass/dirt)**, **Phase 19 (server-side inventory
 extended past game:stone)**, **Phase 20 (interest-scoped chunk
 unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (hotbar item selection for placing grass/dirt)**, **Phase 22
-(data-driven block-id-to-item-id mapping)**, and **Phase 23
-(quick-craft: RecipeRegistry's first real caller)** are done; see
-"Reality Audit" and "Last Completed Task" below for what they cover
-and what's next.
+(data-driven block-id-to-item-id mapping)**, **Phase 23
+(quick-craft: RecipeRegistry's first real caller)**, and **Phase 24
+(item_crafted: EventBus's second real event)** are done; see "Reality
+Audit" and "Last Completed Task" below for what they cover and what's
+next.
 
 ## Reality Audit (2026-09-10)
 
@@ -755,6 +756,49 @@ the same item in different cells; no graphical crafting-grid UI exists
 shaped-recipe matching still has zero real caller (only shapeless is
 exercised by this design).
 
+**Phase 24 (item_crafted: EventBus's second real event)**: closed a
+gap flagged since Phase 9 - `EventBus` only ever had one real event
+(`block_broken`), with its own doc comment stating "add another
+`emit_<event>()` the same way once a second real event exists to
+validate the shape against." Phase 23's quick-craft gave the project
+its first genuinely new gameplay moment since Phase 13 worth exposing
+to mods.
+
+New `EventBus::emit_item_crafted(item_id, count)`, same
+error-isolated-per-subscriber pattern `emit_block_broken` already
+established. `VoxelClient`'s quick-craft handler calls it right after
+a successful `find_match` + item grant. Purely client-side, like
+crafting itself - `VoxelServer` never calls it, but still exposes
+`lcu.subscribe("item_crafted", ...)` since a mod script is shared
+between both hosts and must load identically on either (the same
+reason `EventBus` was already constructed server-side even before any
+server-fired event existed).
+
+`example_mod/init.lua` now subscribes to both events, proving the real
+register -> load -> subscribe -> emit loop generalizes beyond
+`block_broken` alone, not just that a second typed emit method
+compiles - verified via a real run (`LCU_VERIFY_CRAFT`) showing
+`[example_mod] item_crafted #1: 1 x item id 4` fire at the exact
+moment compost is crafted, and a real server run confirming the same
+mod file still loads cleanly there (the new subscription just never
+fires on that host).
+
+Fixed a stale comment along the way: `server/main.cpp` claimed "the
+server never calls emit_block_broken() itself," which Phase 13 made
+false (block edits are server-authoritative, so the server's own break
+handling is where `emit_block_broken` actually fires) - noticed while
+touching the same code for `item_crafted`'s opposite case.
+
+3 new unit tests (`EventBus.EmitItemCrafted*`,
+`EventBus.BlockBrokenAndItemCraftedSubscribersAreTrackedIndependently`).
+`ctest` 350/350 (bgfx, up from 347) / 347/347 (non-bgfx, up from 344).
+
+Honestly scoped: still no manifest/dependency/version format for
+`ModLoader`; mod-registered ids still aren't synced over the network;
+only two real events now - both client-triggered content moments,
+nothing server-side fires one yet; a third event still needs a genuine
+third engine-side moment to justify it, not speculative expansion.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -767,11 +811,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 347/347 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 350/350 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 344/344 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 347/347 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -1073,10 +1117,14 @@ None currently tracked.
   `CommandRegistry`) don't exist yet — Lua bindings only cover the two
   registries that were already real before Phase 9; the others are
   added when something actually needs them (brief section 98).
-- `EventBus` only has one real event (`block_broken`) — no entity-
-  spawned/player-joined/tick/... events exist since nothing in the
-  engine fires them yet; add another `emit_<event>()` the same way once
-  a second real event exists (see DECISIONS.md).
+- ~~`EventBus` only has one real event (`block_broken`)~~ **Fixed**
+  (Phase 24): `item_crafted` is a second real event, following the
+  exact pattern the Phase 9 note below asked for. No entity-spawned/
+  player-joined/tick/... events exist yet since nothing in the engine
+  fires them; both real events today are client-triggered content
+  moments (breaking, crafting) - nothing server-side fires one yet.
+  Add another `emit_<event>()` the same way once a third real event
+  exists (see DECISIONS.md).
 - `ModLoader` has no manifest/dependency/version format — a mod is just
   a directory name plus a fixed `init.lua` entry point. No load-order
   guarantees between mods beyond directory iteration order, no way for
@@ -1194,13 +1242,18 @@ before content/polish):
    PROJECT_STATE.md "Phase 23" above. Still no graphical crafting-grid
    UI, and the auto-built query grid only correctly represents
    one-of-each-distinct-ingredient recipes.
-5. Continue down brief section 10's list after that: more block/item
+5. ~~Modding depth (a second real event beyond `block_broken`)~~
+   **Done (Phase 24)**: `item_crafted` is a second real event,
+   `example_mod` subscribes to both - see PROJECT_STATE.md "Phase 24"
+   above. Both real events are still client-triggered content moments;
+   nothing server-side fires one yet, and `ModLoader` still has no
+   manifest/dependency/version format.
+6. Continue down brief section 10's list after that: more block/item
    variety (more real recipes and content now that both RecipeRegistry
-   and BlockItemMapping have real callers), then modding depth (a
-   second real event beyond `block_broken`), then platform verification
+   and BlockItemMapping have real callers), then platform verification
    (Android/iOS on an actual toolchain), then performance work informed
    by `VoxelBenchmarks`' real numbers, then UI/audio polish.
-6. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
+7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained
    packet volume) - deferred since it needs dedicated networking-code

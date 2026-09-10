@@ -1097,6 +1097,9 @@ int main() {
                 LCU_LOG_INFO("Crafted {} {} (inventory: {})", result->count,
                              item_registry.definition_of(result->item).namespaced_id,
                              player_inventory.count_item(result->item));
+#if defined(LCU_ENABLE_SCRIPTING)
+                mod_event_bus.emit_item_crafted(result->item, result->count);
+#endif
             } else {
                 LCU_LOG_INFO("No recipe matches your held items");
             }

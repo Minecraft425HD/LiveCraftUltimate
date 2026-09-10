@@ -71,4 +71,23 @@ void EventBus::emit_block_broken(i64 world_x, i64 world_y, i64 world_z, u16 bloc
     }
 }
 
+void EventBus::emit_item_crafted(u16 item_id, u32 count) {
+    auto it = subscribers_.find("item_crafted");
+    if (it == subscribers_.end()) {
+        return;
+    }
+
+    lua_State* state = lua_.raw();
+    for (int function_ref : it->second) {
+        lua_rawgeti(state, LUA_REGISTRYINDEX, function_ref);
+        lua_pushinteger(state, static_cast<lua_Integer>(item_id));
+        lua_pushinteger(state, static_cast<lua_Integer>(count));
+        if (lua_pcall(state, 2, 0, 0) != LUA_OK) {
+            const char* message = lua_tostring(state, -1);
+            LCU_LOG_ERROR("Lua error (item_crafted handler): {}", message != nullptr ? message : "<no message>");
+            lua_pop(state, 1);
+        }
+    }
+}
+
 }  // namespace lcu::modding

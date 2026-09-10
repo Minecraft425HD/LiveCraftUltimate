@@ -2,7 +2,33 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24
+
+### Phase 24
+
+- New `EventBus::emit_item_crafted(item_id, count)` - `EventBus`'s
+  second real event, closing a gap flagged since Phase 9 ("add another
+  emit_<event>() the same way once a second real event exists").
+- `VoxelClient`'s quick-craft handler (Phase 23) calls it right after
+  a successful `find_match` + item grant. Purely client-side, like
+  crafting itself - `VoxelServer` never calls it, but still exposes
+  `lcu.subscribe("item_crafted", ...)` since mod scripts are shared
+  between both hosts.
+- `example_mod/init.lua` now subscribes to both `block_broken` and
+  `item_crafted`, proving the real register -> load -> subscribe ->
+  emit loop generalizes, not just that a second typed method compiles.
+- Fixed a stale comment in `server/main.cpp` claiming "the server never
+  calls emit_block_broken() itself" - false since Phase 13 made block
+  edits server-authoritative.
+- 3 new unit tests (`EventBus.EmitItemCrafted*`,
+  `EventBus.BlockBrokenAndItemCraftedSubscribersAreTrackedIndependently`).
+- Verified via a real single-player run: `[example_mod] item_crafted
+  #1: 1 x item id 4` fires at the exact craft moment; a real server run
+  confirms the mod still loads cleanly there.
+- `ctest` 350/350 (bgfx, up from 347) / 347/347 (non-bgfx, up from
+  344).
+- Honestly scoped: both real events are still client-triggered content
+  moments; nothing server-side fires an event yet.
 
 ### Phase 23
 

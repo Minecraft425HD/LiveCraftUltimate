@@ -664,6 +664,54 @@ performance work, then UI/audio polish.
 
 ---
 
+## Phase 24 — item_crafted: EventBus's second real event (post-original-queue; closes a Phase 9 gap long-flagged as modding depth)
+
+`EventBus` (Phase 9) only ever had one real event - `block_broken` -
+with its own doc comment honestly stating "add another `emit_<event>()`
+the same way once a second real event exists to validate the shape
+against." Phase 23's quick-craft gave the project its first genuinely
+new gameplay moment since Phase 13 worth exposing to mods.
+
+- [x] New `EventBus::emit_item_crafted(item_id, count)`, same
+  error-isolated-per-subscriber pattern as `emit_block_broken`.
+- [x] `VoxelClient`'s quick-craft handler (Phase 23) calls it right
+  after a successful `find_match` + item grant.
+- [x] Purely client-side, like crafting itself - `VoxelServer` never
+  calls it (crafting doesn't happen there), but still exposes
+  `lcu.subscribe("item_crafted", ...)` since a mod script is shared
+  between both hosts and must load identically on either.
+- [x] `example_mod/init.lua` extended to subscribe to both events now,
+  proving the real register -> load -> subscribe -> emit loop
+  generalizes beyond `block_broken` alone, not just that a second typed
+  emit method compiles.
+- [x] Fixed a stale comment in `server/main.cpp` claiming "the server
+  never calls emit_block_broken() itself" - Phase 13 made that false
+  (block edits are server-authoritative, so the server's own break
+  handling is where `emit_block_broken` actually fires); noticed while
+  touching the same code for `item_crafted`'s opposite case.
+- [x] 3 new unit tests (`EventBus.EmitItemCrafted*`,
+  `EventBus.BlockBrokenAndItemCraftedSubscribersAreTrackedIndependently`).
+- [x] Verified via a real single-player run (`LCU_VERIFY_CRAFT`):
+  `[example_mod] item_crafted #1: 1 x item id 4` logs at the exact
+  moment compost is crafted, right after `"Crafted 1 game:compost
+  (inventory: 1)"`. Verified the server still loads the same mod file
+  cleanly (no load failure from the new `item_crafted` subscription
+  it never fires).
+
+`ctest` 350/350 (bgfx, up from 347) / 347/347 (non-bgfx, up from 344).
+
+Honestly scoped: still no manifest/dependency/version format for
+`ModLoader`; mod-registered ids still aren't synced over the network;
+only two real events now (`block_broken`, `item_crafted`) - a third
+still needs a genuine third engine-side moment to justify it, not
+speculative expansion.
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task": more block/item variety, then platform verification, then
+performance work, then UI/audio polish.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet
@@ -939,6 +987,17 @@ same wall-clock-gated pattern `LCU_VERIFY_MOVE_SECONDS` (Phase 16)
 already established for this exact class of problem. `ctest` unchanged
 at 344/344 (non-bgfx) / 347/347 (bgfx).
 
+Phase 24 (item_crafted, post-queue) gives `EventBus` its second real
+event, closing a gap flagged since Phase 9: `emit_item_crafted`,
+called from Phase 23's quick-craft, follows the exact same
+error-isolated-per-subscriber pattern `emit_block_broken` already
+established. `example_mod` now subscribes to both, proving the real
+register -> load -> subscribe -> emit loop generalizes, not just that
+a second typed method compiles - verified via a real run showing
+`[example_mod] item_crafted #1: 1 x item id 4` fire at the exact
+craft moment. 3 new unit tests. `ctest` 350/350 (bgfx) / 347/347
+(non-bgfx).
+
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: ~~`RecipeRegistry` has no
 crafting-UI caller~~ **Fixed** (Phase 23): a real quick-craft trigger
@@ -946,7 +1005,10 @@ now calls `find_match` for real, though it's still not a graphical
 crafting-grid UI (no way to arrange items into specific cells - one
 Craft press against an auto-built grid is the entire interaction) and
 only correctly represents recipes needing exactly one of each distinct
-ingredient type; item drops are now looked up through a real
+ingredient type; ~~`EventBus` has only one real event (`block_broken`)~~
+**Fixed** (Phase 24): `item_crafted` is a second real event, though
+still purely client-side content moments so far - nothing server-side
+fires an event yet; item drops are now looked up through a real
 `game::items::BlockItemMapping` table (Phase 22) rather than hardcoded
 `if` chains, but that table is still populated from three explicit
 `register_pair` calls per process (client and server each maintain
@@ -966,7 +1028,9 @@ server does, as of Phase 20) since the client only ever has one
 player's-worth of interest to track anyway; `engine/network`'s
 reliable channel has no RTT estimation/congestion control, and its
 server connection model has no authentication; server-side inventory
-has no persistence across a disconnect/reconnect; `EventBus` has only one real event (`block_broken`);
+has no persistence across a disconnect/reconnect; `EventBus` has two
+real events now (`block_broken`, `item_crafted`, Phase 24) - both are
+client-triggered content moments, nothing server-side fires one yet;
 `ModLoader` has no manifest/dependency/version format; mod-registered
 ids aren't synced over the network (both hosts must load the same mods
 independently and agree by construction); positional audio is pan +

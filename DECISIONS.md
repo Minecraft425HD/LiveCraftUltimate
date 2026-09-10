@@ -1547,3 +1547,40 @@ Interact/PlaceBlock/Craft more than once in networked mode should
 default to wall-clock gating from the start, not frame counting -
 frame counting is only safe for a hook's *first* action, or for
 single-player-only verification.
+
+## 2026-09-10 — item_crafted fires only on VoxelClient, never VoxelServer (Phase 24)
+
+**Context:** `EventBus` (Phase 9) had exactly one real event,
+`block_broken`, fired from both hosts (client for single-player,
+server for networked - Phase 13 made block edits server-authoritative,
+so the server's own `handle_block_action` is where a real break
+happens in that mode). Adding `item_crafted` as the second event
+raised the question of whether it needed the same dual-host treatment.
+
+**Decision:** `emit_item_crafted` is called from exactly one place -
+`VoxelClient`'s quick-craft handler - and never from `VoxelServer`.
+This mirrors crafting's own architecture, not a modding-specific
+choice: crafting (Phase 23) is deliberately pure client-side local
+inventory bookkeeping with no server involvement at all (same
+precedent as item pickup itself), so there is no server-side "a craft
+happened" moment to fire an event from - unlike a block break, which
+genuinely happens on the server in networked mode. `EventBus` is still
+constructed and `expose_to_lua()`'d on `VoxelServer` regardless (same
+reason it already was before this phase: a mod script is shared
+between both hosts, so `lcu.subscribe("item_crafted", ...)` must not
+fail to load there even though it will never actually fire on that
+host) - confirmed via a real server run that the updated
+`example_mod/init.lua` (now subscribing to both events) still loads
+cleanly.
+
+**Why this doesn't make `item_crafted` a "lesser" event:** both real
+events today happen to be client-triggered content moments seen from a
+single player's perspective - `block_broken` merely *also* has a
+server-side firing point because block edits happen to be
+server-authoritative, not because being real requires it. A mod
+subscribing to `item_crafted` gets a real, correct signal in every
+mode this project supports (single-player and networked alike, since
+crafting behaves identically in both) - it simply won't see other
+players' remote crafts in networked mode, an honest scope note
+consistent with crafting itself never having had multiplayer
+visibility to begin with.

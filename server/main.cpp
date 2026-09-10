@@ -247,11 +247,16 @@ int main(int argc, char** argv) {
     // in the server's authoritative registries, not just the client's -
     // ids otherwise silently drift between the two (registries aren't
     // synced over the wire yet, so both sides still have to load the same
-    // mods locally to agree). EventBus is constructed and exposed even
-    // though the server never calls emit_block_broken() itself (block
-    // edits aren't replicated) - a mod script is shared between client and
+    // mods locally to agree). EventBus is constructed and exposed here
+    // for the same reason emit_block_broken *is* called below (Phase 13
+    // made block edits server-authoritative, so this is where a break
+    // actually happens) - a mod script is shared between client and
     // server, so lcu.subscribe(...) has to exist on both or a mod that
     // calls it unconditionally fails to load on whichever host lacks it.
+    // (item_crafted, Phase 23, is the opposite case: purely client-side,
+    // so only VoxelClient ever calls emit_item_crafted - the server still
+    // needs EventBus/lcu.subscribe to exist so a mod subscribing to it
+    // doesn't fail to load here, it just never actually fires server-side.)
     lcu::scripting::LuaState mod_lua;
     lcu::modding::EventBus mod_event_bus(mod_lua);
     mod_event_bus.expose_to_lua();

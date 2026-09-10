@@ -11,15 +11,16 @@ namespace lcu::modding {
 
 // A named pub/sub bus mod scripts subscribe Lua functions to (brief
 // section 84's event system). The engine calls one of the emit_*
-// methods at a meaningful moment (a block broken, ...); every Lua
-// function subscribed to that event name is called, in subscription
-// order, with that event's fixed argument list.
+// methods at a meaningful moment (a block broken, an item crafted,
+// ...); every Lua function subscribed to that event name is called, in
+// subscription order, with that event's fixed argument list.
 //
 // Deliberately not a generic C++ <-> Lua argument-marshalling
-// framework - only "block_broken" actually fires anywhere in this
-// codebase yet, so only it gets a typed emit method. Add another
-// emit_<event>() the same way once a second real event exists to
-// validate the shape against - see DECISIONS.md.
+// framework - each real event in this codebase gets its own typed
+// emit method with a fixed argument list, added only once a real
+// engine-side moment exists to call it from (see DECISIONS.md "Phase
+// 23" for why "item_crafted" - the second one - was added the same
+// way "block_broken" was).
 class EventBus {
    public:
     explicit EventBus(scripting::LuaState& lua);
@@ -37,6 +38,13 @@ class EventBus {
     // that errors is logged and skipped - it doesn't stop the
     // remaining subscribers from running.
     void emit_block_broken(i64 world_x, i64 world_y, i64 world_z, u16 block_id);
+
+    // Calls every Lua function subscribed to "item_crafted" with
+    // (item_id, count) as arguments - fired by VoxelClient's quick-craft
+    // (Phase 23) after RecipeRegistry::find_match succeeds and the
+    // result is granted. Same error-isolation behavior as
+    // emit_block_broken.
+    void emit_item_crafted(u16 item_id, u32 count);
 
     usize subscriber_count(const std::string& event_name) const;
 
