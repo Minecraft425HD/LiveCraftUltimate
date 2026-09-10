@@ -2038,3 +2038,34 @@ GPU/display - none of that is knowable from a code read or a headless
 Noop-backend run. A chunk that loads after a nearby source's BFS
 already finished still doesn't retroactively receive that light (Phase
 32/35's job, not this phase's).
+
+## 2026-09-10 — Phase 32 (boundary buffer) skipped: no blocking exists yet to buffer against
+
+**Context:** the brief marks Phase 32 explicitly optional
+("Grenzpuffer (optional)") and describes its purpose as ensuring
+"cross-chunk BFS never blocks (boundary condition buffered)" - i.e.
+deferring a cross-chunk light write into a buffer instead of writing
+directly into a neighbor chunk's `LightStorage` mid-BFS, so two
+lighting computations running concurrently on different threads don't
+contend for the same chunk's data.
+
+**Decision:** skipped. Every lighting call in this codebase - Phase 6's
+single-chunk compute, Phase 30's sky cascade, Phase 31's cross-chunk
+BFS - runs synchronously on the main thread against one shared
+`WorldLight` instance; nothing dispatches lighting work onto
+`engine/jobs::JobSystem` or any other thread yet (unlike meshing, which
+already does - see `remesh_and_upload`'s `job_system.submit` call).
+With no concurrent access to `WorldLight` anywhere in this codebase
+today, there is no actual lock contention or blocking for a boundary
+buffer to prevent - building one now would be optimizing against a
+problem that doesn't exist, contradicting the brief's own "no
+overengineering ahead of need" principle (already invoked once this
+session, Phase 1's mouse-look deferral, for the identical reason).
+
+**Revisit when:** lighting computation is ever dispatched across
+multiple `JobSystem` worker threads running concurrently on adjacent
+chunks - at that point a real race becomes possible (two threads each
+trying to write into the same shared boundary chunk's `LightStorage`),
+and a boundary buffer (or an equivalent synchronization mechanism)
+would have a real problem to solve. Nothing in Phases 33-42's own scope
+as given currently requires that.

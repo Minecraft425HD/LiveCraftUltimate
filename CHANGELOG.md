@@ -4,6 +4,15 @@ All notable changes to this project are recorded here, newest first.
 
 ## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31
 
+### Phase 32 (skipped, optional)
+
+- Explicitly optional in the brief ("Grenzpuffer (optional)"). Its
+  purpose is a concurrency optimization (deferring cross-chunk light
+  writes into a buffer so concurrent threads don't contend for the
+  same neighbor chunk) - nothing in this codebase dispatches lighting
+  work across multiple threads yet, so there's no actual blocking to
+  buffer against. See DECISIONS.md for the full reasoning.
+
 ### Phase 31
 
 - New `flood_block_light_cross_chunk`/`propagate_added_block_light_

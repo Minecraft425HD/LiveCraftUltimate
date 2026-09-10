@@ -1078,6 +1078,21 @@ already finished doesn't yet retroactively receive that light (Phase
 32/35's job); what real cross-chunk torchlight actually looks like on
 a real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION.
 
+## Phase 32 — Grenzpuffer (boundary buffer, optional) — SKIPPED
+
+Explicitly optional in the brief. Its stated purpose ("cross-chunk BFS
+never blocks - boundary condition buffered") is a concurrency
+optimization: deferring a cross-chunk light write into a buffer so two
+lighting computations running on different threads don't contend for
+the same neighbor chunk's data. Nothing in this codebase dispatches
+lighting work onto multiple threads today - every lighting call (Phase
+6/30/31 alike) runs synchronously on the main thread against one
+shared `WorldLight`. With no concurrent access anywhere, there is no
+actual blocking for a boundary buffer to prevent; building one now
+would be optimizing against a problem that doesn't exist yet - see
+DECISIONS.md for the full reasoning and what would make this worth
+revisiting.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
