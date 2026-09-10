@@ -130,6 +130,11 @@ struct ClientState {
     // empty; populated only by validated `BlockAction`s (see
     // handle_block_action below), never by the client directly.
     lcu::items::Inventory inventory{9};
+    // Per-movement chunk streaming (Phase 16): the chunk column this
+    // client's loaded-chunk range was last computed around - set at
+    // connect time to the spawn column, re-checked every tick against
+    // the client's current position.
+    lcu::voxel::ChunkCoord last_streamed_center{};
 };
 
 }  // namespace
@@ -197,6 +202,17 @@ int main(int argc, char** argv) {
     const auto is_solid = [&](lcu::voxel::BlockId id) { return block_registry.definition_of(id).has_collision; };
     const lcu::physics::PlayerPhysicsConfig physics_config;
     const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
+
+    // Per-movement chunk streaming (Phase 16, see DECISIONS.md): which
+    // chunk column a world-space position falls in, for deciding when a
+    // client has moved far enough to need its loaded-chunk range
+    // re-checked.
+    const auto chunk_coord_of_position = [](const lcu::math::Vec3& pos) {
+        const lcu::voxel::BlockWorldCoord block{static_cast<lcu::i64>(std::floor(pos.x)),
+                                                 static_cast<lcu::i64>(std::floor(pos.y)),
+                                                 static_cast<lcu::i64>(std::floor(pos.z))};
+        return lcu::voxel::world_to_chunk_and_local(block, lcu::voxel::Chunk::kEdgeLength).chunk;
+    };
 
     auto make_spawn_aabb = [&](lcu::math::Vec3 feet) {
         constexpr lcu::f32 kHalfWidth = 0.3f;
@@ -362,6 +378,7 @@ int main(int argc, char** argv) {
             ClientState& client = it->second;
             if (inserted) {
                 client.player.aabb = make_spawn_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
+                client.last_streamed_center = chunk_coord_of_position(client.player.aabb.center());
                 LCU_LOG_INFO("New client connection from {}", from.to_string());
             }
 
@@ -446,6 +463,61 @@ int main(int argc, char** argv) {
         }
 
         game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, kTickDt);
+
+        // Per-movement chunk streaming (brief section 19/22, Phase 16 -
+        // closes Phase 14's "connect-time-only" gap, see DECISIONS.md):
+        // grow - never shrink, this `World` is shared across every
+        // connected client, so unloading anything a *different* client
+        // still needs would break that client; see DECISIONS.md
+        // "server-side chunk streaming never unloads" - the server's
+        // loaded-chunk set to follow any client that has crossed into a
+        // new chunk column since last checked, then broadcast every
+        // newly-loaded chunk to every connected client (not just the one
+        // that triggered it - anyone already connected is equally
+        // missing a chunk that didn't exist yet a moment ago).
+        std::vector<lcu::voxel::ChunkCoord> newly_loaded_chunks;
+        for (auto& [addr, client] : clients) {
+            const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(client.player.aabb.center());
+            if (current_center == client.last_streamed_center) {
+                continue;
+            }
+            client.last_streamed_center = current_center;
+            for (lcu::i32 cx = current_center.x - load_settings.radius_xz; cx <= current_center.x + load_settings.radius_xz;
+                 ++cx) {
+                for (lcu::i32 cz = current_center.z - load_settings.radius_xz;
+                     cz <= current_center.z + load_settings.radius_xz; ++cz) {
+                    for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                        const lcu::voxel::ChunkCoord coord{cx, cy, cz};
+                        if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
+                            continue;
+                        }
+                        world.load_chunk(coord);
+                        newly_loaded_chunks.push_back(coord);
+                    }
+                }
+            }
+        }
+        if (!newly_loaded_chunks.empty()) {
+            LCU_LOG_INFO("Streamed {} newly-loaded chunk(s) into range (total {} loaded)", newly_loaded_chunks.size(),
+                         world.loaded_chunk_count());
+            for (const lcu::voxel::ChunkCoord& coord : newly_loaded_chunks) {
+                const lcu::voxel::Chunk* streamed_chunk = world.chunk_at(coord);
+                if (streamed_chunk == nullptr) {
+                    continue;
+                }
+                const protocol::ChunkData chunk_message{coord.x, coord.y, coord.z,
+                                                          lcu::serialization::serialize_chunk_to_bytes(*streamed_chunk)};
+                const auto encoded = protocol::encode_chunk_data(chunk_message);
+                for (auto& [broadcast_addr, broadcast_client] : clients) {
+                    const auto fragments = lcu::network::fragment_payload(
+                        encoded, broadcast_client.next_chunk_message_id++, lcu::network::kMaxFragmentDataSize);
+                    for (const auto& fragment : fragments) {
+                        broadcast_client.connection.send(lcu::network::Channel::ReliableOrdered,
+                                                          protocol::encode_chunk_data_fragment(fragment));
+                    }
+                }
+            }
+        }
 
         // Snapshot every AI entity's current position once per tick -
         // shared across all clients' (interest-filtered) EntityState

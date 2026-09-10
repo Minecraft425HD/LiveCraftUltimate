@@ -236,6 +236,76 @@ point. Both loaded worlds are small enough in this vertical slice
 server would need per-chunk streaming keyed to the client's own
 `update_streaming` calls, not a single dump at connect time.
 
+## Per-movement chunk streaming (Phase 16)
+
+Phase 14's `ChunkData` sync only ever ran once, right after connect -
+honestly documented there as a known gap ("not re-streamed as either
+side's loaded-chunk set changes afterward"). This phase closes it.
+`VoxelServer` now re-checks
+every connected client's loaded-chunk range on every tick: converts
+that client's current, server-known player position
+(`ClientState::player.aabb.center()`) to a chunk coordinate
+(`chunk_coord_of_position`), and - only when that differs from
+`ClientState::last_streamed_center` (a per-client "last checked at"
+cache, so a stationary or vertically-only-moving client costs nothing
+extra) - loads any not-yet-loaded chunk in `load_settings.radius_xz`/
+`min_chunk_y`/`max_chunk_y` around it, exactly like the startup load
+loop. Any chunk that transitions from Unloaded this tick is broadcast
+as `ChunkData` (fragmented, same as the connect-time sync) to *every*
+connected client, not just the one whose movement triggered it - anyone
+already connected is equally missing a chunk that didn't exist a moment
+ago.
+
+**The server's shared `World` only ever grows, never shrinks** - a
+deliberate simplification (see DECISIONS.md "server-side chunk
+streaming never unloads"): `World` is one instance shared across every
+connected client, so unloading a chunk because *one* client moved away
+from it could break a *different* client that's still standing in it.
+Real per-client interest-scoped unloading would need either a
+per-client "what have I actually sent this client" set or per-client
+`World` instances - both real architecture changes deferred until
+something (a long-running server's memory footprint, say) actually
+needs them, not built speculatively now.
+
+`VoxelClient` runs the mirror-image local half unconditionally
+(single-player and networked alike): the same generate-then-light-then-
+mesh sequence the initial spawn-area load already runs, triggered only
+when the player's own chunk coordinate changes since it was last
+checked - so a locally-generated placeholder chunk exists to fill in
+before any server `ChunkData` for that new coordinate could possibly
+arrive. The `ChunkDataFragment` handler (Phase 14) also gained a small
+but real fix for this phase: a `ChunkData` for a coordinate the client
+hasn't locally streamed to yet (a different client's movement grew the
+server's world past this client's own bounds, or this client's local
+trigger simply hasn't fired yet this frame) now calls `world.load_chunk`
+to create a real slot before overwriting it, instead of the old
+"isn't loaded locally, ignoring" silent drop - a genuine gap Phase 14's
+scope (a fixed, initial-sync-only region) never actually exercised.
+
+Verified via two real multi-process runs. Two-process: a `mobile_low`
+client held `MoveForward` for 6 real seconds (`LCU_VERIFY_MOVE_SECONDS`,
+a new headless verification hook - frame-count-indexed hooks don't work
+here since the main loop is unthrottled and how far a fixed frame count
+travels depends on real elapsed time, not frame count) - enough to
+cross the 16-block chunk boundary at `kMoveSpeed`; the server logs
+`Streamed 1 newly-loaded chunk(s) into range (total 2 loaded)` and the
+client logs `Applied server ChunkData for chunk (0, 1, -1)`, zero
+warnings/errors. Three-process: the same moving client alongside a
+second, entirely stationary client that never sent a single
+`PlayerInput` with nonzero movement - that stationary client's own log
+shows the identical `Applied server ChunkData for chunk (0, 1, -1)`
+line, proving the broadcast-to-every-connected-client path (not just
+the triggering client) actually works, not just that a message decoded.
+
+**Known simplification:** still no interest-managed unloading (see
+above); a client's own local streaming and the server's are two
+independent triggers that usually agree (same radius, same movement)
+but aren't literally synchronized - a client could in principle stream
+a coordinate locally a frame or two before or after the server's own
+broadcast for it arrives, resolved by whichever happens second simply
+overwriting (idempotent, not a race that corrupts anything, just
+occasionally-redundant work).
+
 ## Server-side inventory (Phase 15)
 
 `VoxelServer` now holds a real, authoritative `lcu::items::Inventory`
@@ -387,8 +457,13 @@ confirm chunk network streaming end-to-end at both a 1-chunk and a
 run (Phase 15) confirms server-side inventory reconciliation - the
 client's optimistic guess and the server's authoritative count actually
 converge after each round trip, not just that a message decoded - see
-"Server-side inventory" above (see BUILD_STATUS.md for the exact
-reproduce steps for all of the above).
+"Server-side inventory" above. Real two-process and three-process runs
+(Phase 16) confirm per-movement chunk streaming: a client whose real,
+server-simulated position crosses a chunk boundary triggers a genuinely
+new chunk being streamed to it, and a second, entirely stationary
+client independently receives the same broadcast - see "Per-movement
+chunk streaming" above (see BUILD_STATUS.md for the exact reproduce
+steps for all of the above).
 
 **Not verified**: behavior over a real (non-loopback) network with real
 latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
@@ -403,9 +478,13 @@ from earlier phases' single-client-only verification.
   compressed chunk (produced by `lcu::serialization::
   serialize_chunk_to_bytes`) across multiple `ChunkDataFragment`
   datagrams and reassemble them - see "Chunk network streaming" above.
-  Still a one-shot full sync on connect only, not per-movement streaming
-  or interest-managed by distance (see that section's "Known
-  simplifications").
+- ~~Chunk streaming is a one-shot full sync on connect only, not
+  per-movement~~ **Fixed** (Phase 16): `VoxelServer` now re-checks every
+  connected client's loaded-chunk range every tick and streams/
+  broadcasts anything newly in range - see "Per-movement chunk
+  streaming" above. Still not interest-managed by distance in the sense
+  of ever *unloading* anything - the shared `World` only grows (see that
+  section's "Known simplification").
 - **The client doesn't actually use the server's Welcome `world_seed`**
   to generate its world - it logs the received value (confirming the
   message round-trips correctly) but still calls its own compile-time

@@ -15,9 +15,10 @@ complete for what this headless sandbox can verify (see the per-phase
 history below). The project is now past that original 12-phase queue
 and into open-ended continued development (brief: "the goal is a
 complete playable game, not a completed checklist") - **Phase 13 (block
-edit replication)**, **Phase 14 (chunk network streaming)**, and
-**Phase 15 (server-side inventory)** are done; see "Reality Audit" and
-"Last Completed Task" below for what they cover and what's next.
+edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
+(server-side inventory)**, and **Phase 16 (per-movement chunk
+streaming)** are done; see "Reality Audit" and "Last Completed Task"
+below for what they cover and what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -347,6 +348,67 @@ persistence either - a server-side inventory lives only for the
 connection's lifetime, lost on disconnect like every other per-client
 server state today.
 
+**Phase 16 (per-movement chunk streaming)**: closed Phase 14's
+remaining honest gap - the connect-time `ChunkData` sync ran exactly
+once, so a player wandering past their initial spawn area streamed
+nothing new. `VoxelServer` now re-checks every connected client's
+loaded-chunk range every tick (only when that client's current chunk
+coordinate has actually changed since last checked, so a stationary
+client costs nothing extra), loads any not-yet-loaded chunk in range
+using the exact same generate-then-load logic the startup area already
+uses, and broadcasts every newly-loaded chunk as `ChunkData` to *every*
+connected client - not just whoever's movement triggered it. The
+server's shared `World` deliberately only ever grows, never shrinks
+(see DECISIONS.md "server-side chunk streaming never unloads") -
+unloading based on one client's position could break a different
+client still standing in that chunk, since `World` is one instance
+shared across every connection; real per-client interest-scoped
+unloading is deferred until something actually needs it.
+
+`VoxelClient` runs the mirror-image local half unconditionally: the
+same load-then-light-then-mesh sequence the initial spawn-area load
+already runs, triggered only when the player's own chunk coordinate
+changes. Also fixed a real gap in the Phase 14 `ChunkDataFragment`
+handler that this phase's dynamics actually exercise for the first
+time: a `ChunkData` for a coordinate the client hasn't locally streamed
+to yet (their local trigger hasn't fired this frame, or a *different*
+client's movement grew the server's world first) used to be silently
+dropped ("isn't loaded locally, ignoring") - now the client creates a
+real chunk slot via `world.load_chunk` before overwriting it, so no
+legitimately-arriving `ChunkData` is ever lost.
+
+Added a new headless verification hook, `LCU_VERIFY_MOVE_SECONDS`:
+holds `MoveForward` for that many real (wall-clock) seconds - frame-
+count-indexed hooks like `LCU_VERIFY_BREAK_PLACE` don't work for this,
+since the client's main loop is unthrottled (see BUILD_STATUS.md) and
+how far a fixed number of frames travels depends on real elapsed time,
+not frame count.
+
+Verified via two real multi-process runs. Two-process: a client held
+`MoveForward` for 6 real seconds (enough to cross the 16-block chunk
+boundary) - the server logs `Streamed 1 newly-loaded chunk(s) into
+range (total 2 loaded)`, the client logs `Applied server ChunkData for
+chunk (0, 1, -1)`, zero warnings/errors. Three-process: the same moving
+client alongside a second, entirely stationary client that never sent
+a single nonzero `PlayerInput` - that stationary client's own log shows
+the identical `Applied server ChunkData for chunk (0, 1, -1)` line,
+proving the broadcast reaches every connected client, not just the one
+whose movement triggered it.
+
+No new unit tests needed - this phase is orchestration logic in the two
+executables (`server/main.cpp`/`client/main.cpp`) built entirely on
+already-unit-tested primitives (`World`, `fragment_payload`,
+`ChunkData` encode/decode), verified instead via the real multi-process
+runs above, consistent with how the rest of `server/main.cpp`'s
+handshake/broadcast logic is verified. `ctest` unchanged at 342/342
+(bgfx) / 339/339 (non-bgfx).
+
+Honestly scoped: still no interest-managed unloading (see above); a
+client's own local streaming trigger and the server's are independent
+and only usually agree, not literally synchronized - occasionally
+redundant but never incorrect, since either order converges to the
+same overwritten state.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -405,19 +467,24 @@ None currently tracked.
 
 ## Known Limitations
 
-- `VoxelClient` loads a static, fixed 36-chunk area around spawn once at
-  startup (a 3x3 column of chunks, 4 chunks tall) rather than calling
-  `World::update_streaming` every frame from the player's actual
-  position - the player can walk outside the loaded area (movement/
-  physics/raycast simply stop finding chunks there; `chunk_at`/
-  `chunk_at_mutable` return null and break/place silently no-ops, logged
-  at debug level). Wiring `update_streaming` into the per-frame loop is
-  deferred, not forgotten - see DECISIONS.md.
+- ~~`VoxelClient` loads a static, fixed 36-chunk area around spawn once
+  at startup ... rather than streaming from the player's actual
+  position~~ **Fixed** (Phase 16, both `VoxelClient` and `VoxelServer`):
+  both now load newly-in-range chunks as the player's own chunk column
+  changes - see NETWORKING.md "Per-movement chunk streaming". Not via
+  `World::update_streaming` itself, though: that method also *unloads*
+  chunks outside range, which is the wrong shape for the server's
+  single `World` instance shared across every connected client (see
+  DECISIONS.md "server-side chunk streaming never unloads") - Phase 16
+  instead hand-rolls the load-only half of the same radius logic
+  directly in `server/main.cpp`/`client/main.cpp`. `World::update_streaming`
+  itself, unload behavior included, is still real and still unit-tested,
+  just not the function either executable's own streaming trigger calls.
 - `World::update_streaming` itself still streams a 3D cube by Chebyshev
   distance, not the horizontal-disc-plus-bounded-vertical shape real
-  worlds want. A camera/player now exists (Phase 4) but `VoxelClient`
-  doesn't call `update_streaming` yet (see above), so there's still no
-  real caller to validate a disc-shaped version against.
+  worlds want - still true, and still nothing calls it (see above), so
+  there's still no real caller to validate a disc-shaped version
+  against.
 - Worldgen only implements continental+terrain (brief section 21's first
   two pipeline stages) - no climate/biome/caves/ores/structures/
   vegetation/decoration, and no surface/subsurface block variation
@@ -477,12 +544,14 @@ None currently tracked.
   NETWORKING.md "Chunk network streaming") - `VoxelServer` sends a
   newly-connecting client a full, fragmented `ChunkData` snapshot of
   every chunk it has loaded, verified via real runs at both a 1-chunk
-  and a 36-chunk scale. Still a one-shot sync on connect only, not
-  interest-managed by distance and not re-streamed as either side's
-  loaded-chunk set changes afterward - a client and server that both
-  keep streaming new chunks in as a player roams still rely on
-  independently generating matching deterministic terrain for anything
-  sent *after* that initial connect-time sync. Block *edits*
+  and a 36-chunk scale, and (Phase 16, see NETWORKING.md "Per-movement
+  chunk streaming") keeps streaming new chunks to every connected
+  client as any of them wanders into unloaded territory, verified via
+  real two- and three-process runs including a stationary client
+  independently receiving another client's movement-triggered chunk.
+  Still not interest-managed by distance in the sense of ever
+  *unloading* anything - the server's shared `World` only ever grows
+  (see DECISIONS.md). Block *edits*
   (breaking/placing) **are** also replicated (Phase 13, see
   NETWORKING.md "Block edit replication") - server-authoritative,
   broadcast to every connected client *and* replayed in full to any
@@ -494,12 +563,13 @@ None currently tracked.
   `game:stone` on actually holding one, and corrects a client's
   optimistic guess via a new `InventoryUpdate` message after every
   `BlockAction`, closing the "unrefunded on rejection" gap for that
-  item. What none of the three phases covers: any block/item besides
+  item. What none of these phases covers: any block/item besides
   `game:stone` isn't inventory-gated (no general block-id-to-item-id
   mapping), server-side inventory has no persistence across a
-  disconnect, and the edit history itself is unbounded for the server
-  process's lifetime rather than compacted against persisted state (see
-  NETWORKING.md).
+  disconnect, the shared `World`'s loaded-chunk set never shrinks back
+  down (Phase 16 - see above), and the edit history itself is unbounded
+  for the server process's lifetime rather than compacted against
+  persisted state (see NETWORKING.md).
 - `VoxelClient`'s networked mode logs the `Welcome` message's
   `world_seed` but doesn't actually use it for world generation - it
   still calls its own compile-time `kWorldSeed`, which by construction
@@ -678,16 +748,17 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Per-movement chunk streaming**, closing Phase 14's remaining honest
-   gap: the initial connect-time `ChunkData` sync is real and verified,
-   but a client's/server's loaded-chunk set can still change afterward
-   (`World::update_streaming` as a player moves) with nothing re-syncing
-   it - only the connect-time snapshot is covered today.
-2. **Extend server-side inventory past `game:stone`**, closing Phase
+1. **Extend server-side inventory past `game:stone`**, closing Phase
    15's remaining honest gap: there's still no general block-id-to-
    item-id mapping, so any other registered block (mod content
    especially) places without a server-side item check, and inventory
    has no persistence across a disconnect/reconnect.
+2. **Interest-scoped chunk unloading**, closing Phase 16's remaining
+   honest gap: the server's shared `World` only ever grows (see
+   DECISIONS.md "server-side chunk streaming never unloads") - a real
+   long-running server needs a way to drop chunks nothing currently
+   connected still needs, without breaking a client that's still
+   standing in one another client abandoned.
 3. Continue down brief section 10's list after that: content/gameplay
    systems (more block/item types, a real crafting-UI caller for the
    already-implemented `RecipeRegistry`), then modding depth (a second

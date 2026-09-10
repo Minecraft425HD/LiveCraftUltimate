@@ -462,6 +462,42 @@ int main() {
     player.aabb = make_player_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
     lcu::physics::PlayerPhysicsConfig physics_config;
 
+    // Per-movement chunk streaming (brief section 22, Phase 16 - the gap
+    // Phase 14's connect-time-only ChunkData sync honestly left open,
+    // see DECISIONS.md): as the player crosses into a new chunk column,
+    // load whatever's now newly in range around it, the same
+    // generate-then-light-then-mesh sequence the initial spawn-area load
+    // above already runs (world.load_chunk is idempotent - already-
+    // loaded coordinates are skipped by the state_of() check before ever
+    // calling it, so this stays cheap on every frame that *doesn't*
+    // cross a chunk boundary). Locally generated content is a
+    // placeholder exactly like the initial spawn area is - a
+    // subsequently-arriving server ChunkData (see the ChunkDataFragment
+    // case below) overwrites it with the authoritative version, same
+    // mechanism, no new code path.
+    const auto stream_chunks_around = [&](lcu::voxel::ChunkCoord center) {
+        for (lcu::i32 cx = center.x - load_settings.radius_xz; cx <= center.x + load_settings.radius_xz; ++cx) {
+            for (lcu::i32 cz = center.z - load_settings.radius_xz; cz <= center.z + load_settings.radius_xz; ++cz) {
+                for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                    const lcu::voxel::ChunkCoord coord{cx, cy, cz};
+                    if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
+                        continue;
+                    }
+                    world.load_chunk(coord);
+                    compute_initial_light(coord);
+                    remesh_and_upload(coord);
+                }
+            }
+        }
+    };
+    const auto chunk_coord_of_position = [](const lcu::math::Vec3& pos) {
+        const lcu::voxel::BlockWorldCoord block{static_cast<lcu::i64>(std::floor(pos.x)),
+                                                 static_cast<lcu::i64>(std::floor(pos.y)),
+                                                 static_cast<lcu::i64>(std::floor(pos.z))};
+        return lcu::voxel::world_to_chunk_and_local(block, lcu::voxel::Chunk::kEdgeLength).chunk;
+    };
+    lcu::voxel::ChunkCoord last_streamed_center = chunk_coord_of_position(player.aabb.center());
+
     const auto is_solid = [&](lcu::voxel::BlockId id) { return block_registry.definition_of(id).has_collision; };
 
     lcu::player::FirstPersonCamera camera;
@@ -538,6 +574,23 @@ int main() {
 
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
 
+    // Headless verification hook for per-movement chunk streaming
+    // (Phase 16): if set, holds MoveForward down for this many real
+    // (wall-clock) seconds - frame-count-indexed like
+    // LCU_VERIFY_BREAK_PLACE above doesn't work here, since the main
+    // loop is unthrottled (see BUILD_STATUS.md) and how much simulated
+    // distance a fixed number of frames covers depends on real elapsed
+    // time, not frame count. A real, sustained PlayerInput stream (not
+    // a position teleport) is what's needed here specifically because
+    // the *server's* own streaming trigger only reacts to positions it
+    // actually received and simulated from PlayerInput - a client-only
+    // position change would never move the server-authoritative
+    // position this feature's server-side half depends on.
+    const char* verify_move_seconds_env = std::getenv("LCU_VERIFY_MOVE_SECONDS");
+    const lcu::f32 verify_move_seconds =
+        verify_move_seconds_env != nullptr ? std::strtof(verify_move_seconds_env, nullptr) : 0.0f;
+    const auto verify_move_start = std::chrono::steady_clock::now();
+
     const std::optional<lcu::u64> max_frames = max_frames_from_env();
     lcu::u64 frame = 0;
     auto last_tick = std::chrono::steady_clock::now();
@@ -548,6 +601,11 @@ int main() {
         if (verify_break_place) {
             input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
             input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyPlaceFrame);
+        }
+        if (verify_move_seconds > 0.0f) {
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_move_start).count();
+            input.set_down(lcu::platform::Action::MoveForward, elapsed < verify_move_seconds);
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -665,10 +723,23 @@ int main() {
                                 }
                                 const lcu::voxel::ChunkCoord coord{chunk_message->chunk_x, chunk_message->chunk_y,
                                                                     chunk_message->chunk_z};
+                                // A chunk the server has loaded but this
+                                // client hasn't streamed to locally yet
+                                // (Phase 16: the server's loaded set can
+                                // now grow from another client's movement,
+                                // or from this client's own movement
+                                // arriving here before its local
+                                // stream_chunks_around trigger did) still
+                                // needs a real chunk slot to overwrite -
+                                // load_chunk's placeholder content is
+                                // about to be replaced below regardless.
+                                if (world.state_of(coord) == lcu::world::ChunkLifecycleState::Unloaded) {
+                                    world.load_chunk(coord);
+                                }
                                 lcu::voxel::Chunk* target = world.chunk_at_mutable(coord);
                                 if (target == nullptr) {
-                                    LCU_LOG_DEBUG("ChunkData target ({},{},{}) isn't loaded locally, ignoring",
-                                                  coord.x, coord.y, coord.z);
+                                    LCU_LOG_WARN("ChunkData target ({},{},{}) couldn't be loaded locally, ignoring",
+                                                 coord.x, coord.y, coord.z);
                                     break;
                                 }
                                 lcu::voxel::Chunk server_chunk;
@@ -781,6 +852,12 @@ int main() {
         }
 
         camera.position = {player.aabb.center().x, player.aabb.min.y + kEyeHeight, player.aabb.center().z};
+
+        const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(player.aabb.center());
+        if (current_center != last_streamed_center) {
+            stream_chunks_around(current_center);
+            last_streamed_center = current_center;
+        }
 
         const auto hit = lcu::physics::raycast(world, camera.position, camera.forward(), kInteractRange, is_solid);
 

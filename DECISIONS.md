@@ -1177,3 +1177,47 @@ authoritative count - exactly `PredictionBuffer`'s pattern for player
 movement, applied to a scalar instead of a physics state - gets both:
 instant local feedback, and eventual correctness the moment a rejection
 or race actually happens.
+
+## 2026-09-10 — Server-side chunk streaming never unloads (Phase 16)
+
+**Context:** Closing Phase 14's "connect-time-only" chunk sync gap
+meant deciding how to grow the server's loaded-chunk set as a player
+moves. `World::update_streaming(center, load_radius, unload_radius)`
+already exists (Phase 3) and does exactly this for a single-player
+`World` - loads what's newly in range, unloads what's now too far. The
+obvious-looking choice was to just call it from `VoxelServer` with each
+connected client's position as `center`.
+
+**Decision:** Call only the load half - a hand-rolled radius scan
+directly in `server/main.cpp` reusing `World::load_chunk` and
+`World::state_of`, never `World::unload_chunk`/`update_streaming`
+itself. The reason `update_streaming` itself is wrong here, not just
+inconvenient: `VoxelServer` has exactly **one** `World` instance shared
+across every connected client (see NETWORKING.md's server connection
+model) - there is no per-client copy. If client A's position drove an
+`update_streaming` call that unloaded a chunk now outside *A's* range,
+and client B happens to still be standing in that exact chunk, B's
+`World` (the same shared instance) would lose ground out from under
+them mid-session - a correctness bug, not a performance tradeoff.
+Fixing that properly needs either a per-client "what's actually still
+needed by *someone*" reference count, or per-client `World` instances
+(a much bigger structural change, and one with real memory-duplication
+cost for a shared read-mostly world) - both real future work, not
+built speculatively now with only two simultaneous connections ever
+tested (brief section 76/98). Growing forever is the honestly-simplest
+version that's still correct for every scale this project has actually
+run at; a real long-running public server would need one of those two
+real fixes before its memory footprint became a problem, not before
+then.
+
+**Why the client's own local trigger doesn't have the same problem:**
+each `VoxelClient` process owns its own `World` outright - nothing else
+reads or writes it - so there was never a reason to avoid a full
+load/unload `update_streaming`-style implementation there. It still
+doesn't call `update_streaming` itself either, for the more mundane
+reason that this phase's scope was "stream new chunks in," not "also
+start unloading old ones" - the client keeping everything it's ever
+loaded is a separate, smaller simplification (bounded memory growth
+over a very long session, not a correctness issue) that a future phase
+can address independently, once an actual long-session memory
+measurement gives a reason to.

@@ -2,7 +2,49 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16
+
+### Phase 16
+
+- `VoxelServer` now re-checks every connected client's loaded-chunk
+  range every tick (only when that client's current chunk coordinate
+  has changed since last checked) and loads any not-yet-loaded chunk in
+  range using the same logic the startup area already uses - closes
+  Phase 14's honestly-flagged "connect-time-only sync" gap.
+- Every newly-loaded chunk is broadcast as `ChunkData` to every
+  connected client, not just whoever's movement triggered it. The
+  server's shared `World` is deliberately append-only - it never
+  unloads a chunk, since it's one instance shared across every
+  connected client and unloading based on one client's position could
+  break a different client still standing in that chunk.
+- `VoxelClient` runs the mirror-image local half unconditionally: the
+  same load-then-light-then-mesh sequence the initial spawn-area load
+  already runs, triggered only when the player's own chunk coordinate
+  changes.
+- Fixed a real gap in Phase 14's `ChunkDataFragment` handler that this
+  phase's dynamics exercise for the first time: a `ChunkData` for a
+  coordinate the client hasn't locally streamed to yet used to be
+  silently dropped ("isn't loaded locally, ignoring") - now the client
+  creates a real chunk slot via `world.load_chunk` before overwriting
+  it.
+- Added a new headless verification hook, `LCU_VERIFY_MOVE_SECONDS` -
+  holds `MoveForward` for that many real (wall-clock) seconds, since a
+  frame-count-indexed hook (like `LCU_VERIFY_BREAK_PLACE`) doesn't work
+  against the client's unthrottled main loop.
+- Verified via two real multi-process runs: a two-process run where a
+  client holds `MoveForward` for 6 real seconds (crossing the 16-block
+  chunk boundary) shows the server logging `Streamed 1 newly-loaded
+  chunk(s) into range (total 2 loaded)` and the client logging `Applied
+  server ChunkData for chunk (0, 1, -1)`, zero warnings/errors. A
+  three-process run adds a second, entirely stationary client that
+  independently logs the identical line, proving the broadcast reaches
+  every connected client, not just the one whose movement triggered it.
+- No new unit tests - orchestration logic in the two executables built
+  entirely on already-unit-tested primitives, verified via the real
+  runs above. `ctest` unchanged at 342/342 (bgfx) / 339/339 (non-bgfx).
+- Honestly scoped: still no interest-managed unloading; a client's own
+  local streaming trigger and the server's are independent and only
+  usually agree, not literally synchronized.
 
 ### Phase 15
 

@@ -231,10 +231,59 @@ block-id-to-item-id mapping exists, so any other registered block (mod
 content) still places without a server-side item check. No persistence
 across a disconnect either.
 
+## Phase 16 — Per-movement chunk streaming (post-original-queue; closes Phase 14's remaining honest gap)
+
+The connect-time `ChunkData` sync (Phase 14) ran exactly once - a
+player wandering past their initial spawn area streamed nothing new,
+honestly flagged as a known gap in Phase 14's own writeup.
+
+- [x] `VoxelServer` re-checks every connected client's loaded-chunk
+  range every tick (only when that client's current chunk coordinate
+  has changed since last checked, so a stationary client costs nothing
+  extra), loads any not-yet-loaded chunk in range with the same logic
+  the startup area already uses, and broadcasts every newly-loaded
+  chunk as `ChunkData` to every connected client - not just whoever's
+  movement triggered it.
+- [x] Deliberately append-only: the server's shared `World` never
+  unloads a chunk (see DECISIONS.md "server-side chunk streaming never
+  unloads") - unloading based on one client's position could break a
+  different client still standing in that chunk, since `World` is one
+  instance shared across every connection.
+- [x] `VoxelClient` runs the mirror-image local half unconditionally
+  (single-player and networked alike): the same load-then-light-then-
+  mesh sequence the initial spawn-area load already runs, triggered
+  only when the player's own chunk coordinate changes.
+- [x] Fixed a real gap in Phase 14's `ChunkDataFragment` handler that
+  this phase's dynamics exercise for the first time: a `ChunkData` for
+  a coordinate the client hasn't locally streamed to yet used to be
+  silently dropped - now the client creates a real chunk slot via
+  `world.load_chunk` before overwriting it.
+- [x] New headless verification hook, `LCU_VERIFY_MOVE_SECONDS` - holds
+  `MoveForward` for that many real (wall-clock) seconds, since a
+  frame-count-indexed hook doesn't work against the unthrottled main
+  loop.
+- [x] Verified via two real multi-process runs: a two-process run where
+  a client held `MoveForward` for 6 real seconds (crossing the 16-block
+  chunk boundary) shows the server logging `Streamed 1 newly-loaded
+  chunk(s) into range (total 2 loaded)` and the client logging `Applied
+  server ChunkData for chunk (0, 1, -1)`; a three-process run adds a
+  second, entirely stationary client that independently logs the
+  identical line, proving the broadcast reaches every connected client,
+  not just the one that triggered it.
+
+No new unit tests - orchestration logic in the two executables built on
+already-unit-tested primitives, verified via the real runs above.
+`ctest` unchanged at 342/342 (bgfx) / 339/339 (non-bgfx).
+
+Honestly scoped: still no interest-managed unloading; a client's own
+local streaming trigger and the server's are independent and only
+usually agree, not literally synchronized (never incorrect, just
+occasionally redundant).
+
 Next per brief section 10's priority order (multiplayer fundamentals
 before content/polish) - see PROJECT_STATE.md "Next Task" for the full
-reasoning: per-movement chunk streaming to close Phase 14's remaining
-gap, then extending server-side inventory past `game:stone`.
+reasoning: extending server-side inventory past `game:stone`, then
+interest-scoped chunk unloading to close Phase 16's own remaining gap.
 
 ---
 
@@ -416,10 +465,20 @@ one server-side, and corrects a client's optimistic local guess via a
 new `InventoryUpdate` message after every `BlockAction` - accepted or
 rejected. Verified via a real two-process run showing the optimistic
 guess and the server's authoritative count actually disagree then
-converge in both directions, not just that a message decoded. See
+converge in both directions, not just that a message decoded.
+
+Phase 16 (per-movement chunk streaming, post-queue) closes Phase 14's
+remaining honest gap: `VoxelServer` re-checks every connected client's
+loaded-chunk range every tick and broadcasts every newly-loaded chunk
+to every connected client; `VoxelClient` mirrors the same trigger
+locally. Verified via a real two-process run (a client moves for 6 real
+seconds, crossing a chunk boundary - server streams and broadcasts the
+new chunk, client applies it) and a real three-process run (adding a
+second, stationary client that independently receives the same
+broadcast, proving it isn't limited to the triggering client). See
 PROJECT_STATE.md "Reality Audit" and "Next Task" for the full picture
-and what's next (per-movement chunk streaming, then extending
-server-side inventory past `game:stone`).
+and what's next (extending server-side inventory past `game:stone`,
+then interest-scoped chunk unloading).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
@@ -427,10 +486,12 @@ crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
 a loot-table system (now server-enforced for `game:stone` specifically,
 see Phase 15 - still no general mapping for anything else); lighting is
 single-chunk scoped (no cross-chunk
-bleed); `World::update_streaming` still isn't called by either
-`VoxelClient` or `VoxelServer` (a static area is loaded once at
-startup, now synced once more via Phase 14's connect-time `ChunkData`
-snapshot - neither side re-streams as a player moves); `engine/network`'s
+bleed); `World::update_streaming` itself (the unload-capable version)
+still isn't called by either `VoxelClient` or `VoxelServer` - both now
+stream new chunks in as a player moves (Phase 16), via a hand-rolled
+load-only version of the same radius logic, since the server's `World`
+is shared across every connected client and can never unload based on
+just one of them; `engine/network`'s
 reliable channel has no RTT estimation/congestion control, and its
 server connection model has no authentication; server-side inventory
 has no persistence across a disconnect/reconnect; `EventBus` has only one real event (`block_broken`);
