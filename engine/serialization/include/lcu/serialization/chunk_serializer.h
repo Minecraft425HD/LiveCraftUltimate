@@ -24,7 +24,7 @@ enum class ChunkLoadResult {
 // checksum enabled, used for corruption detection on load) - the same
 // header+payload layout `save_chunk_to_file` writes to disk, just as an
 // in-memory buffer instead. Real second consumer beyond the file API:
-// `engine/network` chunk streaming (Phase 13) sends these bytes,
+// `engine/network` chunk streaming (Phase 14) sends these bytes,
 // fragmented, over the network - see NETWORKING.md "Chunk network
 // streaming". Returns an empty vector (logged) on compression failure.
 std::vector<u8> serialize_chunk_to_bytes(const voxel::Chunk& chunk);

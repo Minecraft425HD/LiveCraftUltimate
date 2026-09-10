@@ -1080,3 +1080,58 @@ save/load has a real server-side trigger (still missing - see
 PROJECT_STATE.md "Known Limitations"), replaying only what a given
 client hasn't already received via a loaded save, not the entire
 session's edit log forever.
+
+## 2026-09-10 — Fragmentation is a caller-side layer, not built into Connection
+
+**Context:** A compressed chunk (a few KB) doesn't fit in one
+`kMaxDatagramSize` (1200-byte) UDP datagram, so sending real chunk data
+over the network needed some way to split one logical message across
+several datagrams and reassemble them. The natural place to put this
+might seem to be inside `engine/network::Connection`/`PacketHeader`
+itself, transparently fragmenting anything over the datagram limit.
+
+**Decision:** `lcu::network::fragment_payload`/`FragmentReassembler`
+live as a separate, generic layer *above* `Connection`, not inside it.
+A caller that has an oversized payload fragments it explicitly and
+sends each fragment through `Connection::send()` like any other
+payload; every other message in this codebase (`Heartbeat`,
+`PlayerInput`, `BlockChange`, ...) is completely unaffected and pays
+nothing for this existing - no extra header bytes, no extra branching
+in the hot per-packet path. This follows brief section 37 ("no
+unnecessary rearchitecture"): `Connection` is already deeply tested,
+real production code (25+ unit tests, real loopback integration tests,
+multiple real multiplayer runs) - baking fragmentation into it would
+have meant touching that stable core for the benefit of exactly one
+current caller (chunk streaming), with real risk of a subtle regression
+in the channel/ack/retransmit logic every other message depends on.
+Keeping it separate also made it independently, thoroughly unit-testable
+(11 tests: in-order, out-of-order, duplicate, interleaved-concurrent,
+malformed-too-short) before it was ever wired into anything real - see
+PROJECT_STATE.md "Reality Audit" discipline of building/testing each
+piece standalone first.
+
+## 2026-09-10 — Chunk streaming is a one-shot connect-time sync, not per-movement
+
+**Context:** With `ChunkData`/`ChunkDataFragment` and the fragmentation
+layer working, the question was how much of "chunk network streaming"
+(brief section 19) to build in one pass: just an initial full-world
+sync on connect, or a fully dynamic system that re-streams chunks as a
+player's (or the server's) loaded-chunk set changes over time via
+`World::update_streaming` (which neither `VoxelClient` nor
+`VoxelServer` calls yet - both still load a static area once at
+startup, a pre-existing, separately documented simplification).
+
+**Decision:** Built the connect-time sync only. `VoxelServer` sends
+every chunk it currently has loaded to a client exactly once, right
+after `Welcome` and the `block_change_history` replay - a real,
+complete feature for what it covers (verified at both 1-chunk and
+36-chunk scale), not a stub. Extending it to re-stream chunks as either
+side's loaded set changes is deliberately left for when
+`update_streaming` actually has a real caller driving it from player
+movement - building the dynamic re-streaming machinery now, with
+nothing yet moving through the world to exercise it, would be
+speculative (brief section 76/98: don't build for a future need before
+something real needs it). The static-loaded-area simplification this
+depends on is pre-existing and separately tracked (see
+PROJECT_STATE.md "Known Limitations"), not something this phase
+introduced.

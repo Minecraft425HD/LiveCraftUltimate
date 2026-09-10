@@ -2,7 +2,59 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14
+
+### Phase 14
+
+- Added `lcu::network::fragment_payload`/`FragmentReassembler`
+  (`engine/network/fragmentation.h`/`.cpp`) - a generic, caller-side
+  message split/rejoin layer for payloads too large for one UDP
+  datagram, deliberately kept out of `Connection`/`PacketHeader` itself
+  so existing small messages pay nothing for it. 11 new unit tests
+  (in-order, out-of-order, duplicate, interleaved-concurrent, and
+  malformed-too-short fragment delivery).
+- Extracted `lcu::serialization::serialize_chunk_to_bytes`/
+  `deserialize_chunk_from_bytes` as the real zstd-compression
+  primitives; `save_chunk_to_file`/`load_chunk_from_file` are now thin
+  wrappers around them - lets network chunk streaming reuse the exact
+  same, already-tested compression/versioning/corruption logic instead
+  of a parallel copy. 4 new unit tests, incl.
+  `InMemoryBytesMatchFileBytes` pinning byte-for-byte equivalence with
+  the pre-existing file-based path.
+- Added `ChunkData` (server->client, logical - a full chunk snapshot,
+  too large for one datagram) and `ChunkDataFragment` (server->client,
+  `ReliableOrdered` - the actual wire message, one fragment of a
+  fragmented `ChunkData`) to `game::systems::protocol`. 6 new unit
+  tests.
+- Added `World::loaded_chunk_coords()`. `VoxelServer` now sends a
+  newly-connecting client a full `ChunkData` snapshot of every chunk it
+  has loaded, right after `Welcome` and the `block_change_history`
+  replay - fragmented via `fragment_payload` and sent
+  `ReliableOrdered`.
+- `VoxelClient` reassembles `ChunkDataFragment`s via a per-connection
+  `FragmentReassembler`; once a `ChunkData` is complete, it fully
+  overwrites the client's own (independently, deterministically
+  generated - previously only ever *assumed* to match) local chunk with
+  the server's authoritative one, then fully relights and remeshes it
+  plus its six axis-adjacent neighbors.
+- Closes the Reality Audit's other confirmed gap alongside Phase 13:
+  chunk *data*, not just block *edits*, is now actually replicated -
+  the client's world is received from the server, not merely
+  coincidentally identical to it.
+- Verified via two real two-process runs: a `mobile_low`-profile
+  (1-chunk world) run logs `Sent 1 chunk(s) (1 fragment(s))`
+  server-side and `Applied server ChunkData for chunk (0, 1, 0)`
+  client-side; a `desktop`-profile (36-chunk world) run logs `Sent 36
+  chunk(s) (36 fragment(s))` and exactly 36 matching `Applied server
+  ChunkData` lines client-side, zero warnings/errors either run.
+- 21 new unit tests total (11 fragmentation + 4 in-memory serialization
+  + 6 `ChunkData`/`ChunkDataFragment` protocol). `ctest` 337/337
+  passing (bgfx build) / 334/334 (non-bgfx build), up from 316/316 /
+  313/313.
+- Honestly scoped: a one-shot full sync sent once on connect, not
+  interest-managed by distance and not re-streamed as either side's
+  loaded-chunk set changes afterward (see NETWORKING.md "Chunk network
+  streaming").
 
 ### Phase 13
 

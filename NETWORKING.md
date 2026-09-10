@@ -91,7 +91,7 @@ control yet".
 `engine/network` itself has no opinion on what a payload *means* - that
 framing lives in `game::systems::protocol` (`replication_protocol.h`/
 `.cpp`), shared by `VoxelClient` and `VoxelServer` so they can't
-independently drift out of sync. All seven messages are a one-byte type
+independently drift out of sync. All nine messages are a one-byte type
 tag followed by fixed big-endian fields (hand-rolled, not a generic
 serialization framework - see DECISIONS.md):
 
@@ -124,6 +124,18 @@ serialization framework - see DECISIONS.md):
   u16]`. The server's authoritative result of an *applied* edit -
   `block_id` is `kAirBlockId` (0) for a break, the placed id for a
   place. Never sent for a rejected request.
+- **ChunkData** (`type=7`, server->client): `[chunk_x, chunk_y, chunk_z:
+  3×i32][compressed_bytes...]` - a full chunk snapshot, `compressed_bytes`
+  being exactly what `lcu::serialization::serialize_chunk_to_bytes`
+  produces. Logical only: never sent directly (a compressed chunk is
+  typically bigger than one UDP datagram) - always fragmented first, see
+  the next entry and "Chunk network streaming" below.
+- **ChunkDataFragment** (`type=8`, server->client, sent ReliableOrdered):
+  `[fragment: message_id: u16, fragment_index: u16, fragment_count: u16,
+  data...]` - one piece of a `lcu::network::fragment_payload`-split
+  `ChunkData` message. The receiver's `FragmentReassembler` accumulates
+  fragments by `message_id` and hands the reassembled bytes to
+  `decode_chunk_data` once every piece has arrived.
 
 ## Block edit replication (Phase 13)
 
@@ -172,6 +184,51 @@ never touched either block itself - independently logs the identical
 `Applied server BlockChange` lines, confirming its `World` actually
 converged to match the other two processes', not just that a message
 arrived (see BUILD_STATUS.md for the exact reproduce steps).
+
+## Chunk network streaming (Phase 14)
+
+Right after `Welcome` and the `block_change_history` replay, `VoxelServer`
+sends a newly-connecting client every chunk it currently has loaded
+(`World::loaded_chunk_coords()`), as `ChunkData` - not because the client
+can't generate matching terrain on its own (it independently regenerates
+the same deterministic terrain from the same compile-time `kWorldSeed`,
+and usually does end up identical), but because the server is the
+*authoritative* source of world state (brief section 19) and the client
+should receive that state, not merely happen to agree with it. Each
+chunk's already-tested compression path
+(`lcu::serialization::serialize_chunk_to_bytes` - the same in-memory
+primitive `save_chunk_to_file` now wraps) produces the compressed bytes;
+`lcu::network::fragment_payload` splits the encoded `ChunkData` message
+into `kMaxFragmentDataSize` (1024-byte) pieces, each wrapped as a
+`ChunkDataFragment` and sent `ReliableOrdered`; the client's single
+`lcu::network::FragmentReassembler` reassembles them (tolerating
+out-of-order/duplicate delivery, though `ReliableOrdered` already
+guarantees in-order arrival here) and, once complete, decodes the
+`ChunkData` and applies it: `lcu::serialization::deserialize_chunk_from_bytes`
+into a scratch `Chunk`, a full overwrite of the client's local chunk at
+that coordinate (`*target = server_chunk`), then a full relight
+(`compute_block_light`+`compute_sky_light`, the same pass used for a
+freshly-generated chunk) and a remesh of that chunk plus all six of its
+axis-adjacent neighbors (any boundary block could have changed).
+
+Verified via real two-process runs: a `mobile_low`-profile run (one
+1-chunk world) logs `Sent 1 chunk(s) (1 fragment(s))` server-side and
+`Applied server ChunkData for chunk (0, 1, 0)` client-side; a
+`desktop`-profile run (36 loaded chunks) logs `Sent 36 chunk(s) (36
+fragment(s))` and exactly 36 matching `Applied server ChunkData` lines
+client-side with zero warnings/errors - confirming both the common
+single-fragment-per-chunk case and that the full loaded world, not just
+one chunk, streams and applies correctly.
+
+**Known simplifications** (see DECISIONS.md): this is a one-shot full
+sync sent once on connect, not interest-managed by distance (unlike
+`kInterestRadius` for entities - every currently-loaded server chunk is
+sent regardless of where the connecting client's player actually is) and
+not re-sent as the client (or server) streams new chunks in after that
+point. Both loaded worlds are small enough in this vertical slice
+(`radius_xz` ≤ 1) for the gap not to matter yet; a real persistent-world
+server would need per-chunk streaming keyed to the client's own
+`update_streaming` calls, not a single dump at connect time.
 
 ## Client-side prediction + reconciliation (Phase 8)
 
@@ -256,8 +313,10 @@ received, `EntityState` positions rendered through real interpolation,
 against - not simulated, not mocked. A real *three*-process run (Phase
 13) additionally confirms block edit replication actually converges two
 independent clients' worlds, not just that a message decodes correctly -
-see "Block edit replication" above (see BUILD_STATUS.md for the exact
-reproduce steps for both).
+see "Block edit replication" above. Real two-process runs (Phase 14)
+confirm chunk network streaming end-to-end at both a 1-chunk and a
+36-chunk scale - see "Chunk network streaming" above (see BUILD_STATUS.md
+for the exact reproduce steps for all of the above).
 
 **Not verified**: behavior over a real (non-loopback) network with real
 latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
@@ -267,17 +326,14 @@ from earlier phases' single-client-only verification.
 
 ## What's deferred
 
-- **Chunk network streaming + compression.** `engine/serialization::
-  chunk_serializer` already produces zstd-compressed chunk bytes (Phase
-  3), but a compressed chunk (a few KB) doesn't fit in one
-  `kMaxDatagramSize` (1200-byte) UDP datagram - sending it over
-  `engine/network` as-is would need message fragmentation (splitting one
-  logical message across multiple datagrams and reassembling them
-  in order), which doesn't exist in `Connection` yet. Both clients
-  currently generate their own local copy of the world from the same
-  hardcoded seed instead of receiving it from the server - see the next
-  entry, and DECISIONS.md "chunk streaming deferred: fragmentation
-  prerequisite".
+- ~~Chunk network streaming + compression~~ **Fixed** (Phase 14):
+  `lcu::network::fragment_payload`/`FragmentReassembler` now split a
+  compressed chunk (produced by `lcu::serialization::
+  serialize_chunk_to_bytes`) across multiple `ChunkDataFragment`
+  datagrams and reassemble them - see "Chunk network streaming" above.
+  Still a one-shot full sync on connect only, not per-movement streaming
+  or interest-managed by distance (see that section's "Known
+  simplifications").
 - **The client doesn't actually use the server's Welcome `world_seed`**
   to generate its world - it logs the received value (confirming the
   message round-trips correctly) but still calls its own compile-time
@@ -286,6 +342,13 @@ from earlier phases' single-client-only verification.
   isn't currently observable as a mismatch - using the server's seed for
   real needs world generation deferred until after Welcome arrives, a
   bigger structural change than this phase's scope. See DECISIONS.md.
+  Now partially moot for block *content* (not generation timing): Phase
+  14's `ChunkData` overwrites the client's locally-generated chunk with
+  the server's actual one right after connect, so even a genuinely
+  mismatched seed would self-correct for every chunk the server sends -
+  the structural gap (client briefly generates from the wrong seed
+  before that overwrite arrives) still exists, it just no longer causes
+  an observable, permanent difference.
 - ~~Block edits aren't replicated at all~~ **Fixed**: `BlockAction`
   (client -> server, `ReliableOrdered`) / `BlockChange` (server -> all
   clients, `ReliableOrdered`) now make block edits server-authoritative -

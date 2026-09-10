@@ -166,3 +166,47 @@ TEST(ReplicationProtocol, PeekTypeDistinguishesBlockActionAndBlockChange) {
     EXPECT_EQ(peek_type(encode_block_action({BlockActionType::Break, 0, 0, 0, 0})), MessageType::BlockAction);
     EXPECT_EQ(peek_type(encode_block_change({0, 0, 0, 0})), MessageType::BlockChange);
 }
+
+TEST(ReplicationProtocol, ChunkDataRoundTrips) {
+    const ChunkData sent{-3, 0, 7, {1, 2, 3, 4, 5, 250, 251, 252}};
+    const auto bytes = encode_chunk_data(sent);
+    const auto decoded = decode_chunk_data(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->chunk_x, -3);
+    EXPECT_EQ(decoded->chunk_y, 0);
+    EXPECT_EQ(decoded->chunk_z, 7);
+    EXPECT_EQ(decoded->compressed_bytes, sent.compressed_bytes);
+}
+
+TEST(ReplicationProtocol, ChunkDataRoundTripsWithEmptyCompressedBytes) {
+    const ChunkData sent{1, -2, 3, {}};
+    const auto decoded = decode_chunk_data(encode_chunk_data(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->chunk_x, 1);
+    EXPECT_EQ(decoded->chunk_y, -2);
+    EXPECT_EQ(decoded->chunk_z, 3);
+    EXPECT_TRUE(decoded->compressed_bytes.empty());
+}
+
+TEST(ReplicationProtocol, ChunkDataRejectsTruncatedPayload) {
+    auto bytes = encode_chunk_data({1, 2, 3, {9, 9}});
+    bytes.resize(12);  // shorter than the 13-byte type+coords header
+    EXPECT_EQ(decode_chunk_data(bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, ChunkDataRejectsWrongMessageType) {
+    EXPECT_EQ(decode_chunk_data(encode_welcome({1, 1})), std::nullopt);
+}
+
+TEST(ReplicationProtocol, ChunkDataFragmentRoundTrips) {
+    const std::vector<lcu::u8> fragment_bytes = {0, 1, 0, 0, 0, 2, 10, 20};
+    const auto wire_bytes = encode_chunk_data_fragment(fragment_bytes);
+    EXPECT_EQ(peek_type(wire_bytes), MessageType::ChunkDataFragment);
+    const auto decoded = decode_chunk_data_fragment(wire_bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded, fragment_bytes);
+}
+
+TEST(ReplicationProtocol, ChunkDataFragmentRejectsWrongMessageType) {
+    EXPECT_EQ(decode_chunk_data_fragment(encode_welcome({1, 1})), std::nullopt);
+}

@@ -7,6 +7,7 @@ namespace game::systems::protocol {
 namespace {
 
 using lcu::f32;
+using lcu::i32;
 using lcu::i64;
 using lcu::u16;
 using lcu::u32;
@@ -35,6 +36,23 @@ i64 read_i64_be(const u8* data) {
         bits = (bits << 8) | data[i];
     }
     i64 value = 0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+void write_i32_be(std::vector<u8>& out, i32 value) {
+    u32 bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    out.push_back(static_cast<u8>((bits >> 24) & 0xFF));
+    out.push_back(static_cast<u8>((bits >> 16) & 0xFF));
+    out.push_back(static_cast<u8>((bits >> 8) & 0xFF));
+    out.push_back(static_cast<u8>(bits & 0xFF));
+}
+
+i32 read_i32_be(const u8* data) {
+    const u32 bits = (static_cast<u32>(data[0]) << 24) | (static_cast<u32>(data[1]) << 16) |
+                      (static_cast<u32>(data[2]) << 8) | static_cast<u32>(data[3]);
+    i32 value = 0;
     std::memcpy(&value, &bits, sizeof(value));
     return value;
 }
@@ -248,6 +266,49 @@ std::optional<BlockChange> decode_block_change(const std::vector<u8>& payload) {
     message.z = read_i64_be(payload.data() + 17);
     message.block_id = read_u16_be(payload.data() + 25);
     return message;
+}
+
+std::vector<u8> encode_chunk_data(const ChunkData& message) {
+    std::vector<u8> out;
+    out.reserve(13 + message.compressed_bytes.size());
+    out.push_back(static_cast<u8>(MessageType::ChunkData));
+    write_i32_be(out, message.chunk_x);
+    write_i32_be(out, message.chunk_y);
+    write_i32_be(out, message.chunk_z);
+    out.insert(out.end(), message.compressed_bytes.begin(), message.compressed_bytes.end());
+    return out;
+}
+
+std::optional<ChunkData> decode_chunk_data(const std::vector<u8>& payload) {
+    // type(1) + chunk_x,y,z(4 each) = 13 bytes minimum; compressed_bytes
+    // may legitimately be empty only for a hypothetically fully-air chunk
+    // that still compresses to zero payload bytes - not rejected here,
+    // deserialize_chunk_from_bytes is the one place that validates the
+    // compressed payload itself.
+    if (!has_type(payload, MessageType::ChunkData) || payload.size() < 13) {
+        return std::nullopt;
+    }
+    ChunkData message;
+    message.chunk_x = read_i32_be(payload.data() + 1);
+    message.chunk_y = read_i32_be(payload.data() + 5);
+    message.chunk_z = read_i32_be(payload.data() + 9);
+    message.compressed_bytes.assign(payload.begin() + 13, payload.end());
+    return message;
+}
+
+std::vector<u8> encode_chunk_data_fragment(const std::vector<u8>& fragment_bytes) {
+    std::vector<u8> out;
+    out.reserve(1 + fragment_bytes.size());
+    out.push_back(static_cast<u8>(MessageType::ChunkDataFragment));
+    out.insert(out.end(), fragment_bytes.begin(), fragment_bytes.end());
+    return out;
+}
+
+std::optional<std::vector<u8>> decode_chunk_data_fragment(const std::vector<u8>& payload) {
+    if (!has_type(payload, MessageType::ChunkDataFragment)) {
+        return std::nullopt;
+    }
+    return std::vector<u8>(payload.begin() + 1, payload.end());
 }
 
 }  // namespace game::systems::protocol

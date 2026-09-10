@@ -148,11 +148,56 @@ PROJECT_STATE.md "Reality Audit" for the full table.
   skipped a frame's render/network-flush/frame-count; networked-mode
   breaking giving no item (making placing impossible in multiplayer).
 
+## Phase 14 — Chunk network streaming (post-original-queue; the other half of the gap Phase 13 didn't touch)
+
+Reality Audit's second confirmed gap (see PROJECT_STATE.md "Reality
+Audit"): `engine/network::Connection` had no message fragmentation, so a
+compressed chunk (a few KB) could never fit in one 1200-byte UDP
+datagram - both `VoxelClient` and `VoxelServer` independently generated
+matching terrain from the same hardcoded seed instead of the client
+actually *receiving* the server's authoritative world.
+
+- [x] `lcu::network::fragment_payload`/`FragmentReassembler`
+  (`engine/network/fragmentation.h`/`.cpp`) - a generic, caller-side
+  split/rejoin layer, deliberately kept out of `Connection`/
+  `PacketHeader` so existing small messages pay nothing for it. 11 new
+  unit tests (in-order, out-of-order, duplicate, interleaved-concurrent,
+  malformed-too-short delivery).
+- [x] `lcu::serialization::serialize_chunk_to_bytes`/
+  `deserialize_chunk_from_bytes` extracted from the existing file-based
+  `save_chunk_to_file`/`load_chunk_from_file` (now thin wrappers), so
+  network streaming reuses the exact same, already-tested compression/
+  versioning/corruption logic. 4 new unit tests, including
+  `InMemoryBytesMatchFileBytes` pinning byte-for-byte equivalence with
+  the pre-existing file path.
+- [x] `ChunkData` (server->client, logical, too large for one datagram)
+  / `ChunkDataFragment` (the actual wire message) added to
+  `game::systems::protocol`. 6 new unit tests.
+- [x] `World::loaded_chunk_coords()` (new accessor) + `VoxelServer`:
+  right after `Welcome` and the `block_change_history` replay, sends a
+  newly-connecting client every currently-loaded chunk, fragmented and
+  `ReliableOrdered`.
+- [x] `VoxelClient`: a per-connection `FragmentReassembler` reassembles
+  `ChunkDataFragment`s; once a `ChunkData` is complete, its chunk fully
+  overwrites the client's own (independently, deterministically
+  generated) local chunk, then fully relights and remeshes it plus its
+  six neighbors.
+- [x] Verified via two real two-process runs: a `mobile_low` (1-chunk
+  world) run logs `Sent 1 chunk(s) (1 fragment(s))` / `Applied server
+  ChunkData for chunk (0, 1, 0)`; a `desktop` (36-chunk world) run logs
+  `Sent 36 chunk(s) (36 fragment(s))` and 36 matching `Applied server
+  ChunkData` lines, zero warnings/errors. `ctest` 337/337 (bgfx) /
+  334/334 (non-bgfx), up from 316/316 / 313/313.
+
+Honestly scoped: a one-shot full sync on connect only, not
+interest-managed by distance and not re-streamed as either side's
+loaded-chunk set changes afterward (see NETWORKING.md "Chunk network
+streaming").
+
 Next per brief section 10's priority order (multiplayer fundamentals
 before content/polish) - see PROJECT_STATE.md "Next Task" for the full
-reasoning: chunk network streaming (needs message fragmentation in
-`engine/network::Connection`, still entirely missing), then a
-server-side inventory to close Phase 13's remaining honest gap.
+reasoning: a server-side inventory to close Phase 13's remaining honest
+gap, then per-movement chunk streaming to close Phase 14's.
 
 ---
 
@@ -315,9 +360,19 @@ gap given the brief's explicit multiplayer emphasis - closed via
 to every connected client, and late-joiner catch-up via a replayed
 edit history. Verified via a real three-process run proving two
 independent clients' worlds actually converge, not just that messages
-decode. See PROJECT_STATE.md "Reality Audit" and "Next Task" for the
-full picture and what's next (chunk network streaming, then a
-server-side inventory).
+decode.
+
+Phase 14 (chunk network streaming, post-queue) is also now functionally
+complete: the audit's other confirmed gap - `engine/network::Connection`
+had no message fragmentation, so a compressed chunk couldn't fit in one
+UDP datagram - closed via a generic `fragment_payload`/
+`FragmentReassembler` layer plus `ChunkData`/`ChunkDataFragment`
+messages; `VoxelServer` now sends every newly-connecting client a full,
+fragmented snapshot of its currently-loaded world, and `VoxelClient`
+reassembles, applies, relights, and remeshes it. Verified via two real
+two-process runs (1-chunk and 36-chunk scale). See PROJECT_STATE.md
+"Reality Audit" and "Next Task" for the full picture and what's next (a
+server-side inventory, then per-movement chunk streaming).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
@@ -325,10 +380,10 @@ crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
 a loot-table system; lighting is single-chunk scoped (no cross-chunk
 bleed); `World::update_streaming` still isn't called by either
 `VoxelClient` or `VoxelServer` (a static area is loaded once at
-startup); `engine/network`'s reliable channel has no RTT
-estimation/congestion control, and its server connection model has no
-authentication; chunk *data* still isn't replicated over the network
-(block *edits* are, since Phase 13); `EventBus` has only one real event (`block_broken`);
+startup, now synced once more via Phase 14's connect-time `ChunkData`
+snapshot - neither side re-streams as a player moves); `engine/network`'s
+reliable channel has no RTT estimation/congestion control, and its
+server connection model has no authentication; `EventBus` has only one real event (`block_broken`);
 `ModLoader` has no manifest/dependency/version format; mod-registered
 ids aren't synced over the network (both hosts must load the same mods
 independently and agree by construction); positional audio is pan +

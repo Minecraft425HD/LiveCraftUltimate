@@ -15,8 +15,9 @@ complete for what this headless sandbox can verify (see the per-phase
 history below). The project is now past that original 12-phase queue
 and into open-ended continued development (brief: "the goal is a
 complete playable game, not a completed checklist") - **Phase 13 (block
-edit replication)** is done; see "Reality Audit" and "Last Completed
-Task" below for what it covers and what's next.
+edit replication)** and **Phase 14 (chunk network streaming)** are done;
+see "Reality Audit" and "Last Completed Task" below for what they cover
+and what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -36,7 +37,7 @@ file's own prior "Known Limitations" section.
 | Player movement replication | COMPLETE | COMPLETE - real two-process test, prediction+reconciliation |
 | Entity (AI) replication | COMPLETE | COMPLETE - real interpolation, interest-managed |
 | **Block edit replication** | **MISSING** (honestly flagged) | **Was MISSING, now COMPLETE** - see Phase 13 below, real 3-process test |
-| Chunk streaming/fragmentation | MISSING (honestly flagged) | Confirmed still MISSING - `Connection` has no fragmentation/reassembly, verified by reading `engine/network` directly |
+| Chunk streaming/fragmentation | MISSING (honestly flagged) | Was MISSING, now COMPLETE - see Phase 14 below, real two-process tests at 1-chunk and 36-chunk scale |
 | Texture/content pipeline | MISSING (honestly flagged) | Confirmed still MISSING - no texture atlas, no asset loader anywhere in the tree |
 | Mod loading | PARTIAL (honestly flagged) | Confirmed PARTIAL - real Lua VM + registry bindings + event bus all work (verified via real run), but only one event (`block_broken`) exists and there's no manifest/dependency format |
 | Android/iOS build | UNVERIFIED (honestly flagged) | Confirmed UNVERIFIED - `cmake --preset android-arm64` reaches real NDK detection and fails only there (no NDK installed); no Gradle/Xcode project exists |
@@ -244,6 +245,61 @@ logs `Applied server BlockChange` for both, and the server logs
 `Replayed 2 historical block change(s) to <addr>` - proving actual
 catch-up, not just that the feature compiles.
 
+**Phase 14 (chunk network streaming)**: closed the Reality Audit's other
+confirmed gap - `engine/network::Connection` had no message
+fragmentation, so a compressed chunk (a few KB) could never actually be
+sent over the wire despite `chunk_serializer` already producing correct
+bytes (Phase 3). Added two independent, reusable pieces: (1)
+`lcu::network::fragment_payload`/`FragmentReassembler` - a generic,
+caller-side split/rejoin layer (6-byte header: message_id/fragment_
+index/fragment_count, big-endian) deliberately kept out of `Connection`/
+`PacketHeader` itself, so the large majority of this codebase's traffic
+that never needs it pays nothing; (2) `lcu::serialization::
+serialize_chunk_to_bytes`/`deserialize_chunk_from_bytes`, extracted from
+the existing file-based `save_chunk_to_file`/`load_chunk_from_file` (now
+thin wrappers around them) so network streaming reuses the exact same,
+already-tested compression/versioning/corruption logic instead of a
+parallel copy. Both are unit-tested standalone (11 new fragmentation
+tests, 4 new in-memory-serialization tests) before either was wired into
+anything - `InMemoryBytesMatchFileBytes` pins byte-for-byte equivalence
+with the pre-existing file path.
+
+Built on top of those: `ChunkData` (server->client, logical - a chunk
+snapshot, too large for one datagram) and `ChunkDataFragment` (the
+actual wire message, one fragment of a fragmented `ChunkData`) in
+`game::systems::protocol`. `VoxelServer`, right after `Welcome` and the
+`block_change_history` replay, now sends a newly-connecting client every
+chunk it has loaded (`World::loaded_chunk_coords()`, a new accessor)
+fragmented and `ReliableOrdered`. `VoxelClient` reassembles via a
+per-connection `FragmentReassembler`, decodes, and fully overwrites its
+own (independently, deterministically generated - and until now, merely
+*assumed* identical) local chunk with the server's authoritative one,
+then fully relights and remeshes that chunk plus its six neighbors. This
+makes the client's world actually *received from* the server, not just
+coincidentally matching it - the real multiplayer-fundamentals gap brief
+section 19 called out by name.
+
+Verified via two real two-process runs, not just unit tests: a
+`mobile_low`-profile (1-chunk world) run logs `Sent 1 chunk(s) (1
+fragment(s))` server-side and `Applied server ChunkData for chunk (0, 1,
+0)` client-side; a `desktop`-profile (36-chunk world) run logs `Sent 36
+chunk(s) (36 fragment(s))` and exactly 36 matching `Applied server
+ChunkData` lines client-side, zero warnings/errors either run -
+confirming the common single-fragment-per-chunk path and that a full
+loaded world (not just one chunk) streams and applies correctly end to
+end.
+
+15 new unit tests total for this phase (11 fragmentation +
+4 in-memory serialization) plus 6 new `ReplicationProtocol` tests for
+`ChunkData`/`ChunkDataFragment` encode/decode. `ctest` 337/337 passing
+(bgfx build) / 334/334 (non-bgfx build).
+
+Honestly scoped, not silently left half-done: this is a one-shot full
+sync sent once on connect, not interest-managed by distance (unlike
+`kInterestRadius` for entities) and not re-streamed as either side's
+loaded-chunk set changes afterward - see NETWORKING.md "Chunk network
+streaming" for the exact edge and DECISIONS.md for the reasoning.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -256,11 +312,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 316/316 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 337/337 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 313/313 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 334/334 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -269,8 +325,10 @@ ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
 AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
-UdpSocket, Address, LoopbackIntegration, PositionInterpolator,
-PredictionBuffer, ReplicationProtocol (incl. BlockAction/BlockChange),
+UdpSocket, Address, LoopbackIntegration, FragmentPayload,
+FragmentReassembler, PositionInterpolator,
+PredictionBuffer, ReplicationProtocol (incl. BlockAction/BlockChange/
+ChunkData/ChunkDataFragment),
 LuaState, EventBus,
 RegistryBindings, ModLoader, GenerateSineWave, ComputeStereoPan,
 DistanceAttenuation. JobSystem
@@ -282,13 +340,14 @@ vertex counts. Real integration tests exist for networking
 (`LoopbackIntegration.*`: two `Connection`s over real loopback UDP
 sockets, one deliberately dropping the first real datagram sent) and,
 outside the automated suite, a real two-process `VoxelClient`<->
-`VoxelServer` movement/entity multiplayer run plus a real *three*-process
+`VoxelServer` movement/entity multiplayer run, a real *three*-process
 run (one server, two independent clients) proving block edit replication
-actually converges both clients' worlds (see BUILD_STATUS.md); save/load
-is still unit-tested only, not yet exercised through a full server-save/
-client-load cycle since there's no server-side world-save trigger yet,
-and `VoxelClient`/`VoxelServer` don't call it either - see Known
-Limitations.
+actually converges both clients' worlds, and real two-process chunk-
+streaming runs at both a 1-chunk and a 36-chunk scale (see
+BUILD_STATUS.md); save/load is still unit-tested only, not yet exercised
+through a full server-save/client-load cycle since there's no
+server-side world-save trigger yet, and `VoxelClient`/`VoxelServer`
+don't call it either - see Known Limitations.
 
 ## Known Bugs
 
@@ -364,21 +423,26 @@ None currently tracked.
   `127.0.0.1` - there is no hostname/IP-string parser anywhere yet, and
   no in-game "connect to a server" UI. A real "join by address" flow is
   later work.
-- Chunk *data* still isn't replicated over the network - a connected
-  client and the server each independently generate their own copy of
-  the world from the same hardcoded seed; chunk streaming specifically
-  needs message fragmentation `engine/network::Connection` doesn't
-  implement yet (a compressed chunk doesn't fit in one UDP datagram) -
-  see NETWORKING.md. Block *edits* (breaking/placing) **are** now
-  replicated (Phase 13, see NETWORKING.md "Block edit replication") -
-  server-authoritative, broadcast to every connected client *and*
-  replayed in full to any client that connects later (`block_change_
-  history`, so a late joiner still catches up), both verified via real
-  multi-process runs. What Phase 13 doesn't cover: a server-side
-  inventory (item pickup/cost is still client-local and optimistic,
-  unrefunded if the server rejects the request), and the edit history
-  itself is unbounded for the server process's lifetime rather than
-  compacted against persisted state (see NETWORKING.md).
+- Chunk *data* **is** now replicated over the network (Phase 14, see
+  NETWORKING.md "Chunk network streaming") - `VoxelServer` sends a
+  newly-connecting client a full, fragmented `ChunkData` snapshot of
+  every chunk it has loaded, verified via real runs at both a 1-chunk
+  and a 36-chunk scale. Still a one-shot sync on connect only, not
+  interest-managed by distance and not re-streamed as either side's
+  loaded-chunk set changes afterward - a client and server that both
+  keep streaming new chunks in as a player roams still rely on
+  independently generating matching deterministic terrain for anything
+  sent *after* that initial connect-time sync. Block *edits*
+  (breaking/placing) **are** also replicated (Phase 13, see
+  NETWORKING.md "Block edit replication") - server-authoritative,
+  broadcast to every connected client *and* replayed in full to any
+  client that connects later (`block_change_history`, so a late joiner
+  still catches up), both verified via real multi-process runs. What
+  neither phase covers: a server-side inventory (item pickup/cost is
+  still client-local and optimistic, unrefunded if the server rejects
+  the request), and the edit history itself is unbounded for the server
+  process's lifetime rather than compacted against persisted state (see
+  NETWORKING.md).
 - `VoxelClient`'s networked mode logs the `Welcome` message's
   `world_seed` but doesn't actually use it for world generation - it
   still calls its own compile-time `kWorldSeed`, which by construction
@@ -557,22 +621,16 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Chunk network streaming** (the other half of the gap Phase 13
-   didn't touch): `engine/network::Connection` still has no message
-   fragmentation, so a compressed chunk (a few KB) can't be sent as one
-   UDP datagram. A connecting client still generates its own world
-   locally from the shared hardcoded seed rather than receiving it - this
-   works today only because both sides happen to agree on that seed by
-   construction, which breaks the moment server-side world configuration
-   (a different seed, a loaded/edited save) needs to actually reach a
-   client. Needs: a fragmentation/reassembly scheme in `Connection`
-   (sequenced parts of one logical message, reassembled once complete),
-   then wiring it to actually send generated/loaded chunks.
-2. **Server-side inventory**, closing Phase 13's remaining honest gap
+1. **Server-side inventory**, closing Phase 13's remaining honest gap
    (item pickup/placement-cost is still client-local and optimistic,
    unrefunded on a rejected `BlockAction`) - needed before multiplayer
    item economy (crafting, drops, trading) can be real rather than
    per-client fiction.
+2. **Per-movement chunk streaming**, closing Phase 14's remaining honest
+   gap: the initial connect-time `ChunkData` sync is real and verified,
+   but a client's/server's loaded-chunk set can still change afterward
+   (`World::update_streaming` as a player moves) with nothing re-syncing
+   it - only the connect-time snapshot is covered today.
 3. Continue down brief section 10's list after that: content/gameplay
    systems (more block/item types, a real crafting-UI caller for the
    already-implemented `RecipeRegistry`), then modding depth (a second

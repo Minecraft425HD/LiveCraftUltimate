@@ -27,6 +27,7 @@
 #include "lcu/lighting/propagation.h"
 #include "lcu/network/address.h"
 #include "lcu/network/connection.h"
+#include "lcu/network/fragmentation.h"
 #include "lcu/network/udp_socket.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
@@ -36,6 +37,7 @@
 #include "lcu/player/movement_input.h"
 #include "lcu/replication/position_interpolator.h"
 #include "lcu/replication/prediction_buffer.h"
+#include "lcu/serialization/chunk_serializer.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/voxel/chunk_coord.h"
@@ -261,6 +263,11 @@ int main() {
     lcu::network::UdpSocket network_socket;
     lcu::network::Connection server_connection;
     lcu::network::Address server_address{};
+    // Reassembles ChunkDataFragment pieces back into full ChunkData
+    // payloads (see fragmentation.h) - one instance covers this client's
+    // single server connection, since concurrent fragmented messages are
+    // already distinguished by message_id within it.
+    lcu::network::FragmentReassembler chunk_reassembler;
     if (networked) {
         network_socket.bind(0);  // ephemeral local port - this client only ever initiates.
         server_address = lcu::network::Address::loopback(
@@ -645,10 +652,65 @@ int main() {
                             }
                             break;
                         }
+                        case protocol::MessageType::ChunkDataFragment: {
+                            if (const auto fragment_bytes = protocol::decode_chunk_data_fragment(message.payload)) {
+                                const auto reassembled = chunk_reassembler.add_fragment(*fragment_bytes);
+                                if (!reassembled.has_value()) {
+                                    break;  // still waiting on more fragments of this ChunkData.
+                                }
+                                const auto chunk_message = protocol::decode_chunk_data(*reassembled);
+                                if (!chunk_message.has_value()) {
+                                    LCU_LOG_WARN("Discarding malformed reassembled ChunkData");
+                                    break;
+                                }
+                                const lcu::voxel::ChunkCoord coord{chunk_message->chunk_x, chunk_message->chunk_y,
+                                                                    chunk_message->chunk_z};
+                                lcu::voxel::Chunk* target = world.chunk_at_mutable(coord);
+                                if (target == nullptr) {
+                                    LCU_LOG_DEBUG("ChunkData target ({},{},{}) isn't loaded locally, ignoring",
+                                                  coord.x, coord.y, coord.z);
+                                    break;
+                                }
+                                lcu::voxel::Chunk server_chunk;
+                                const auto result =
+                                    lcu::serialization::deserialize_chunk_from_bytes(chunk_message->compressed_bytes,
+                                                                                      server_chunk);
+                                if (result != lcu::serialization::ChunkLoadResult::Ok) {
+                                    LCU_LOG_WARN("Discarding corrupt ChunkData for ({},{},{})", coord.x, coord.y,
+                                                  coord.z);
+                                    break;
+                                }
+                                // Full authoritative overwrite - this
+                                // client's own locally-generated terrain
+                                // for `coord` (deterministic, so usually
+                                // already identical) is replaced with the
+                                // server's actual chunk, including any
+                                // edits applied before this client
+                                // connected.
+                                *target = server_chunk;
+                                compute_initial_light(coord);
+                                remesh_and_upload(coord);
+                                for (const lcu::voxel::ChunkCoord& neighbor :
+                                     {lcu::voxel::ChunkCoord{coord.x - 1, coord.y, coord.z},
+                                      lcu::voxel::ChunkCoord{coord.x + 1, coord.y, coord.z},
+                                      lcu::voxel::ChunkCoord{coord.x, coord.y - 1, coord.z},
+                                      lcu::voxel::ChunkCoord{coord.x, coord.y + 1, coord.z},
+                                      lcu::voxel::ChunkCoord{coord.x, coord.y, coord.z - 1},
+                                      lcu::voxel::ChunkCoord{coord.x, coord.y, coord.z + 1}}) {
+                                    remesh_and_upload(neighbor);
+                                }
+                                LCU_LOG_INFO("Applied server ChunkData for chunk ({}, {}, {})", coord.x, coord.y,
+                                             coord.z);
+                            }
+                            break;
+                        }
                         case protocol::MessageType::Heartbeat:
                         case protocol::MessageType::PlayerInput:
                         case protocol::MessageType::BlockAction:
-                            break;  // Heartbeat: nothing to act on. PlayerInput/BlockAction: server->client never sends these.
+                        case protocol::MessageType::ChunkData:
+                            break;  // Heartbeat: nothing to act on. PlayerInput/BlockAction/ChunkData:
+                                     // server->client never sends these directly (ChunkData only ever
+                                     // arrives fragmented, see ChunkDataFragment above).
                     }
                 }
             }

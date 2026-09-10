@@ -22,6 +22,11 @@ enum class MessageType : lcu::u8 {
     PlayerCorrection = 4,  // server -> client, periodically: authoritative player position. UnreliableSequenced.
     BlockAction = 5,       // client -> server, on break/place: a requested block edit. ReliableOrdered.
     BlockChange = 6,       // server -> client, broadcast to all: an applied, authoritative block edit. ReliableOrdered.
+    ChunkData = 7,          // logical only - a full chunk snapshot, too large for one datagram. Never sent
+                             // directly; always split into ChunkDataFragment pieces (see fragmentation.h)
+                             // and reassembled before decode_chunk_data ever sees it.
+    ChunkDataFragment = 8,  // server -> client, on connect: one fragment of a fragmented ChunkData message.
+                             // ReliableOrdered.
 };
 
 // Reads just the type byte, for a caller that needs to dispatch before
@@ -110,5 +115,34 @@ struct BlockChange {
 };
 std::vector<lcu::u8> encode_block_change(const BlockChange& message);
 std::optional<BlockChange> decode_block_change(const std::vector<lcu::u8>& payload);
+
+// A full chunk snapshot: coordinates plus the same zstd-compressed bytes
+// lcu::serialization::serialize_chunk_to_bytes produces. Sent by the
+// server to a newly-connecting client for every chunk it has loaded
+// (VoxelServer), so the client's world matches the server's authoritative
+// one instead of trusting its own independently-generated (if
+// deterministic-and-usually-identical) local terrain - see
+// NETWORKING.md "Chunk network streaming" and DECISIONS.md. A compressed
+// chunk is typically a few KB, so encode_chunk_data's output is fragmented
+// via lcu::network::fragment_payload before ever going out on the wire -
+// see encode_chunk_data_fragment below.
+struct ChunkData {
+    lcu::i32 chunk_x = 0;
+    lcu::i32 chunk_y = 0;
+    lcu::i32 chunk_z = 0;
+    std::vector<lcu::u8> compressed_bytes;
+};
+std::vector<lcu::u8> encode_chunk_data(const ChunkData& message);
+std::optional<ChunkData> decode_chunk_data(const std::vector<lcu::u8>& payload);
+
+// Wraps one already-fragmented piece of an encode_chunk_data payload (as
+// produced by lcu::network::fragment_payload) with the ChunkDataFragment
+// type byte, ready to send over Connection::send like any other message.
+// decode_chunk_data_fragment strips that byte back off, handing the raw
+// fragment bytes to lcu::network::FragmentReassembler::add_fragment;
+// once every fragment for a message has arrived, decode_chunk_data runs
+// on the reassembled result.
+std::vector<lcu::u8> encode_chunk_data_fragment(const std::vector<lcu::u8>& fragment_bytes);
+std::optional<std::vector<lcu::u8>> decode_chunk_data_fragment(const std::vector<lcu::u8>& payload);
 
 }  // namespace game::systems::protocol

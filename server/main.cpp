@@ -19,8 +19,10 @@
 #include "lcu/ecs/registry.h"
 #include "lcu/items/item_registry.h"
 #include "lcu/network/connection.h"
+#include "lcu/network/fragmentation.h"
 #include "lcu/network/udp_socket.h"
 #include "lcu/physics/collision.h"
+#include "lcu/serialization/chunk_serializer.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/world/world.h"
@@ -118,6 +120,10 @@ struct ClientState {
     lcu::network::Connection connection;
     lcu::physics::PlayerPhysicsState player;
     lcu::u32 last_acknowledged_sequence = 0;
+    // Distinguishes this client's concurrently in-flight fragmented
+    // ChunkData messages from each other (see lcu::network::fragment_payload).
+    // A per-client counter is enough - see fragmentation.h.
+    lcu::u16 next_chunk_message_id = 0;
 };
 
 }  // namespace
@@ -356,6 +362,45 @@ int main(int argc, char** argv) {
                     LCU_LOG_INFO("Replayed {} historical block change(s) to {}", block_change_history.size(),
                                  from.to_string());
                 }
+
+                // Full authoritative world sync (brief section 19 "chunk
+                // streaming"): send every chunk this server has loaded, so
+                // the new client's world matches this server's actual
+                // (possibly edited) state instead of trusting its own
+                // independently-generated terrain to happen to agree (see
+                // NETWORKING.md "Chunk network streaming"). Each chunk's
+                // compressed bytes are typically a few KB - too big for one
+                // UDP datagram - so they're split via fragment_payload and
+                // sent as a run of ChunkDataFragment messages, reassembled
+                // client-side before being applied.
+                //
+                // Known simplification, documented (see DECISIONS.md): this
+                // is a one-shot full sync on connect, not interest-managed
+                // by distance (unlike kInterestRadius for entities) and not
+                // re-streamed as the client moves - both loaded worlds are
+                // small enough in this vertical slice for that gap not to
+                // matter yet.
+                lcu::usize chunks_sent = 0;
+                lcu::usize fragments_sent = 0;
+                for (const lcu::voxel::ChunkCoord& coord : world.loaded_chunk_coords()) {
+                    const lcu::voxel::Chunk* chunk_data = world.chunk_at(coord);
+                    if (chunk_data == nullptr) {
+                        continue;
+                    }
+                    const protocol::ChunkData chunk_message{coord.x, coord.y, coord.z,
+                                                              lcu::serialization::serialize_chunk_to_bytes(*chunk_data)};
+                    const auto encoded = protocol::encode_chunk_data(chunk_message);
+                    const auto fragments =
+                        lcu::network::fragment_payload(encoded, client.next_chunk_message_id++,
+                                                        lcu::network::kMaxFragmentDataSize);
+                    for (const auto& fragment : fragments) {
+                        client.connection.send(lcu::network::Channel::ReliableOrdered,
+                                                protocol::encode_chunk_data_fragment(fragment));
+                    }
+                    ++chunks_sent;
+                    fragments_sent += fragments.size();
+                }
+                LCU_LOG_INFO("Sent {} chunk(s) ({} fragment(s)) to {}", chunks_sent, fragments_sent, from.to_string());
             }
         }
 
