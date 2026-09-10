@@ -30,6 +30,12 @@ enum class Action : u8 {
     LookLeft,
     LookRight,
     PlaceBlock,
+    // Advances which item-backed block PlaceBlock places next (Phase 21) -
+    // a plain index cycle through a fixed list, not a real hotbar UI (no
+    // on-screen slot rendering/selection highlight exists yet - see
+    // DECISIONS.md). A real, usable interim control scheme, same spirit as
+    // LookUp/Down/Left/Right standing in for mouse-look above.
+    CycleHotbar,
     Count,
 };
 

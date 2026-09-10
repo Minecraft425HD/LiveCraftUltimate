@@ -19,8 +19,9 @@ edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
 (server-side inventory)**, **Phase 16 (per-movement chunk streaming)**,
 **Phase 17 (surface/subsurface terrain content)**, **Phase 18 (item
 mappings for grass/dirt)**, **Phase 19 (server-side inventory
-extended past game:stone)**, and **Phase 20 (interest-scoped chunk
-unloading, real chunk persistence, disconnect detection)** are done;
+extended past game:stone)**, **Phase 20 (interest-scoped chunk
+unloading, real chunk persistence, disconnect detection)**, and
+**Phase 21 (hotbar item selection for placing grass/dirt)** are done;
 see "Reality Audit" and "Last Completed Task" below for what they
 cover and what's next.
 
@@ -606,6 +607,50 @@ sequence-wraparound finding above remains unconfirmed and unfixed. See
 NETWORKING.md "Interest-scoped chunk unloading, real chunk persistence,
 and disconnect detection" for the full writeup.
 
+**Phase 21 (hotbar item selection for placing grass/dirt)**: closed
+Phase 18/19's remaining honest gap - `game:grass`/`game:dirt` had real
+item mappings on both break and (server-side, Phase 19) place
+validation, but `PlaceBlock` itself still only ever requested
+`game:stone`, since there was no way for a player to choose otherwise.
+
+A new `Action::CycleHotbar` (`engine/platform::Action`), bound to `R`
+on keyboard and a new "ITEM" touch button, follows the exact pattern
+every other action already uses. `VoxelClient` gained a
+`placeable_items` list (stone/grass/dirt, same order as every other
+block/item list in the file) and a plain `selected_placeable_index`,
+cycled on an edge-detected `CycleHotbar` press. `PlaceBlock`'s handling
+(both single-player and networked branches) now reads
+`placeable_items[selected_placeable_index]` instead of the hardcoded
+`stone_id`/`stone_item_id` - no protocol change needed, since
+`BlockAction::block_id` was already a plain field and the server's
+`item_for_block`/place-validity gate already generalized to any
+item-backed block back in Phase 19.
+
+Deliberately minimal, not a graphical hotbar: no on-screen slot
+rendering or selection highlight exists yet (needs `engine/ui`'s
+texture-atlas work, same gap already noted for the debug overlay) -
+the current selection is only observable via a log line (`"Selected
+placeable item: game:grass"`), same text-first-pass pattern as
+Phase 6's lighting/day-night systems before them.
+
+Verified via a real single-player run (the existing
+`LCU_VERIFY_BREAK_PLACE` hook extended with a `kVerifyCycleHotbarFrame`
+between break and place): `"Selected placeable item: game:grass"` then
+`"Placing game:grass at world (0, 28, -1) (inventory: 0)"` - the exact
+position the grass block was broken from. Verified via a real
+two-process networked run: server logs `"Applied BlockAction from
+<addr>: (0,29,-1) 0 -> 2"` (block id 2 = `game:grass`, not the old
+hardcoded stone id 1), client logs `"Requesting place game:grass..."`
+then `"Applied server BlockChange at world (0, 29, -1): block_id=2"` -
+both sides converge on grass, not stone, confirming the server-
+authoritative path works for a client-selected block for the first
+time in a real run.
+
+No new unit tests - `touch_input_test.cpp`'s `Action::Count`-driven
+loop and every other `Action`-keyed test already generalize to the new
+enumerator automatically. `ctest` unchanged at 343/343 (bgfx) / 340/340
+(non-bgfx).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -726,15 +771,29 @@ None currently tracked.
   a player to see or rearrange their items (needs `engine/ui`, a later
   phase). `player_inventory` in `VoxelClient` is currently only
   observable via log lines.
+- `CycleHotbar`'s selection (Phase 21) is a plain index over a fixed,
+  hardcoded 3-entry list (`placeable_items` in `VoxelClient`), not
+  driven by what the player's `Inventory` actually holds - cycling
+  lands on `game:stone` even with zero in stock (the subsequent place
+  attempt then just silently no-ops, same as any other empty-stack
+  place attempt already did before this phase). No on-screen indication
+  of the current selection exists either - only a log line.
 - `RecipeRegistry` has no crafting-grid caller anywhere - implemented
   and unit-tested standalone, same as `BlockRegistry`/`ItemRegistry`
   were before `VoxelClient` used them. No crafting table/UI exists yet
   to feed it a real grid.
-- Three real block types now exist (`game:stone`/`game:grass`/
+- ~~Three real block types now exist (`game:stone`/`game:grass`/
   `game:dirt`, Phase 17-18) with real terrain, collision, meshing,
   replication, and pickup-on-break - but placing a block still always
   places `game:stone` specifically; there's no hotbar/item-selection UI
-  yet to choose what to place from a multi-item inventory.
+  yet to choose what to place from a multi-item inventory~~ **Fixed**
+  (Phase 21): a new `Action::CycleHotbar` lets the player choose which
+  of the three `PlaceBlock` places next - see NETWORKING.md/
+  PROJECT_STATE.md "Phase 21" above. Still no *graphical* hotbar (no
+  on-screen slot rendering/selection highlight - selection is
+  log-line-only, needs `engine/ui`'s texture-atlas work first), and
+  selection is a plain fixed-list cycle, not an inventory-driven hotbar
+  that only shows items actually held.
 - Lighting (`engine/lighting`) is single-chunk scoped - no light bleeds
   across a chunk boundary yet (a bright torch one block from a chunk
   edge won't light the neighboring chunk's cells, and sky light doesn't
@@ -1002,12 +1061,10 @@ before content/polish):
    see NETWORKING.md. A disconnect-detection timeout and the
    `std::optional` sentinel fix that made it safe were both closed in
    the same phase.
-2. **Placing grass/dirt**, closing Phase 18/19's remaining gap:
-   `PlaceBlock` still only ever places `game:stone` - there's no
-   hotbar/item-selection UI yet to choose what to place from a multi-
-   item inventory (the server-side validity/tracking machinery already
-   generalizes to any item-backed block, per Phase 19 - only the
-   client's own place-request logic is still stone-only).
+2. ~~Placing grass/dirt~~ **Done (Phase 21)**: a new `Action::
+   CycleHotbar` lets the player choose which of stone/grass/dirt
+   `PlaceBlock` places next - see PROJECT_STATE.md "Phase 21" above.
+   Still no graphical hotbar UI (log-line-only selection feedback).
 3. **A general, data-driven block-id-to-item-id mapping**, closing
    Phase 19's remaining honest gap: `item_for_block` on both client and
    server is still three explicit `if` checks, not configuration -

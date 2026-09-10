@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <random>
 
@@ -113,6 +114,11 @@ constexpr lcu::f32 kInteractRange = 6.0f;
 // re-upload pipeline, not a mock of it.
 constexpr lcu::u64 kVerifyBreakFrame = 3;
 constexpr lcu::u64 kVerifyPlaceFrame = 6;
+// Between the break and place frames above: exercises the real
+// CycleHotbar selection path (Phase 21) end to end, so the same hook
+// proves PlaceBlock now places whatever's selected, not just the
+// hardcoded game:stone default - see "Hotbar item selection" below.
+constexpr lcu::u64 kVerifyCycleHotbarFrame = 5;
 
 // Hotbar-sized (Minecraft-like); the rest of a real inventory (a
 // separate main storage grid, armor slots, ...) has no consumer yet -
@@ -253,11 +259,9 @@ int main() {
     // Phase 17's grass/dirt terrain content gets the same direct 1:1
     // block->item mapping stone already has (see DECISIONS.md "Phase
     // 17"), not a shared/loot-table drop - breaking game:grass yields
-    // game:grass, breaking game:dirt yields game:dirt. Placing either
-    // isn't wired up (there's still no hotbar/item-selection UI to pick
-    // what to place - PlaceBlock always places game:stone specifically,
-    // see below), so these two items can only ever be picked up today,
-    // not placed - an honest, bounded gap, not a stub.
+    // game:grass, breaking game:dirt yields game:dirt. Placing either is
+    // now wired up too (Phase 21, see "Hotbar item selection" below) -
+    // CycleHotbar picks which of the three PlaceBlock places next.
     lcu::items::ItemDefinition grass_item_def;
     grass_item_def.namespaced_id = "game:grass";
     grass_item_def.display_name = "Grass";
@@ -271,6 +275,28 @@ int main() {
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
+
+    // Hotbar item selection (Phase 21, closing Phase 18/19's remaining
+    // honest gap): PlaceBlock used to always place game:stone regardless
+    // of what the player actually held, since there was no way to choose
+    // otherwise. This is a real, minimal selection mechanism - a plain
+    // index cycled by the new CycleHotbar action - not a graphical hotbar
+    // (no on-screen slot rendering/highlight exists yet, needs
+    // engine/ui's texture-atlas work first - see DECISIONS.md). Order
+    // matches every other block/item list in this file (stone, grass,
+    // dirt); index 0 (stone) is the default, preserving pre-Phase-21
+    // behavior for anyone who never presses CycleHotbar.
+    struct PlaceableItem {
+        lcu::voxel::BlockId block_id;
+        lcu::items::ItemId item_id;
+        const char* name;
+    };
+    const std::array<PlaceableItem, 3> placeable_items{{
+        {stone_id, stone_item_id, "game:stone"},
+        {grass_id, grass_item_id, "game:grass"},
+        {dirt_id, dirt_item_id, "game:dirt"},
+    }};
+    lcu::usize selected_placeable_index = 0;
 
     // Block-break's item drop (brief section 55) - a direct 1:1
     // block->item mapping (Phase 17), still not a loot-table system.
@@ -672,6 +698,7 @@ int main() {
 
         if (verify_break_place) {
             input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
+            input.set_down(lcu::platform::Action::CycleHotbar, frame == kVerifyCycleHotbarFrame);
             input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyPlaceFrame);
         }
         if (verify_move_seconds > 0.0f) {
@@ -937,6 +964,13 @@ int main() {
                                        !previous_input.is_down(lcu::platform::Action::Interact);
         const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
                                     !previous_input.is_down(lcu::platform::Action::PlaceBlock);
+        const bool cycle_hotbar_pressed = input.is_down(lcu::platform::Action::CycleHotbar) &&
+                                           !previous_input.is_down(lcu::platform::Action::CycleHotbar);
+
+        if (cycle_hotbar_pressed) {
+            selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
+            LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+        }
 
         if (interact_pressed && hit && networked) {
             // Server-authoritative: send the request and wait for the
@@ -992,7 +1026,8 @@ int main() {
             }
         }
 
-        if (place_pressed && hit && player_inventory.remove_item(stone_item_id, 1) == 1) {
+        const PlaceableItem& selected_placeable = placeable_items[selected_placeable_index];
+        if (place_pressed && hit && player_inventory.remove_item(selected_placeable.item_id, 1) == 1) {
             const lcu::voxel::BlockWorldCoord place_pos{
                 hit->world.x + static_cast<lcu::i64>(hit->normal.x),
                 hit->world.y + static_cast<lcu::i64>(hit->normal.y),
@@ -1007,20 +1042,22 @@ int main() {
                 // being air by the time it's processed) currently isn't
                 // refunded; a real inventory-sync/rejection channel is a
                 // separate, larger feature.
-                LCU_LOG_INFO("Requesting place at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
-                             place_pos.z, player_inventory.count_item(stone_item_id));
-                server_connection.send(
-                    lcu::network::Channel::ReliableOrdered,
-                    protocol::encode_block_action(
-                        {protocol::BlockActionType::Place, place_pos.x, place_pos.y, place_pos.z, stone_id}));
+                LCU_LOG_INFO("Requesting place {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
+                             place_pos.x, place_pos.y, place_pos.z,
+                             player_inventory.count_item(selected_placeable.item_id));
+                server_connection.send(lcu::network::Channel::ReliableOrdered,
+                                        protocol::encode_block_action({protocol::BlockActionType::Place, place_pos.x,
+                                                                        place_pos.y, place_pos.z,
+                                                                        selected_placeable.block_id}));
             } else {
-                LCU_LOG_INFO("Placing block at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
-                             place_pos.z, player_inventory.count_item(stone_item_id));
+                LCU_LOG_INFO("Placing {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
+                             place_pos.x, place_pos.y, place_pos.z,
+                             player_inventory.count_item(selected_placeable.item_id));
                 const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                     const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
-                    target->set_block(split.local.x, split.local.y, split.local.z, stone_id);
-                    update_lighting_for_edit(split.chunk, split.local, old_id, stone_id);
+                    target->set_block(split.local.x, split.local.y, split.local.z, selected_placeable.block_id);
+                    update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
                     remesh_and_upload(split.chunk);
                     for (const lcu::voxel::ChunkCoord& neighbor :
                          neighbors_sharing_boundary(split.chunk, split.local)) {
@@ -1038,7 +1075,7 @@ int main() {
                     }
                 } else {
                     LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
-                    player_inventory.add_item(item_registry, {stone_item_id, 1});
+                    player_inventory.add_item(item_registry, {selected_placeable.item_id, 1});
                 }
             }
         }

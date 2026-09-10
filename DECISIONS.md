@@ -1349,3 +1349,53 @@ compares unequal to any real `ChunkCoord` when empty) and do the real
 work. This is a minimal, targeted fix to the exact bug (a sentinel
 value that cannot alias a real coordinate) rather than a broader
 refactor of the streaming trigger's shape.
+
+## 2026-09-10 — Hotbar item selection is a plain cycled index, not a graphical hotbar (Phase 21)
+
+**Context:** Phase 18/19 gave `game:grass`/`game:dirt` real item
+mappings on both break and (server-side) place validation, but
+`PlaceBlock` itself still only ever requested `game:stone` - honestly
+flagged since Phase 18 as blocked on "there's no hotbar/item-selection
+UI yet." The obvious full fix is a real Minecraft-style hotbar: nine
+visible slots, a texture-atlas icon per item, a highlighted selection
+box, number-key/scroll-wheel selection. None of that exists yet -
+`engine/ui::draw_debug_overlay` is still VGA-style debug text, and
+there's no texture atlas anywhere in the tree (brief section 12's
+content pipeline, a separate, larger piece of work).
+
+**Decision:** Build the smallest real selection mechanism that makes
+placing grass/dirt actually possible, and nothing more: a new
+`Action::CycleHotbar` (bound to `R`/a new touch button, following the
+exact same `engine/platform::Action` pattern every other action
+already uses) advances a plain `usize` index through a fixed 3-entry
+`placeable_items` list in `VoxelClient`; `PlaceBlock` places whichever
+entry is currently selected. The only player-visible feedback is a log
+line (`"Selected placeable item: game:grass"`) - the same "real logic,
+text-first-pass" pattern already used for lighting (Phase 6),
+day/night (Phase 6), and the debug overlay itself (Phase 12) before
+their eventual visual consumers existed. Building the graphical hotbar
+now, before a texture atlas exists to draw item icons with, would be
+speculative work with no way to actually render it meaningfully (brief
+section 76/98) - the same reasoning Phase 12's debug overlay followed.
+
+**Why a fixed list, not inventory-driven:** cycling through "whatever
+the player's `Inventory` currently holds" would be the more complete
+design, but it couples this phase to inventory *querying* logic
+(skip empty stacks? show only in-stock items? what happens when the
+last unit of the selected item is placed?) that a real hotbar UI will
+need to solve properly anyway once it exists. The fixed list is
+simpler, is honestly documented as not inventory-aware (see
+PROJECT_STATE.md Known Limitations), and doesn't block placing an item
+the player doesn't hold - `PlaceBlock`'s existing `remove_item(...) ==
+1` gate already silently no-ops in that case, same behavior as before
+this phase for `game:stone`.
+
+**Why no protocol change was needed:** `protocol::BlockAction::
+block_id` was already a plain field carrying whatever the client
+requests, and the server's Phase 19 `item_for_block`/place-validity
+gate already generalized to any item-backed block id, not just
+`game:stone`'s. This phase is therefore purely client-side - the
+server-authoritative path for a client-selected non-stone block was
+already correct, just never previously exercised by a real client
+request, which the real two-process verification run for this phase
+now confirms directly.

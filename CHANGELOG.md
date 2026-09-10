@@ -2,7 +2,40 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21
+
+### Phase 21
+
+- New `Action::CycleHotbar` (`engine/platform::Action`), bound to `R`
+  on keyboard and a new "ITEM" touch button - closes Phase 18/19's
+  remaining honest gap: `PlaceBlock` only ever requested `game:stone`
+  since there was no way to choose otherwise.
+- `VoxelClient` gained a `placeable_items` list (stone/grass/dirt) and
+  a plain `selected_placeable_index`, cycled on an edge-detected
+  `CycleHotbar` press. `PlaceBlock`'s handling (both single-player and
+  networked branches) now reads the selected entry instead of the
+  hardcoded `stone_id`/`stone_item_id`.
+- No protocol change needed - `BlockAction::block_id` was already a
+  plain field, and the server's Phase 19 `item_for_block`/place-
+  validity gate already generalized to any item-backed block.
+- Extended `LCU_VERIFY_BREAK_PLACE` with `kVerifyCycleHotbarFrame`
+  (between break and place) so the existing headless hook now
+  exercises break -> cycle -> place end to end.
+- Verified via a real single-player run: "Selected placeable item:
+  game:grass" then "Placing game:grass at world (0, 28, -1) (inventory:
+  0)" - the exact position the grass block was broken from. Verified
+  via a real two-process networked run: server logs "Applied
+  BlockAction from <addr>: (0,29,-1) 0 -> 2" (block id 2 = game:grass,
+  not the old hardcoded stone id 1), client logs "Requesting place
+  game:grass..." then "Applied server BlockChange at world (0, 29,
+  -1): block_id=2".
+- No new unit tests - existing `Action::Count`-driven tests
+  (`touch_input_test.cpp` and others) generalize to the new enumerator
+  automatically. `ctest` unchanged at 343/343 (bgfx) / 340/340
+  (non-bgfx).
+- Honestly scoped: still no graphical hotbar (log-line-only selection
+  feedback); selection is a plain fixed-list cycle, not driven by what
+  the player's inventory actually holds.
 
 ### Phase 20
 

@@ -476,6 +476,65 @@ data-driven block-id-to-item-id mapping.
 
 ---
 
+## Phase 21 — Hotbar item selection for placing grass/dirt (post-original-queue; closes Phase 18/19's remaining honest gap)
+
+Phase 18/19 gave `game:grass`/`game:dirt` real item mappings on both
+break and (server-side) place validation, but `PlaceBlock` itself still
+only ever requested `game:stone` - there was no way for a player to
+choose otherwise, since no hotbar/item-selection UI existed yet.
+
+- [x] New `Action::CycleHotbar` (`engine/platform::Action`), bound to
+  `R` on keyboard and a new "ITEM" touch button, following the exact
+  pattern every other action already uses (`engine/platform/src/
+  input.cpp`, `touch_control_layout.h`).
+- [x] `VoxelClient` gained a `placeable_items` list (stone/grass/dirt,
+  same order as every other block/item list in the file) and a plain
+  `selected_placeable_index`, cycled on an edge-detected `CycleHotbar`
+  press - a real, minimal selection mechanism, not a graphical hotbar
+  (no on-screen slot rendering exists yet - needs `engine/ui`'s
+  texture-atlas work first, same gap noted for the debug overlay).
+- [x] `PlaceBlock`'s handling (both single-player and networked
+  branches) now reads `placeable_items[selected_placeable_index]`
+  instead of the hardcoded `stone_id`/`stone_item_id` - no protocol
+  change needed, since `BlockAction::block_id` was already a plain
+  field and the server's `item_for_block`/place-validity gate already
+  generalized to any item-backed block back in Phase 19.
+- [x] Extended the existing `LCU_VERIFY_BREAK_PLACE` headless hook with
+  a `kVerifyCycleHotbarFrame` (between break and place) so the same
+  hook now exercises break -> cycle -> place end to end, proving
+  placing isn't hardcoded anymore.
+- [x] Verified via a real single-player run: `"Selected placeable item:
+  game:grass"` then `"Placing game:grass at world (0, 28, -1)
+  (inventory: 0)"` - the exact position the grass block was broken
+  from. Verified via a real two-process networked run: server logs
+  `"Applied BlockAction from <addr>: (0,29,-1) 0 -> 2"` (block id 2 =
+  `game:grass`, not the old hardcoded stone id 1), client logs
+  `"Requesting place game:grass..."` then `"Applied server BlockChange
+  at world (0, 29, -1): block_id=2"` - both sides converge on grass,
+  not stone, confirming the server-authoritative path (Phase 19's
+  generalized validity gate) works for a client-selected block for the
+  first time in a real run.
+
+No new unit tests - `touch_input_test.cpp`'s `Action::Count`-driven
+loop and every other `Action`-keyed test already generalize to the new
+enumerator automatically. `ctest` unchanged at 343/343 (bgfx) / 340/340
+(non-bgfx).
+
+Honestly scoped: still no graphical hotbar (no on-screen slot
+rendering/selection highlight - text log only, matching the debug
+overlay's own current text-only state); selection is a plain index
+cycle through a fixed 3-item list, not a real inventory-driven hotbar
+that only shows items the player actually holds; server-side inventory
+persistence across reconnect still doesn't exist (Phase 15/19's
+existing gap, unrelated to this phase).
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task": a general, data-driven block-id-to-item-id mapping (`item_for_block`/
+`grant_item_for_broken_block` are still three explicit `if` checks on
+both client and server), then further content/gameplay systems.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet
@@ -713,13 +772,28 @@ honestly-documented, unconfirmed finding (a suspected UDP sequence-
 wraparound issue under extreme sustained packet volume) left for a
 future phase.
 
+Phase 21 (hotbar item selection for placing grass/dirt, post-queue)
+closes Phase 18/19's remaining honest gap: a new `Action::CycleHotbar`
+(bound to `R`/a new touch button) lets a player cycle which of
+stone/grass/dirt `PlaceBlock` places next, replacing the hardcoded
+`game:stone`-only request. No protocol change was needed - the
+server's Phase 19 validity gate already generalized to any item-backed
+block. Verified via a real single-player run (break grass, cycle to
+grass, place grass at the exact same position) and a real two-process
+networked run (server logs `(0,29,-1) 0 -> 2`, confirming a
+client-selected non-stone block converges server-authoritatively for
+the first time). Still no graphical hotbar - text log only, same
+current state as the debug overlay.
+
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
 crafting-UI caller; item drops are a direct, hardcoded 1:1 block->item
 mapping (stone/grass/dirt, both client- and now server-side as of Phase
 19), not a data-driven table or a loot-table system; placing a block
-still always places `game:stone` regardless of what's in the inventory
-(no hotbar/item-selection UI); worldgen still has no climate/biome/caves/ores/structures/
+now selects among stone/grass/dirt via a plain cycled index (Phase 21),
+not a graphical hotbar UI (no on-screen slot rendering/selection
+highlight yet - needs `engine/ui`'s texture-atlas work); worldgen still
+has no climate/biome/caves/ores/structures/
 vegetation (brief section 21's later pipeline stages - every column
 uses the same three block ids regardless of position); lighting is
 single-chunk scoped (no cross-chunk
