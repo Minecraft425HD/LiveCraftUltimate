@@ -25,14 +25,14 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (data-driven block-id-to-item-id mapping)**, **Phase 23
 (quick-craft: RecipeRegistry's first real caller)**, **Phase 24
 (item_crafted: EventBus's second real event)**, **Phase 25
-(macOS build audit)**, and **Phase 26 (visible terrain: per-block/
-per-face colors + procedural shader noise)** are done; see "Reality
-Audit" and "Last Completed Task" below for what they cover and what's
-next. A large, user-directed program (Phases 26-42: visible terrain
-colors, skybox, cross-chunk global lighting with real performance
-constraints, procedural terrain with sea level at y=0, water, biomes,
-caves/ores, vegetation) is now in progress - see TASK_QUEUE.md for
-per-phase detail as each lands.
+(macOS build audit)**, **Phase 26 (visible terrain: per-block/
+per-face colors + procedural shader noise)**, and **Phase 27 (skybox +
+sun/moon)** are done; see "Reality Audit" and "Last Completed Task"
+below for what they cover and what's next. A large, user-directed
+program (Phases 26-42: visible terrain colors, skybox, cross-chunk
+global lighting with real performance constraints, procedural terrain
+with sea level at y=0, water, biomes, caves/ores, vegetation) is now in
+progress - see TASK_QUEUE.md for per-phase detail as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -840,6 +840,51 @@ and links, not that it looks right; no texture atlas exists yet (Phase
 12); `game:water`/`game:sand` colors are deferred to Phase 37/39 since
 those blocks don't exist yet.
 
+**Phase 27 (skybox + sun/moon)**: until now the sky was a single flat
+clear color, and there was no sun/moon at all. `Renderer::begin_frame`
+now takes an explicit `Vec3` clear color (was a pre-packed `u32`) and
+interpolates it every frame from the existing `DayNightCycle::sky_
+light_scale()` - night (0.02, 0.03, 0.08) to day (0.45, 0.65, 0.95) -
+reusing the one real time signal rather than adding a second animation
+clock. A new `Renderer::submit_billboard()` draws a camera-facing sun/
+moon quad (built from the camera's own `right()`/`cross(right,
+forward)` basis) using bgfx transient buffers, into a dedicated bgfx
+view (`kSkyViewId`) ordered via `bgfx::setViewOrder` to execute
+*before* the terrain view - terrain's own real depth test against the
+sky view's cleared depth buffer then naturally occludes the sky quad
+wherever a block is actually in front of it, satisfying "own view,
+depth test off" for the sky quad itself while still getting correct
+occlusion. Direction math was extracted into a new pure `game::
+systems::sun_direction(time_of_day)` next to `DayNightCycle` (moon is
+always exactly opposite) instead of staying inlined in `client/
+main.cpp`, specifically so it's headlessly unit-testable. Dedicated
+minimal `vs_sky.sc`/`fs_sky.sc` (position + flat color, no lighting/
+noise - the sun/moon IS a light source, not something lit by one).
+
+Two real bugs found and fixed: (1) `bgfx::allocTransientVertexBuffer`/
+`allocTransientIndexBuffer` return `void` in this bgfx version, not
+`bool` - fixed via `getAvailTransientVertexBuffer`/`getAvailTransient
+IndexBuffer` pre-checks; (2) proactively avoided a repeat of Phase 26's
+`Lcu::Math` link bug by adding `Lcu::Math` to `LcuGame`'s link
+libraries up front, since `sun_direction` now returns a real `Vec3`
+from that library.
+
+6 new unit tests (`SunDirection.*`): all four phase points (dawn/noon/
+dusk/midnight), unit-length-in-the-xy-plane, and moon-always-opposite-
+sun. Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build: `"Sky
+shader program valid=true"` alongside the existing chunk shader, plus
+a real headless `LCU_VERIFY_BREAK_PLACE` run under that build showing
+zero regressions. `ctest` 358/358 (bgfx, up from 352) / 355/355
+(non-bgfx, up from 349).
+
+Scope: stars at night were explicitly listed as optional in the brief
+("Sterne bei Nacht optional") and are deliberately deferred - a
+scoped-out feature, not a missing one.
+
+Honestly scoped: **what a real GPU/display actually shows (sky color,
+sun/moon visibility, and the occlusion behavior described above) is
+still NOT VERIFIED — ENVIRONMENT LIMITATION**.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1311,9 +1356,10 @@ before content/polish):
    larger-scoped plan. Done so far: ~~Phase 25 (macOS build audit,
    one real Metal-shader-profile bug found and fixed)~~, ~~Phase 26
    (visible terrain: per-block/per-face colors + procedural shader
-   noise)~~ - see PROJECT_STATE.md "Phase 25"/"Phase 26" above and
-   TASK_QUEUE.md for full per-phase detail. Next: Phase 27 (skybox +
-   sun/moon), then Phase 28 (renderer consumes per-voxel light -
+   noise)~~, ~~Phase 27 (skybox + sun/moon, view-ordered occlusion, 2
+   real bugs found and fixed)~~ - see PROJECT_STATE.md "Phase 25"/
+   "Phase 26"/"Phase 27" above and TASK_QUEUE.md for full per-phase
+   detail. Next: Phase 28 (renderer consumes per-voxel light -
    prerequisite for the cross-chunk lighting work in Phases 29-35),
    then entity rendering/debug overlay (36), then the worldgen phases
    (37-41: sea level, water, continents, biomes, caves/ores,

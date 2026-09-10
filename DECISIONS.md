@@ -1714,3 +1714,58 @@ compile against it directly, and promptly failed - a real, if minor,
 CMake hygiene gap this phase's change happened to surface and fix
 (`target_link_libraries(LcuVoxel PUBLIC Lcu::Core Lcu::Math)`), not
 something deliberately introduced by this phase's own design.
+
+## 2026-09-10 — Sky occludes via bgfx view ordering, not a depth trick on the sky quad (Phase 27)
+
+**Context:** The brief asks for the sun/moon billboard to have its own
+bgfx view with depth test off ("Eigener bgfx-View, Tiefentest aus"),
+but it still needs to be correctly hidden behind terrain (a mountain
+between the camera and a low sun must actually block it). Depth test
+off on the sky quad itself means it can't use its own depth test to
+achieve that.
+
+**Decision:** Give the sky/sun/moon a second bgfx view
+(`kSkyViewId = 1`) and use `bgfx::setViewOrder(0, 2, {kSkyViewId, 0})`
+to force it to execute *before* the terrain view (view 0), rather than
+renumbering the existing terrain view or giving the sky quad its own
+depth test. The sky view clears both color and depth; terrain then
+draws into that same shared depth buffer with its normal
+`BGFX_STATE_DEFAULT` depth test and naturally overwrites the sky quad
+wherever a block is actually in front of it. This achieves real
+occlusion (a mountain genuinely hides a low sun) while still honoring
+"Tiefentest aus" for the sky quad's own draw call
+(`BGFX_STATE_WRITE_RGB` only, no depth read/write). Renumbering
+terrain to view 0→1 and sky to 0 was the more "obviously ascending
+order" alternative but a larger, riskier diff (every other `submit_*`
+call and view-rect/clear setup already assumes view 0 is terrain) for
+no behavioral difference - `setViewOrder` gets the same result with a
+two-line change.
+
+**Sun/moon direction extracted into a pure, testable function:** the
+first implementation computed `cos(angle)`/`sin(angle)` directly
+inline in `client/main.cpp`'s frame loop - correct, but untestable
+without a GPU/display (nothing in `client/` is unit-tested). Moved to
+`game::systems::sun_direction(time_of_day)`, a pure function next to
+the existing `DayNightCycle` (same module, same "reuse the one real
+time signal" principle as `sky_light_scale()`), so the actual math
+(angle=0 at dawn/horizon, pi/2 at noon/straight up, pi at dusk/
+opposite horizon, 3pi/2 at midnight/straight down; moon always exactly
+`-sun_direction`) is verified by 6 real headless unit tests instead of
+only being checkable by eye on a real GPU. This is the same
+"extract what's genuinely testable, honestly label the rest NOT
+VERIFIED" pattern used for Phase 26's per-face color selection.
+
+**A second real bug, avoided rather than hit this time:** giving
+`game::systems` (in `LcuGame`) a direct `math::Vec3` return type
+meant `LcuGame` needed an explicit `Lcu::Math` link - added proactively
+(`target_link_libraries(LcuGame PUBLIC Lcu::EngineCore Lcu::Math)`)
+specifically because Phase 26 had just hit the identical
+transitive-include trap for `LcuVoxel`/`Lcu::Math` days earlier.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether the sky actually looks correct on a real display (color
+interpolation, sun/moon visibility, the occlusion behavior described
+above) - none of that is knowable from a code read or a headless Noop-
+backend run. Stars at night were explicitly optional in the brief
+("Sterne bei Nacht optional") and are deliberately deferred, not a
+missing/fake feature.

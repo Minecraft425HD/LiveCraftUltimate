@@ -2,7 +2,57 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27
+
+### Phase 27
+
+- Skybox: `Renderer::begin_frame` now takes an explicit `Vec3` clear
+  color (+ alpha) instead of a pre-packed `u32`, and interpolates it
+  every frame from the existing `DayNightCycle::sky_light_scale()` -
+  night (0.02, 0.03, 0.08) to day (0.45, 0.65, 0.95) - reusing the one
+  real time signal instead of a second animation clock.
+- Sun/moon: camera-facing billboard quads via a new
+  `Renderer::submit_billboard()`, built from the camera's own
+  `right()`/`cross(right, forward)` basis and transient bgfx vertex/
+  index buffers (a fresh tiny per-frame allocation, not a persistent
+  GPU buffer for geometry that moves every frame). Position comes from
+  a new pure `game::systems::sun_direction(time_of_day)` (moon is
+  always exactly opposite).
+- Own bgfx view (`kSkyViewId = 1`) ordered via `bgfx::setViewOrder` to
+  execute *before* the terrain view (view 0): the sky clears
+  color+depth, terrain then draws into the same depth buffer with its
+  normal depth test and naturally occludes the sky wherever a block is
+  actually in front of it - real occlusion via view ordering, not a
+  depth trick on the sky quad itself (which has depth test/write off,
+  as specified: "Tiefentest aus").
+- Dedicated minimal `vs_sky.sc`/`fs_sky.sc` + `varying_sky.def.sc`
+  (position + flat color only, no lighting/noise) - the sun/moon IS a
+  light source, not something lit by one, so reusing the chunk
+  shader's lighting would be wrong.
+- Scope: stars at night were explicitly listed as optional in the
+  brief ("Sterne bei Nacht optional") and are deliberately deferred -
+  not a fake/missing feature, a scoped-out one.
+- Real bugs found and fixed: (1) `bgfx::allocTransientVertexBuffer`/
+  `allocTransientIndexBuffer` return `void` in this bgfx version, not
+  `bool` - fixed by checking `getAvailTransientVertexBuffer`/
+  `getAvailTransientIndexBuffer` first; (2) `sun_direction`'s formula
+  was initially inlined directly in `client/main.cpp` (untestable) -
+  extracted into `game::systems::sun_direction()` next to
+  `DayNightCycle` so it's a pure, headlessly-testable function; this
+  also needed `LcuGame` to gain an explicit `Lcu::Math` link (same
+  transitive-include trap as Phase 26's `LcuVoxel` bug, avoided this
+  time instead of hit).
+- 6 new unit tests: `sun_direction` at all four phase points (dawn/
+  noon/dusk/midnight), unit-length-in-the-xy-plane, and moon-always-
+  opposite-sun.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build: "Chunk shader
+  program valid=true" AND "Sky shader program valid=true", plus a real
+  headless `LCU_VERIFY_BREAK_PLACE` run under that exact build showing
+  zero regressions.
+- `ctest` 358/358 (bgfx, up from 352).
+- Honestly scoped: what a real GPU/display actually shows (sky color,
+  sun/moon visibility and occlusion) is still NOT VERIFIED —
+  ENVIRONMENT LIMITATION; stars deferred (see above).
 
 ### Phase 26
 

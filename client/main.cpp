@@ -169,6 +169,29 @@ constexpr lcu::u32 kAiRngSeed = 20260909;
 // scale change across a handful of frames.
 constexpr lcu::f32 kDayLengthSeconds = 120.0f;
 
+// Skybox (Phase 27): the render clear color IS the sky, since there's no
+// separate skybox geometry - a deep blue-black night and a bright blue
+// day, linearly interpolated by DayNightCycle::sky_light_scale() (see
+// day_night_cycle.h - [0.1, 1.0], 1.0 at noon). Reusing that existing
+// real scale (not a second, separately-tuned day/night signal) keeps
+// the sky, ambient light, and ambient-light-scaled block lighting all
+// agreeing with each other.
+constexpr lcu::math::Vec3 kNightSkyColor{0.02f, 0.03f, 0.08f};
+constexpr lcu::math::Vec3 kDaySkyColor{0.45f, 0.65f, 0.95f};
+
+// Sun/moon (Phase 27): a billboard quad at a fixed large distance from
+// the camera (within the 500-unit far clip plane, see the perspective()
+// call in the render loop), positioned by angle from
+// DayNightCycle::time_of_day() around a fixed world-space circle - the
+// same real time source everything else (sky color, sky light scale)
+// already uses, not a second, separately-tuned animation. The moon is
+// exactly the opposite phase (180 degrees) of the sun, so one is always
+// up while the other is down, same as reality.
+constexpr lcu::f32 kCelestialRadius = 300.0f;
+constexpr lcu::f32 kCelestialHalfSize = 12.0f;
+constexpr lcu::math::Vec3 kSunColor{1.0f, 0.95f, 0.75f};
+constexpr lcu::math::Vec3 kMoonColor{0.75f, 0.8f, 0.9f};
+
 // If LCU_CONNECT_PORT is set, VoxelClient connects to a VoxelServer on
 // 127.0.0.1:<port> at startup (brief section 64/Phase 8) instead of
 // running fully single-player/local. Only loopback IPv4 is supported
@@ -614,10 +637,16 @@ int main() {
     // directory - a real asset system (brief section 33) will replace
     // this raw path with an ID-based lookup once one exists.
     bgfx::ProgramHandle chunk_program = BGFX_INVALID_HANDLE;
+    // Sky program (Phase 27, sun/moon) - same on/off-ness as chunk_program,
+    // driven by the same LCU_HAS_CHUNK_SHADERS define (client/CMakeLists.txt
+    // compiles both shader pairs together under LCU_BUILD_SHADER_TOOLS).
+    bgfx::ProgramHandle sky_program = BGFX_INVALID_HANDLE;
 #if defined(LCU_HAS_CHUNK_SHADERS)
     chunk_program = lcu::rendering::load_chunk_program("shaders/chunk", "chunk");
+    sky_program = lcu::rendering::load_chunk_program("shaders/sky", "sky");
 #endif
     LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
+    LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
 #endif
 
     // --- Player: spawns resting on the terrain surface at world (0, *, 0) ---
@@ -1234,11 +1263,36 @@ int main() {
         }
 
 #if defined(LCU_ENABLE_BGFX)
-        renderer.begin_frame(0x87ceebff);
+        const lcu::f32 sky_t = day_night_cycle.sky_light_scale();
+        const lcu::math::Vec3 sky_color = kNightSkyColor + (kDaySkyColor - kNightSkyColor) * sky_t;
+        renderer.begin_frame(sky_color);
         const lcu::math::Mat4 view = camera.view_matrix();
         const lcu::f32 aspect =
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
         const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(1.0f, aspect, 0.1f, 500.0f);
+
+        // Sun/moon (Phase 27) - see kCelestialRadius's doc comment. Direction
+        // math lives in game::systems::sun_direction (headlessly unit-tested
+        // at the four cardinal phase points) rather than duplicated here.
+        {
+            const lcu::math::Vec3 sun_dir = game::systems::sun_direction(day_night_cycle.time_of_day());
+            const lcu::math::Vec3 moon_dir = -sun_dir;
+            const lcu::math::Vec3 billboard_right = camera.right();
+            const lcu::math::Vec3 billboard_up = lcu::math::cross(billboard_right, camera.forward());
+            // Small negative-y margin so each body is still drawn while
+            // just below the horizon (a sunset/sunrise glow effect would
+            // build on this later; for now it just avoids an abrupt
+            // pop at exactly y=0).
+            if (sun_dir.y > -0.05f) {
+                renderer.submit_billboard(camera.position + sun_dir * kCelestialRadius, billboard_right,
+                                           billboard_up, kCelestialHalfSize, kSunColor, sky_program, view, proj);
+            }
+            if (moon_dir.y > -0.05f) {
+                renderer.submit_billboard(camera.position + moon_dir * kCelestialRadius, billboard_right,
+                                           billboard_up, kCelestialHalfSize, kMoonColor, sky_program, view, proj);
+            }
+        }
+
         constexpr lcu::i32 kEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
         for (const auto& [coord, gpu_mesh] : gpu_meshes) {
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
@@ -1268,6 +1322,9 @@ int main() {
 #if defined(LCU_ENABLE_BGFX)
     if (bgfx::isValid(chunk_program)) {
         bgfx::destroy(chunk_program);
+    }
+    if (bgfx::isValid(sky_program)) {
+        bgfx::destroy(sky_program);
     }
     for (auto& [coord, gpu_mesh] : gpu_meshes) {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);

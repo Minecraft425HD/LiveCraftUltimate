@@ -51,3 +51,50 @@ TEST(DayNightCycle, SkyLightScaleNeverGoesBelowTheNightFloor) {
         EXPECT_LE(cycle.sky_light_scale(), 1.0f + 1e-4f);
     }
 }
+
+TEST(SunDirection, AtDawnSunIsOnTheHorizon) {
+    const lcu::math::Vec3 dir = game::systems::sun_direction(0.0f);
+    EXPECT_NEAR(dir.x, 1.0f, 1e-5f);
+    EXPECT_NEAR(dir.y, 0.0f, 1e-5f);
+    EXPECT_NEAR(dir.z, 0.0f, 1e-5f);
+}
+
+TEST(SunDirection, AtNoonSunIsStraightUp) {
+    const lcu::math::Vec3 dir = game::systems::sun_direction(0.25f);
+    EXPECT_NEAR(dir.x, 0.0f, 1e-5f);
+    EXPECT_NEAR(dir.y, 1.0f, 1e-5f);
+    EXPECT_NEAR(dir.z, 0.0f, 1e-5f);
+}
+
+TEST(SunDirection, AtDuskSunIsOnTheOppositeHorizon) {
+    const lcu::math::Vec3 dir = game::systems::sun_direction(0.5f);
+    EXPECT_NEAR(dir.x, -1.0f, 1e-5f);
+    EXPECT_NEAR(dir.y, 0.0f, 1e-5f);
+    EXPECT_NEAR(dir.z, 0.0f, 1e-5f);
+}
+
+TEST(SunDirection, AtMidnightSunIsStraightDown) {
+    const lcu::math::Vec3 dir = game::systems::sun_direction(0.75f);
+    EXPECT_NEAR(dir.x, 0.0f, 1e-5f);
+    EXPECT_NEAR(dir.y, -1.0f, 1e-5f);
+    EXPECT_NEAR(dir.z, 0.0f, 1e-5f);
+}
+
+TEST(SunDirection, IsAlwaysAUnitVectorInTheXyPlane) {
+    for (int i = 0; i < 16; ++i) {
+        const lcu::f32 t = static_cast<lcu::f32>(i) / 16.0f;
+        const lcu::math::Vec3 dir = game::systems::sun_direction(t);
+        EXPECT_NEAR(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z, 1.0f, 1e-4f);
+        EXPECT_FLOAT_EQ(dir.z, 0.0f);
+    }
+}
+
+TEST(SunDirection, MoonIsAlwaysExactlyOppositeTheSun) {
+    for (int i = 0; i < 16; ++i) {
+        const lcu::f32 t = static_cast<lcu::f32>(i) / 16.0f;
+        const lcu::math::Vec3 sun_dir = game::systems::sun_direction(t);
+        const lcu::math::Vec3 moon_dir = -sun_dir;
+        EXPECT_FLOAT_EQ(moon_dir.x, -sun_dir.x);
+        EXPECT_FLOAT_EQ(moon_dir.y, -sun_dir.y);
+    }
+}

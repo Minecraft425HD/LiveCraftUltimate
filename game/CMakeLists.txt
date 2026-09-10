@@ -24,6 +24,6 @@ target_include_directories(LcuGame PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/items/include>
 )
 
-target_link_libraries(LcuGame PUBLIC Lcu::EngineCore)
+target_link_libraries(LcuGame PUBLIC Lcu::EngineCore Lcu::Math)
 
 lcu_apply_common_options(LcuGame)

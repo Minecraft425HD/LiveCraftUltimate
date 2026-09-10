@@ -802,6 +802,62 @@ exists yet (Phase 12) - this is color-only surface detail, not
 texturing. `game:water`/`game:sand` colors aren't registered yet since
 those blocks don't exist until Phase 37/39.
 
+## Phase 27 — Skybox + sun/moon
+
+Closes the second of four things flagged as "not what the user expects
+to see": there was no sky color variation and no visible sun/moon at
+all, just a single flat clear color.
+
+- [x] `Renderer::begin_frame` changed from a pre-packed `u32` clear
+  color to an explicit `Vec3` (+ alpha) - a real API improvement, not
+  a redundant alias, since every caller now passes real float
+  components instead of hand-packing hex.
+- [x] Sky color interpolated every frame from the existing
+  `DayNightCycle::sky_light_scale()` - night (0.02, 0.03, 0.08), day
+  (0.45, 0.65, 0.95), linear interpolation - reusing the one real time
+  signal instead of a second, separately-tuned animation clock.
+- [x] Sun/moon rendered as camera-facing billboard quads via a new
+  `Renderer::submit_billboard()`, built from the camera's own
+  `right()`/`cross(right, forward)` basis vectors so they always face
+  the camera. Position comes from a new pure `game::systems::sun_
+  direction(time_of_day)` (sun yellow-white, moon pale blue-white,
+  moon always exactly opposite the sun).
+- [x] Own bgfx view (`kSkyViewId`), depth test off on the sky quad
+  itself ("Tiefentest aus", per spec) - real occlusion instead comes
+  from `bgfx::setViewOrder` making the sky view execute *before* the
+  terrain view, so terrain's normal depth test against the freshly-
+  cleared depth buffer naturally hides the sky wherever a block is
+  actually in front of it.
+- [x] Stars at night: explicitly listed as optional in the brief
+  ("Sterne bei Nacht optional") - deliberately deferred to control
+  scope, not a missing/fake feature.
+- [x] Real bugs found and fixed: (1) `bgfx::allocTransientVertexBuffer`/
+  `allocTransientIndexBuffer` return `void` in this bgfx version, not
+  `bool` - fixed via `getAvailTransientVertexBuffer`/`getAvailTransient
+  IndexBuffer` pre-checks (grepped the actual bgfx header to confirm,
+  didn't guess); (2) `sun_direction`'s formula was first inlined
+  directly in `client/main.cpp` (untestable, nothing in `client/` is
+  unit-tested) - extracted into `game::systems::sun_direction()` next
+  to `DayNightCycle`, which needed `LcuGame` to gain an explicit
+  `Lcu::Math` link (proactively avoiding a repeat of Phase 26's
+  identical `LcuVoxel`/`Lcu::Math` transitive-include bug).
+- [x] 6 new unit tests (`SunDirection.*`): direction at all four phase
+  points (dawn/noon/dusk/midnight), unit-length-in-the-xy-plane, and
+  moon-always-exactly-opposite-sun.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build: `"Sky
+  shader program valid=true"` alongside the existing `"Chunk shader
+  program valid=true"` - both real shader programs link through the
+  real bgfx pipeline. Verified via a real headless run
+  (`LCU_VERIFY_BREAK_PLACE`) under that same build that break/place
+  still works with both programs loaded, zero regressions.
+
+`ctest` 358/358 (bgfx) / 355/355 (non-bgfx), up from 352/349.
+
+Honestly scoped: **what a real GPU/display would actually show - sky
+color, sun/moon visibility, and the occlusion behavior described above
+- is still NOT VERIFIED — ENVIRONMENT LIMITATION**. Stars deferred
+(see above).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

@@ -38,9 +38,13 @@ class Renderer : public NonCopyable {
     // once per Renderer instance.
     bool init(const RendererDesc& desc);
 
-    // Clears view 0 to `rgba` and marks it touched. Call once per frame,
-    // before any submit_chunk_mesh() calls, then end_frame() after.
-    void begin_frame(u32 clear_rgba);
+    // Clears view 0 to `color` (each channel 0-1, alpha separate - Phase
+    // 27's real sky color, interpolated from DayNightCycle::
+    // sky_light_scale() by the caller, replaces the fixed
+    // brief-Phase-1-era sky-blue constant this used to always be) and
+    // marks it touched. Call once per frame, before any
+    // submit_chunk_mesh() calls, then end_frame() after.
+    void begin_frame(const math::Vec3& clear_color, f32 alpha = 1.0f);
 
     // Draws one chunk mesh with the given program/transforms into view 0.
     // No-op (logged at debug level would be noisy per-frame - silently
@@ -49,6 +53,19 @@ class Renderer : public NonCopyable {
     // compiled because LCU_BUILD_SHADER_TOOLS is off - see BUILDING.md).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
                             const math::Mat4& view, const math::Mat4& proj);
+
+    // Draws one camera-facing colored quad (Phase 27 - the sun/moon)
+    // into a dedicated sky view, executed before the terrain view so
+    // terrain naturally occludes it (see renderer.cpp's kSkyViewId
+    // comment) - no depth test/write, no texture (no atlas exists yet,
+    // same as chunk rendering before Phase 26). `right`/`up` should be
+    // the camera's own basis vectors so the quad actually faces the
+    // camera; `center` is the quad's world-space position, `half_size`
+    // its half-width/height in world units. No-op if `program` is
+    // invalid (e.g. LCU_BUILD_SHADER_TOOLS is off).
+    void submit_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up, f32 half_size,
+                           const math::Vec3& color, bgfx::ProgramHandle program, const math::Mat4& view,
+                           const math::Mat4& proj);
 
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
