@@ -26,13 +26,14 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (quick-craft: RecipeRegistry's first real caller)**, **Phase 24
 (item_crafted: EventBus's second real event)**, **Phase 25
 (macOS build audit)**, **Phase 26 (visible terrain: per-block/
-per-face colors + procedural shader noise)**, and **Phase 27 (skybox +
-sun/moon)** are done; see "Reality Audit" and "Last Completed Task"
-below for what they cover and what's next. A large, user-directed
-program (Phases 26-42: visible terrain colors, skybox, cross-chunk
-global lighting with real performance constraints, procedural terrain
-with sea level at y=0, water, biomes, caves/ores, vegetation) is now in
-progress - see TASK_QUEUE.md for per-phase detail as each lands.
+per-face colors + procedural shader noise)**, **Phase 27 (skybox +
+sun/moon)**, and **Phase 28 (renderer consumes real per-voxel light)**
+are done; see "Reality Audit" and "Last Completed Task" below for what
+they cover and what's next. A large, user-directed program (Phases
+26-42: visible terrain colors, skybox, cross-chunk global lighting with
+real performance constraints, procedural terrain with sea level at
+y=0, water, biomes, caves/ores, vegetation) is now in progress - see
+TASK_QUEUE.md for per-phase detail as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -885,6 +886,57 @@ Honestly scoped: **what a real GPU/display actually shows (sky color,
 sun/moon visibility, and the occlusion behavior described above) is
 still NOT VERIFIED — ENVIRONMENT LIMITATION**.
 
+**Phase 28 (renderer consumes real per-voxel light)**: until now the
+chunk shader lit every face with a fixed fake directional light,
+completely unrelated to the real per-chunk sky/block light
+`engine/lighting` had already been computing since Phase 6 - the actual
+light data existed but nothing rendered it. `MeshVertex` gained a
+packed `u8 light` field (low nibble sky, high nibble block - the exact
+`LightStorage` packing, one byte total per the brief); `mesh_chunk_
+greedy` now reads real light from the air cell each face is exposed to
+(not the solid block's own cell, which propagation never touches) and
+packs it per vertex once, at mesh-build time - never recomputed per
+frame. `mesh_chunk_greedy` is templated on a duck-typed `LightStorageT`
+rather than including a concrete `lcu::lighting` header, since
+`engine/lighting` already depends on `engine/voxel` (the reverse
+`#include` would be a circular target dependency) - a light-less
+two-argument overload (an always-full-bright stand-in) keeps every
+existing call site (tests, `tools/benchmark`) unchanged; only
+`client/main.cpp`'s real remesh path passes its actual per-chunk light.
+Merging now also requires equal light, not just equal block id/facing,
+so a real lighting gradient across a surface no longer gets flattened
+into one arbitrary quad-wide brightness by the same optimization that
+reduces triangle count. `client/shaders/{vs_chunk,fs_chunk}.sc` were
+rewritten: the old fake directional light is gone (it would have
+double-counted daylight against real per-voxel light and never actually
+darkened at night), replaced by `final = color * (sky * u_skyLightScale
++ block) / 15.0` using a new `u_skyLightScale` uniform set once per
+draw call from `DayNightCycle::sky_light_scale()` - the same real time
+signal Phase 27's skybox already reuses.
+
+A real, previously-nonexistent bug risk was found and fixed while
+wiring the vertex layout: `MeshVertex` had never before ended in a
+byte-sized field, so the compiler now pads its total size up to a
+4-byte multiple - bytes `bgfx::VertexLayout`'s tightly-packed `.add()`
+sum doesn't know about. Left alone, every vertex after the first would
+have read from the wrong GPU-buffer offset (silent corruption, not a
+crash). Fixed via `layout.skip(sizeof(MeshVertex) - layout.getStride())`
+plus an `LCU_ASSERT` verifying the two stay in sync - which did execute
+against real 36-chunk production data in this phase's verification run
+without firing.
+
+4 new unit tests. Verified via a real `LCU_BUILD_SHADER_TOOLS=ON`
+build: `"Chunk shader program valid=true"`, plus a real headless
+`LCU_VERIFY_BREAK_PLACE` run under that build with real per-voxel light
+flowing through the real 36-chunk world, zero regressions. `ctest`
+362/362 (bgfx, up from 358) / 359/359 (non-bgfx, up from 355).
+
+Honestly scoped: **what real per-voxel lighting actually looks like on
+a real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**;
+cross-chunk light doesn't exist yet (a chunk-boundary face
+unconditionally defaults to full-bright, honestly, not guessed) - see
+Phase 29-31; lighting isn't smoothed per-vertex yet - see Phase 33.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1357,13 +1409,18 @@ before content/polish):
    one real Metal-shader-profile bug found and fixed)~~, ~~Phase 26
    (visible terrain: per-block/per-face colors + procedural shader
    noise)~~, ~~Phase 27 (skybox + sun/moon, view-ordered occlusion, 2
-   real bugs found and fixed)~~ - see PROJECT_STATE.md "Phase 25"/
-   "Phase 26"/"Phase 27" above and TASK_QUEUE.md for full per-phase
-   detail. Next: Phase 28 (renderer consumes per-voxel light -
-   prerequisite for the cross-chunk lighting work in Phases 29-35),
-   then entity rendering/debug overlay (36), then the worldgen phases
-   (37-41: sea level, water, continents, biomes, caves/ores,
-   vegetation), then docs (42).
+   real bugs found and fixed)~~, ~~Phase 28 (renderer consumes real
+   per-voxel light, duck-typed LightStorageT template parameter to
+   avoid a circular engine/voxel<->engine/lighting dependency, a real
+   vertex-stride bug found and fixed)~~ - see PROJECT_STATE.md "Phase
+   25"/"Phase 26"/"Phase 27"/"Phase 28" above and TASK_QUEUE.md for
+   full per-phase detail. Next: Phase 29 (WorldLight data structure -
+   prerequisite for the cross-chunk sky/block light work in Phases
+   30-32), then Phase 33 (VoxelClient integration + smooth lighting),
+   Phase 34 (torch block + lighting benchmarks), Phase 35 (unload marks
+   neighbors dirty), entity rendering/debug overlay (36), then the
+   worldgen phases (37-41: sea level, water, continents, biomes,
+   caves/ores, vegetation), then docs (42).
 7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained

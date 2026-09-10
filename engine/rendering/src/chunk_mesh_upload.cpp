@@ -1,5 +1,7 @@
 #include "lcu/rendering/chunk_mesh_upload.h"
 
+#include "lcu/core/assert.h"
+
 namespace lcu::rendering {
 
 namespace {
@@ -10,11 +12,29 @@ bgfx::VertexLayout chunk_mesh_vertex_layout() {
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
-        // Phase 26 - must stay last, matching voxel::MeshVertex::color
-        // being the last struct field (this layout describes the exact
-        // byte layout of that struct; see upload_chunk_mesh_layer below).
+        // Phase 26.
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
-        .end();
+        // Phase 28 - packed sky/block light byte (see
+        // voxel::MeshVertex::light's doc comment). Uint8, not normalized
+        // (normalized defaults to false), so the fragment shader receives
+        // the raw 0-255 byte value to unpack itself - must stay last,
+        // matching MeshVertex::light being the last struct field (this
+        // layout describes the exact byte layout of that struct; see
+        // upload_chunk_mesh_layer below).
+        .add(bgfx::Attrib::Color1, 1, bgfx::AttribType::Uint8);
+
+    // voxel::MeshVertex ends with that single trailing u8 right after
+    // several 4-byte-aligned fields, so the compiler pads the struct's
+    // total *size* (not this last field itself) up to a 4-byte multiple
+    // for array-of-struct alignment - bytes bgfx's tightly-packed sum of
+    // .add() calls above doesn't know about. skip() tells it to advance
+    // its stride by the same trailing amount so the two agree exactly;
+    // without this, every vertex after the first would read from the
+    // wrong offset (this struct is memcpy'd straight into the GPU
+    // buffer per vertex - see upload_chunk_mesh_layer below).
+    layout.skip(static_cast<u8>(sizeof(voxel::MeshVertex) - layout.getStride()));
+    layout.end();
+    LCU_ASSERT(layout.getStride() == sizeof(voxel::MeshVertex));
     return layout;
 }
 

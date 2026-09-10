@@ -583,9 +583,21 @@ int main() {
         if (!chunk) {
             return;
         }
+        // Phase 28: mesh with this chunk's real, already-computed
+        // per-voxel light (compute_initial_light runs for every loaded
+        // chunk before its first remesh_and_upload call - see the load
+        // loop and every edit/streaming call site below). Falls back to
+        // the light-less (full-bright) mesh_chunk_greedy overload only
+        // if that invariant is somehow violated, rather than asserting/
+        // crashing on what would be a genuine ordering bug elsewhere.
+        const auto light_it = chunk_light.find(coord);
         lcu::voxel::ChunkMesh mesh;
-        const auto job = job_system.submit([&] { mesh = lcu::voxel::mesh_chunk_greedy(*chunk, block_registry); },
-                                            lcu::jobs::JobPriority::High);
+        const auto job = job_system.submit(
+            [&] {
+                mesh = light_it != chunk_light.end() ? lcu::voxel::mesh_chunk_greedy(*chunk, block_registry, light_it->second)
+                                                      : lcu::voxel::mesh_chunk_greedy(*chunk, block_registry);
+            },
+            lcu::jobs::JobPriority::High);
         job_system.wait(job);
 #if defined(LCU_ENABLE_BGFX)
         if (auto it = gpu_meshes.find(coord); it != gpu_meshes.end()) {
@@ -1298,7 +1310,7 @@ int main() {
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
-            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj);
+            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale());
         }
         lcu::ui::draw_debug_overlay(renderer, renderer_desc.width, renderer_desc.height, last_known_fps);
         renderer.end_frame();

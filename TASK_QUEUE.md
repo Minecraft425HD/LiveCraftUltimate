@@ -858,6 +858,70 @@ color, sun/moon visibility, and the occlusion behavior described above
 - is still NOT VERIFIED — ENVIRONMENT LIMITATION**. Stars deferred
 (see above).
 
+## Phase 28 — Renderer nutzt Licht (renderer consumes per-voxel light)
+
+Closes the third of four things flagged as "not what the user expects
+to see": `engine/lighting` had computed real per-chunk sky/block light
+since Phase 6, but nothing in the rendering path ever read it - the
+chunk shader lit every face with a fixed fake directional light with no
+relationship to that real data (or to Phase 27's real sun/moon).
+
+- [x] `MeshVertex` gained a packed `u8 light` field - low nibble sky,
+  high nibble block, the exact `lcu::lighting::LightStorage` packing,
+  one byte total ("Licht wird als EIN Byte im Vertex gepackt").
+- [x] `mesh_chunk_greedy` reads real light per face from the air cell
+  it's actually exposed to (not the solid block's own cell - real
+  light propagation never targets opaque cells), computed once by
+  `engine/lighting` at chunk load/edit time, never recomputed by
+  meshing or the shader per frame.
+- [x] Fragment shader formula updated to
+  `final = color * (sky * sky_scale + block) / 15.0`, `sky_scale` a
+  new `u_skyLightScale` uniform set once per draw call from the
+  existing `DayNightCycle::sky_light_scale()` (the same real time
+  signal Phase 27's skybox already reuses, not a second lighting
+  clock). Replaces the old Phase 26 fake directional light entirely -
+  keeping both would have double-counted daylight and never actually
+  darkened the world at night.
+- [x] Merging now also requires equal light (`MaskCell::merges_with`),
+  not just equal block id/facing - otherwise greedy meshing's own
+  optimization would silently flatten a real per-voxel lighting
+  gradient into one arbitrary quad-wide brightness.
+- [x] Real architecture decision: `mesh_chunk_greedy` takes light via a
+  duck-typed template parameter (`LightStorageT`) instead of
+  `#include`-ing a concrete `lcu::lighting` header - `engine/lighting`
+  already depends on `engine/voxel`, so the reverse include would be a
+  circular target dependency. A light-less two-argument overload
+  (an always-full-bright stand-in) keeps every existing call site
+  (tests, `tools/benchmark`) unchanged; only `client/main.cpp`'s real
+  remesh path passes its actual per-chunk light.
+- [x] Real bug found and fixed: `MeshVertex` had never before ended in
+  a byte-sized field, so the compiler now pads its total size up to a
+  4-byte multiple that `bgfx::VertexLayout`'s tightly-packed `.add()`
+  sum knows nothing about - left alone, every vertex after the first
+  would have silently read from the wrong GPU-buffer offset. Fixed via
+  `layout.skip(sizeof(MeshVertex) - layout.getStride())` plus an
+  `LCU_ASSERT` keeping the two in sync, which did execute against real
+  36-chunk production data in this phase's verification run without
+  firing.
+- [x] 4 new unit tests: the light-less overload stays full-bright, a
+  face reads light from its exposed air cell (not the solid block),
+  differently-lit coplanar faces don't merge, and a true chunk-boundary
+  face (no cross-chunk light yet) defaults to full-bright rather than
+  reading out of bounds or guessing dark.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build: `"Chunk
+  shader program valid=true"` (the new `Color1`/`u_skyLightScale`
+  wiring links correctly), plus a real headless `LCU_VERIFY_BREAK_PLACE`
+  run under that build with the real 36-chunk world's real light data
+  flowing through meshing, zero regressions/crashes.
+
+`ctest` 362/362 (bgfx) / 359/359 (non-bgfx), up from 358/355.
+
+Honestly scoped: **what real per-voxel lighting actually looks like on
+a real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**.
+Cross-chunk light doesn't exist yet - a chunk-boundary face
+unconditionally defaults to full-bright, honestly, not guessed (Phase
+29-31's job); lighting isn't smoothed per-vertex yet (Phase 33).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

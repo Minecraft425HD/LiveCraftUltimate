@@ -19,6 +19,14 @@ struct MeshVertex {
     // layout attribute order in lockstep (this struct is memcpy'd
     // straight into a GPU buffer, see upload_chunk_mesh_layer).
     math::Vec3 color{1.0f, 1.0f, 1.0f};
+    // Packed per-voxel light (Phase 28): low nibble = sky light, high
+    // nibble = block light, each 0-15 - the exact same packing
+    // lcu::lighting::LightStorage itself uses (see its doc comment), one
+    // byte total as required (brief: "Licht wird als EIN Byte im Vertex
+    // gepackt"). Default 0xFF (full sky+block light) so any quad built
+    // via the light-less mesh_chunk_greedy overload, or any test that
+    // doesn't care about lighting, renders unshaded rather than black.
+    u8 light = 0xFF;
 };
 
 // One renderable layer's worth of geometry: a plain vertex/index buffer,
@@ -39,12 +47,13 @@ struct ChunkMeshLayer {
     // anything downstream today - they exist so meshing doesn't need a
     // breaking change once atlas mapping lands.
     void add_quad(const math::Vec3& v0, const math::Vec3& v1, const math::Vec3& v2, const math::Vec3& v3,
-                  const math::Vec3& normal, f32 width, f32 height, const math::Vec3& color = {1.0f, 1.0f, 1.0f}) {
+                  const math::Vec3& normal, f32 width, f32 height, const math::Vec3& color = {1.0f, 1.0f, 1.0f},
+                  u8 light = 0xFF) {
         const u32 base = static_cast<u32>(vertices.size());
-        vertices.push_back({v0, normal, 0.0f, 0.0f, color});
-        vertices.push_back({v1, normal, width, 0.0f, color});
-        vertices.push_back({v2, normal, width, height, color});
-        vertices.push_back({v3, normal, 0.0f, height, color});
+        vertices.push_back({v0, normal, 0.0f, 0.0f, color, light});
+        vertices.push_back({v1, normal, width, 0.0f, color, light});
+        vertices.push_back({v2, normal, width, height, color, light});
+        vertices.push_back({v3, normal, 0.0f, height, color, light});
 
         indices.push_back(base + 0);
         indices.push_back(base + 1);
@@ -86,10 +95,20 @@ struct MaskCell {
     BlockId block_id = kAirBlockId;
     bool positive_facing = false;
     bool has_face = false;
+    // Packed light (Phase 28, same nibble layout as MeshVertex::light) of
+    // the air cell this face is actually exposed to. Included in
+    // merges_with so two adjacent faces only merge into one quad when
+    // they'd actually be shaded the same - otherwise a run of e.g. lit
+    // and shadowed grass would wrongly flatten into a single averaged (or
+    // arbitrarily-first-cell) brightness. This does mean a lighting
+    // gradient across an otherwise-uniform surface now also fragments
+    // meshing there, same trade every engine using per-voxel light
+    // (rather than per-quad/per-face light) makes.
+    u8 light = 0xFF;
 
     bool merges_with(const MaskCell& other) const {
         return has_face && other.has_face && block_id == other.block_id &&
-               positive_facing == other.positive_facing;
+               positive_facing == other.positive_facing && light == other.light;
     }
 };
 
@@ -97,14 +116,24 @@ struct MaskCell {
 
 // Greedy meshing (brief section 18): sweeps each of the 3 axes' boundary
 // planes, builds a 2D "is there a face here, and which block/facing"
-// mask per plane, then merges adjacent mask cells of the same block id
-// and facing direction into as few rectangles as possible - far fewer
-// triangles than one quad per exposed block face for any chunk with
-// runs of same-type blocks. Works for any chunk edge length (a template
-// over EdgeLength, like ChunkStorage itself, per brief section 15's
-// "alternative chunk sizes").
-template <u32 EdgeLength>
-ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRegistry& registry) {
+// mask per plane, then merges adjacent mask cells of the same block id,
+// facing direction, and light level into as few rectangles as possible -
+// far fewer triangles than one quad per exposed block face for any chunk
+// with runs of same-type, same-lit blocks. Works for any chunk edge
+// length (a template over EdgeLength, like ChunkStorage itself, per
+// brief section 15's "alternative chunk sizes").
+//
+// `LightStorageT` is duck-typed (needs `u8 sky_light(u32,u32,u32) const`
+// and `u8 block_light(u32,u32,u32) const`, exactly
+// lcu::lighting::LightStorage<EdgeLength>'s public interface) rather
+// than a concrete lcu::lighting type: engine/lighting already depends on
+// engine/voxel (it meshes/lights the same ChunkStorage), so engine/voxel
+// including a lighting header back would be a circular target
+// dependency - a template parameter needs no #include at all here, only
+// at each real call site, which already has the concrete type visible.
+template <u32 EdgeLength, typename LightStorageT>
+ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRegistry& registry,
+                            const LightStorageT& light) {
     ChunkMesh mesh;
     constexpr i32 N = static_cast<i32>(EdgeLength);
 
@@ -147,6 +176,29 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         } else {
                             cell.block_id = pos_id;
                             cell.positive_facing = false;
+                        }
+
+                        // Shade the face by the light in the air cell
+                        // it's actually exposed to (the non-opaque side),
+                        // not the solid block's own cell (light is only
+                        // ever propagated into non-opaque cells - see
+                        // engine/lighting/propagation.h). At plane==0/N
+                        // the air side can fall off this chunk's own
+                        // LightStorage bounds (a genuine chunk-boundary
+                        // face, already rendered "as if air" by
+                        // block_or_air above) - cross-chunk light isn't
+                        // computed yet (Phase 29-31), so this keeps the
+                        // Phase 26/27-era full-bright default rather than
+                        // reading out of bounds or guessing dark.
+                        const i32* air_pos = neg_opaque ? pos_pos : neg_pos;
+                        if (air_pos[0] >= 0 && air_pos[0] < N && air_pos[1] >= 0 && air_pos[1] < N &&
+                            air_pos[2] >= 0 && air_pos[2] < N) {
+                            const u32 ax = static_cast<u32>(air_pos[0]);
+                            const u32 ay = static_cast<u32>(air_pos[1]);
+                            const u32 az = static_cast<u32>(air_pos[2]);
+                            const u8 sky = light.sky_light(ax, ay, az);
+                            const u8 block = light.block_light(ax, ay, az);
+                            cell.light = static_cast<u8>((block << 4) | sky);
                         }
                     }
                     mask[n++] = cell;
@@ -234,10 +286,10 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     }
                     if (current.positive_facing) {
                         mesh.opaque.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color);
+                                              static_cast<f32>(height), quad_color, current.light);
                     } else {
                         mesh.opaque.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color);
+                                              static_cast<f32>(height), quad_color, current.light);
                     }
 
                     for (i32 l = 0; l < height; ++l) {
@@ -255,6 +307,27 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
     }
 
     return mesh;
+}
+
+namespace detail {
+
+// Duck-typed stand-in for lcu::lighting::LightStorage (see
+// mesh_chunk_greedy's `LightStorageT` doc comment) that reports every
+// cell as fully lit - backs the two-argument mesh_chunk_greedy overload
+// below for callers with no real per-chunk light computed yet (existing
+// geometry/color-focused unit tests, tools/benchmark), so Phase 28's new
+// light parameter didn't force a mechanical, unrelated update of every
+// pre-existing call site.
+struct FullBrightLight {
+    u8 sky_light(u32, u32, u32) const { return 15; }
+    u8 block_light(u32, u32, u32) const { return 15; }
+};
+
+}  // namespace detail
+
+template <u32 EdgeLength>
+ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRegistry& registry) {
+    return mesh_chunk_greedy(chunk, registry, detail::FullBrightLight{});
 }
 
 }  // namespace lcu::voxel

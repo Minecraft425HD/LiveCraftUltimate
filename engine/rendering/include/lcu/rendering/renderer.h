@@ -51,8 +51,14 @@ class Renderer : public NonCopyable {
     // skipped) if `mesh` has no geometry or `program` is invalid, both
     // of which are legitimate states today (an empty chunk; no shader
     // compiled because LCU_BUILD_SHADER_TOOLS is off - see BUILDING.md).
+    // `sky_light_scale` (Phase 28) is DayNightCycle::sky_light_scale()
+    // for the frame being drawn - the one real time signal fs_chunk.sc's
+    // u_skyLightScale uniform needs to weight each vertex's already-
+    // computed, already-packed sky light by; set once per draw call
+    // here, never recomputed per-voxel/per-frame in meshing itself (see
+    // DECISIONS.md "Light is never computed per frame").
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
-                            const math::Mat4& view, const math::Mat4& proj);
+                            const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f);
 
     // Draws one camera-facing colored quad (Phase 27 - the sun/moon)
     // into a dedicated sky view, executed before the terrain view so
@@ -93,6 +99,13 @@ class Renderer : public NonCopyable {
     bool headless_ = false;
     u32 width_ = 0;
     u32 height_ = 0;
+    // Phase 28 - see submit_chunk_mesh's doc comment. Created
+    // unconditionally in init() and destroyed in ~Renderer(); bgfx
+    // uniforms don't require any particular shader to be compiled or
+    // bound (setting one a currently-submitted program doesn't declare
+    // is simply ignored, not an error), so this doesn't need to be
+    // gated on whether LCU_BUILD_SHADER_TOOLS built real chunk shaders.
+    bgfx::UniformHandle sky_light_scale_uniform_ = BGFX_INVALID_HANDLE;
 };
 
 }  // namespace lcu::rendering

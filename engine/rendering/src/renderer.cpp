@@ -28,6 +28,9 @@ constexpr bgfx::ViewId kSkyViewId = 1;
 
 Renderer::~Renderer() {
     if (initialized_) {
+        if (bgfx::isValid(sky_light_scale_uniform_)) {
+            bgfx::destroy(sky_light_scale_uniform_);
+        }
         bgfx::shutdown();
     }
 }
@@ -77,6 +80,11 @@ bool Renderer::init(const RendererDesc& desc) {
 
     bgfx::setDebug(BGFX_DEBUG_TEXT);
 
+    // Phase 28 - vec4 because bgfx uniforms are always at least a vec4
+    // internally; only .x (DayNightCycle::sky_light_scale()) is used by
+    // fs_chunk.sc.
+    sky_light_scale_uniform_ = bgfx::createUniform("u_skyLightScale", bgfx::UniformType::Vec4);
+
     initialized_ = true;
     return true;
 }
@@ -109,7 +117,8 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
 }
 
 void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
-                                  const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj) {
+                                  const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj,
+                                  f32 sky_light_scale) {
     LCU_ASSERT(initialized_);
     if (!mesh.is_valid() || !bgfx::isValid(program)) {
         return;
@@ -120,6 +129,8 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     bgfx::setVertexBuffer(0, mesh.vertex_buffer);
     bgfx::setIndexBuffer(mesh.index_buffer);
     bgfx::setState(BGFX_STATE_DEFAULT);
+    const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
+    bgfx::setUniform(sky_light_scale_uniform_, uniform_value);
     bgfx::submit(0, program);
 }
 

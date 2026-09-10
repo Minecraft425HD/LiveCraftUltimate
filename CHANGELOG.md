@@ -2,7 +2,66 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28
+
+### Phase 28
+
+- `MeshVertex` gained a packed `u8 light` field (low nibble sky, high
+  nibble block - the exact `lcu::lighting::LightStorage` packing, one
+  byte total as specified). `mesh_chunk_greedy` now reads real light
+  from the air cell each face is actually exposed to (not the solid
+  block's own cell, which propagation never touches) and packs it per
+  vertex - light is computed once by `engine/lighting` per chunk load/
+  edit, never recomputed by meshing or the shader per frame.
+- `mesh_chunk_greedy` is now templated on a duck-typed `LightStorageT`
+  (matches `lcu::lighting::LightStorage`'s public interface) instead of
+  including a concrete lighting header directly - `engine/lighting`
+  already depends on `engine/voxel`, so the reverse `#include` would
+  have been a circular target dependency. A light-less two-argument
+  overload (backed by an always-full-bright stand-in) keeps every
+  existing call site (tests, `tools/benchmark`) unchanged; only
+  `client/main.cpp`'s real remesh path passes its actual per-chunk
+  `LightStorage`.
+- Merging now also requires equal light, not just equal block id/
+  facing: two adjacent faces that would otherwise merge but are lit
+  differently stay separate quads, so per-voxel light doesn't get
+  averaged/flattened away by the same optimization that reduces
+  triangle count.
+- `chunk_mesh_upload.cpp`'s vertex layout gained a matching `Color1`
+  (Uint8 x1) attribute, plus an explicit `bgfx::VertexLayout::skip()` +
+  `LCU_ASSERT` to keep bgfx's declared stride in exact sync with
+  `sizeof(MeshVertex)`'s compiler-inserted trailing padding - a real,
+  previously-nonexistent risk this phase's byte-sized field newly
+  introduced (a 4-byte-aligned struct ending in one trailing byte).
+- `client/shaders/{vs_chunk,fs_chunk}.sc` rewritten: the fixed Phase 26
+  fake directional light is gone, replaced by
+  `final = color * (sky * u_skyLightScale + block) / 15.0` using the
+  real packed per-vertex light and a new `u_skyLightScale` uniform (set
+  once per draw call from `DayNightCycle::sky_light_scale()` - the same
+  real time signal Phase 27's skybox already reuses). The old fake
+  light had no relationship to Phase 27's real sun/moon position and
+  would have double-counted daylight and never actually darkened at
+  night alongside real per-voxel light.
+- `Renderer::submit_chunk_mesh` gained a `sky_light_scale` parameter and
+  owns the new uniform's lifetime (`bgfx::createUniform`/`destroy`).
+- 4 new unit tests: light-less overload stays full-bright, a face reads
+  light from its exposed air cell (not the solid block), differently-lit
+  coplanar faces don't merge, and a true chunk-boundary face (no
+  cross-chunk light yet - Phase 29-31) defaults to full-bright rather
+  than reading out of bounds or guessing dark.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build: `"Chunk shader
+  program valid=true"` (the new `Color1`/`u_skyLightScale` wiring links
+  correctly), plus a real headless `LCU_VERIFY_BREAK_PLACE` run under
+  that build with the real 36-chunk world's real light data flowing
+  through meshing with zero regressions/crashes (the new stride
+  `LCU_ASSERT` didn't fire on real production data).
+- `ctest` 362/362 (bgfx, up from 358) / 359/359 (non-bgfx, up from 355).
+- Honestly scoped: **what a real GPU/display actually shows (whether
+  torch/sky light genuinely looks right) is still NOT VERIFIED —
+  ENVIRONMENT LIMITATION**; cross-chunk light doesn't exist yet (a
+  chunk-boundary face is unconditionally full-bright, honestly, not
+  guessed) - that's Phase 29-31's job; lighting isn't yet smoothed
+  per-vertex (Phase 33).
 
 ### Phase 27
 

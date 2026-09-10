@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "lcu/lighting/light_storage.h"
+
 using lcu::voxel::BlockDefinition;
 using lcu::voxel::BlockRegistry;
 using lcu::voxel::Chunk;
@@ -247,4 +249,112 @@ TEST(GreedyMesher, LargeFlatSlabMergesIntoTwoFacesPerAxisPair) {
     EXPECT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
     EXPECT_EQ(mesh.opaque.indices.size(), 6u * 6u);
     expect_all_triangles_wound_correctly(mesh.opaque);
+}
+
+TEST(GreedyMesher, NoLightArgumentOverloadProducesFullBrightVertices) {
+    // The two-argument overload (Phase 16-27's existing signature) must
+    // keep working unchanged for every caller that doesn't care about
+    // lighting (tools/benchmark, the geometry/color tests above) -
+    // backed by a duck-typed "everything is fully lit" LightStorageT
+    // stand-in, not a breaking API change.
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_FALSE(mesh.opaque.vertices.empty());
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.light, 0xFFu);
+    }
+}
+
+TEST(GreedyMesher, FacePicksUpLightFromTheExposedAirCellNotTheSolidBlock) {
+    // Phase 28: a face's light comes from the air cell it's actually
+    // exposed to (where lcu::lighting propagation actually stores real
+    // values - solid cells are never targeted by flood_block_light/
+    // compute_sky_light_column), packed the same way LightStorage packs
+    // it internally (low nibble sky, high nibble block).
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone);
+
+    lcu::lighting::Light light;
+    light.set_sky_light(6, 5, 5, 9);  // the +X air neighbor's cell
+    light.set_block_light(6, 5, 5, 3);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry, light);
+
+    bool found_positive_x_face = false;
+    for (const auto& vertex : mesh.opaque.vertices) {
+        if (lcu::math::dot(vertex.normal, lcu::math::Vec3{1.0f, 0.0f, 0.0f}) > 0.99f) {
+            found_positive_x_face = true;
+            EXPECT_EQ(vertex.light, static_cast<lcu::u8>((3 << 4) | 9));
+        }
+    }
+    EXPECT_TRUE(found_positive_x_face);
+}
+
+TEST(GreedyMesher, DifferentlyLitCoplanarFacesDoNotMerge) {
+    // Same block type, same plane, same facing - would merge under
+    // Phase 26's rules - but different light at each face's exposed air
+    // cell. Merging them would flatten a real per-voxel brightness
+    // difference into one arbitrary value, so merges_with must treat
+    // differing light as a hard merge boundary, same as a differing
+    // block id.
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone);
+    chunk.set_block(6, 5, 5, stone);  // adjacent along +X
+
+    lcu::lighting::Light light;
+    light.set_sky_light(5, 6, 5, 15);  // top face of (5,5,5): bright
+    light.set_sky_light(6, 6, 5, 2);   // top face of (6,5,5): dim
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry, light);
+
+    int top_face_quads = 0;
+    for (std::size_t i = 0; i + 3 < mesh.opaque.vertices.size(); i += 4) {
+        if (lcu::math::dot(mesh.opaque.vertices[i].normal, lcu::math::Vec3{0.0f, 1.0f, 0.0f}) > 0.99f) {
+            ++top_face_quads;
+        }
+    }
+    // Would be 1 merged 2x1 quad if light were ignored (see
+    // AdjacentSameTypeBlocksMergeCoplanarFaces) - differing light keeps
+    // them as 2 separate 1x1 quads instead.
+    EXPECT_EQ(top_face_quads, 2);
+}
+
+TEST(GreedyMesher, BoundaryFaceWithNoNeighborChunkLightDefaultsToFullBright) {
+    // Phase 28 scope: cross-chunk light doesn't exist yet (Phase 29-31),
+    // so a face at plane==0/N whose "air" side falls outside this
+    // chunk's own LightStorage bounds must not read out of bounds or
+    // guess dark - it keeps the same full-bright default used before
+    // real per-voxel light existed, honestly deferring correctness
+    // there to the phases that actually add cross-chunk data. A block
+    // at the x=0 corner has both boundary faces (its own -X/-Y/-Z,
+    // exposed to the *neighbor* chunk this LightStorage knows nothing
+    // about) and ordinary in-chunk faces (+X/+Y/+Z, exposed to real
+    // in-chunk air cells this LightStorage legitimately reports as dark
+    // since it's default-constructed) - only the -X face below is
+    // actually a boundary face.
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block(0, 0, 0, stone);
+
+    lcu::lighting::Light light;  // default-constructed: every in-bounds cell is 0/0
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry, light);
+
+    bool found_negative_x_face = false;
+    for (const auto& vertex : mesh.opaque.vertices) {
+        if (lcu::math::dot(vertex.normal, lcu::math::Vec3{-1.0f, 0.0f, 0.0f}) > 0.99f) {
+            found_negative_x_face = true;
+            EXPECT_EQ(vertex.light, 0xFFu);
+        }
+    }
+    EXPECT_TRUE(found_negative_x_face);
 }

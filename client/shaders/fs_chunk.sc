@@ -1,17 +1,28 @@
-$input v_normal, v_texcoord0, v_color0, v_localpos
+$input v_normal, v_texcoord0, v_color0, v_color1, v_localpos
 
 /*
- * Chunk fragment shader (Phase 26): real per-block/per-face color
- * (v_color0, from lcu::voxel::BlockDefinition - see vs_chunk.sc) lit by
- * one fixed directional light plus ambient, multiplied by a subtle
- * procedural noise pattern so a flat-colored block doesn't read as a
- * single flat swatch (no texture atlas exists yet - Phase 12 - so this
- * noise is the stand-in "surface detail" until one does). Still no
- * texturing/UV sampling: v_texcoord0 is carried through but unused here
- * today, kept for parity with the vertex data it's read from.
+ * Chunk fragment shader: real per-block/per-face color (v_color0, from
+ * lcu::voxel::BlockDefinition - see Phase 26) lit by the real per-voxel
+ * sky/block light computed in engine/lighting and packed into v_color1
+ * by mesh_chunk_greedy (Phase 28) - never a per-frame shader
+ * computation, matching the brief's "Licht wird NIEMALS pro Frame neu
+ * berechnet" (only the sky_scale uniform below changes per frame, one
+ * float set once per draw call, not per pixel/per voxel). Replaces the
+ * Phase 26 fixed fake directional light entirely: that light had no
+ * relationship to Phase 27's real sun/moon position, so keeping it
+ * alongside real per-voxel light would have double-counted "daylight"
+ * and never actually darken at night. Still multiplied by a subtle
+ * procedural noise pattern (unrelated to lighting - stand-in surface
+ * detail until a texture atlas exists, Phase 12). No texturing/UV
+ * sampling: v_texcoord0 is carried through but unused here today.
  */
 
 #include <bgfx_shader.sh>
+
+// x = DayNightCycle::sky_light_scale() for the frame being drawn (see
+// Renderer::submit_chunk_mesh) - the same real time signal Phase 27's
+// skybox color already reuses, not a second lighting clock.
+uniform vec4 u_skyLightScale;
 
 // A standard cheap 3D hash (Dave Hoskins-style) - deterministic per
 // input, no texture lookup needed. Used purely for a subtle per-voxel
@@ -26,15 +37,12 @@ float hash3(vec3 p)
 
 void main()
 {
-    vec3 n = normalize(v_normal);
-    vec3 light_dir = normalize(vec3(0.3, 1.0, 0.2));
-    float diffuse = max(dot(n, light_dir), 0.0);
-    // Top-facing surfaces (normal.y > 0) already receive more diffuse
-    // light from this mostly-upward light_dir - an explicit small extra
-    // lift keeps that "brighter on top" read unambiguous even under a
-    // grazing light angle, per Phase 26's ask to use the normal for it.
-    float top_lift = max(n.y, 0.0) * 0.08;
-    float light = 0.25 + 0.75 * diffuse + top_lift;
+    // Unpack the single packed light byte (0-255): low nibble = sky
+    // light, high nibble = block light, each 0-15 - the exact
+    // lcu::lighting::LightStorage packing (see MeshVertex::light).
+    float sky = mod(v_color1, 16.0);
+    float block = floor(v_color1 / 16.0);
+    float light = (sky * u_skyLightScale.x + block) / 15.0;
 
     // Subtle per-voxel noise (+/-7.5% brightness) from the un-transformed
     // chunk-local position - varies per voxel, not per fragment, so it

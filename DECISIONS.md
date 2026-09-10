@@ -1769,3 +1769,97 @@ above) - none of that is knowable from a code read or a headless Noop-
 backend run. Stars at night were explicitly optional in the brief
 ("Sterne bei Nacht optional") and are deliberately deferred, not a
 missing/fake feature.
+
+## 2026-09-10 — mesh_chunk_greedy takes light via a duck-typed template parameter, not a concrete include (Phase 28)
+
+**Context:** Phase 28 needs `mesh_chunk_greedy` (in `engine/voxel`) to
+read real per-voxel light from `lcu::lighting::LightStorage` while
+meshing. The obvious approach - `#include "lcu/lighting/light_storage.h"`
+in `greedy_mesher.h` - is impossible without creating a circular CMake
+target dependency: `engine/lighting`'s own `CMakeLists.txt` already
+declares `target_link_libraries(LcuLighting INTERFACE Lcu::Core
+Lcu::Voxel)` (lighting needs voxel's `ChunkStorage`/`BlockRegistry` to
+compute light against), so `engine/voxel` depending back on
+`engine/lighting` would be a genuine cycle, not just an unusual
+direction.
+
+**Decision:** `mesh_chunk_greedy` gained a second template parameter,
+`LightStorageT`, duck-typed against exactly `LightStorage`'s public
+interface (`u8 sky_light(u32,u32,u32) const` / `u8
+block_light(u32,u32,u32) const`) rather than a concrete type. Since
+C++ templates aren't type-checked until instantiation, `greedy_mesher.h`
+itself needs no lighting `#include` at all - only each real call site
+does (and `client/main.cpp` already includes both headers). This is the
+same pattern `mesh_chunk_greedy` already used for `EdgeLength` (works
+with any `ChunkStorage<N>` the caller supplies) and for
+`ChunkStorage`/`BlockRegistry` themselves (concrete types, but from the
+same module, so no cycle risk there) - extending an established pattern
+rather than introducing a new one, and a smaller diff than moving
+meshing into a new `engine/meshing` module that depends on both.
+
+**A light-less two-argument overload was kept, backed by an
+always-full-bright stand-in (`detail::FullBrightLight`):** 12 existing
+call sites (unit tests focused on geometry/color, `tools/benchmark`)
+had no real per-chunk light to pass and no reason to construct one just
+to satisfy a new required parameter - they're testing meshing, not
+lighting. Only `client/main.cpp`'s real remesh path (which already
+computes and maintains a per-chunk `lcu::lighting::Light` from Phase 6)
+was updated to pass its actual light data. This mirrors the same
+reasoning `add_quad`'s `color` parameter already used in Phase 26 (a
+defaulted parameter, not a mandatory breaking change, for callers that
+legitimately don't care).
+
+**Merging now also requires equal light, a real trade-off, not free:**
+`MaskCell::merges_with` gained a light comparison alongside its
+existing block-id/facing comparison. Without this, greedy meshing would
+silently flatten a real per-voxel lighting gradient (e.g. a partially
+torch-lit stone wall) into one arbitrary quad-wide brightness, picked
+from whichever cell happened to start the merge - visually wrong in a
+way nothing would catch without a real GPU/display. The cost: chunks
+with real lighting variation now generate more, smaller quads than
+Phase 26's purely-geometric merging did, in trade for correctness. This
+is the same trade every engine separating "greedy mesh geometry" from
+"per-voxel light" makes; Phase 33's smooth (interpolated, not flat-per-
+quad) lighting is a separate, later concern that doesn't remove this
+trade-off, just softens its visual seams once per-vertex interpolation
+exists.
+
+**A real, previously-nonexistent bug risk found and fixed while wiring
+the vertex layout:** `MeshVertex` had never before ended in a
+byte-sized field - Phase 28's trailing `u8 light` right after several
+4-byte-aligned members means the compiler now pads `sizeof(MeshVertex)`
+up to the next 4-byte multiple (extra bytes the struct's own fields
+never see), but `bgfx::VertexLayout`'s stride is just the tight sum of
+its `.add()`-declared attribute sizes, with no automatic alignment.
+Left alone, this would have silently made bgfx's per-vertex stride 3
+bytes shorter than the real C++ struct stride the raw vertex buffer
+actually uses, corrupting every vertex after the first (a `memcpy`'d
+GPU buffer read with the wrong stride, not a crash - the kind of bug
+that would only show up as "the mesh looks wrong" on a real GPU with no
+diagnostic). Fixed by computing the needed padding directly
+(`layout.skip(sizeof(MeshVertex) - layout.getStride())` before
+`.end()`) instead of hand-coding a magic padding number, plus an
+`LCU_ASSERT(layout.getStride() == sizeof(voxel::MeshVertex))` so any
+future field reordering that breaks this invariant fails loudly instead
+of silently corrupting geometry - and this assert did execute against
+real 36-chunk production data in this phase's verification run without
+firing.
+
+**The Phase 26 fake directional light was removed, not layered
+alongside real light:** `fs_chunk.sc` previously lit every face with a
+fixed `light_dir` constant unrelated to anything else in the engine.
+Now that real per-voxel sky/block light exists and is combined with the
+real `DayNightCycle::sky_light_scale()` (the same value Phase 27's
+skybox already uses), keeping the old fake light active too would have
+double-counted "daylight" and made the world never actually darken at
+night despite the sky and torches correctly doing so - keeping it would
+have been strictly worse than removing it, not a safety margin.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real per-voxel lighting actually looks correct on a real GPU/
+display (dark caves, lit torches, day/night brightness change) - none
+of that is knowable from a code read or a headless Noop-backend run.
+Cross-chunk light (a block-boundary face reading a neighboring chunk's
+actual light instead of defaulting full-bright) is explicitly Phase
+29-31's job, not this phase's; smooth (interpolated) lighting is Phase
+33's.
