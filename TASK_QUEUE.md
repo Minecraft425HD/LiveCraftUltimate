@@ -972,6 +972,56 @@ Honestly scoped: light still doesn't actually cross a chunk boundary -
 that's Phase 30 (sky)/Phase 31 (block)'s job, built on this phase's
 data structure.
 
+## Phase 30 — Sky-Light cross-chunk (sky-light cross-chunk propagation)
+
+Sky light only ever travels straight down in this engine (a Phase 6
+known simplification, unchanged here), so "cross-chunk propagation"
+for it is a seeded column scan, not a BFS - unlike Phase 31's block
+light, which genuinely needs one.
+
+- [x] `compute_sky_light_column` gained a `sky_open_above` parameter
+  (default `true` - every existing caller's behavior is unchanged) -
+  `false` starts the column pre-blocked instead of open.
+- [x] New `compute_sky_light_column_cross_chunk`/`compute_sky_light_
+  cross_chunk`: query the chunk directly above via `WorldLight::
+  sky_light_at` (its bottom cell alone is enough - a blocked column is
+  always uniformly 0 top-to-bottom) to supply a real `sky_open_above`.
+  An unloaded/not-yet-lit neighbor still means "assume open" (same
+  convention `WorldLight` itself already established).
+- [x] Real bug fixed: a chunk with a solid roof directly above it (in
+  the neighboring chunk) now actually shows 0 sky light at its own top
+  layer, instead of the old always-full-brightness-at-the-chunk's-own-
+  top behavior.
+- [x] `client/main.cpp`'s load loops (initial spawn-area load,
+  per-movement streaming) restructured into three passes per (x,z)
+  column: block light (any order), sky light (**strictly top-down**,
+  highest `chunk_y` first - the cascade doesn't work otherwise), then
+  meshing. The networked `ChunkData` receipt path (single chunk,
+  arbitrary vertical arrival order) uses the same split but honestly
+  can't guarantee that ordering by itself - documented as a known gap,
+  closed by Phase 35's neighbor-dirtying.
+- [x] 4 new unit tests: no-neighbor-above matches the old default, a
+  solid roof one chunk up genuinely darkens the chunk below, open sky
+  above leaves it fully lit, and a chunk's own internal roof still
+  shadows regardless of what's above it.
+- [x] Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP): all 36 chunks received via `ChunkData`,
+  correctly lit and meshed through the new split path, break/place
+  round-trips cleanly, zero warnings/errors. Verified via real
+  `LCU_VERIFY_BREAK_PLACE` runs (bgfx and non-bgfx): byte-identical
+  `"Sky light 5 blocks above spawn column: 15"` output to Phase 29 (the
+  topmost loaded chunk still has nothing above it, unchanged).
+
+`ctest` 375/375 (bgfx) / 372/372 (non-bgfx), up from 371/368.
+
+Honestly scoped: block light still doesn't cross a chunk boundary at
+all (Phase 31, a genuine BFS); a chunk loaded/edited *after* an
+already-lit neighbor below it doesn't yet retroactively relight that
+neighbor (Phase 35); lateral sky light bleed under overhangs remains
+an unchanged, documented simplification; what a real cross-chunk shadow
+actually looks like on a real GPU/display is still NOT VERIFIED —
+ENVIRONMENT LIMITATION.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

@@ -487,25 +487,36 @@ int main() {
     // Per-chunk light data (brief section 24), fed into meshing since
     // Phase 28 (real per-voxel light in the chunk shader). A real
     // lcu::lighting::WorldLight (Phase 29) rather than a bare
-    // std::unordered_map<ChunkCoord, Light> - still single-chunk-scoped
-    // in what it computes today (see compute_initial_light below;
-    // cross-chunk propagation is Phase 30/31), but its find_chunk_light/
-    // sky_light_at/block_light_at query surface is exactly what those
-    // phases' cross-chunk BFS will need, not reinvented per call site.
+    // std::unordered_map<ChunkCoord, Light>; sky light is genuinely
+    // cross-chunk-aware as of Phase 30 (see compute_initial_sky_light
+    // below) - block light stays single-chunk-scoped until Phase 31.
     lcu::lighting::DefaultWorldLight world_light;
 
-    // Full initial light computation for one just-loaded chunk (block
-    // light from any emitters, plus a straight top-down sky light pass -
-    // see compute_sky_light's own doc comment for the single-chunk-scope
-    // simplification this carries).
-    const auto compute_initial_light = [&](lcu::voxel::ChunkCoord coord) {
+    // Initial block light for one just-loaded chunk (light from any
+    // emitters, flooded within that chunk only). Order-independent
+    // across chunks (block light doesn't cross chunk boundaries yet -
+    // Phase 31), unlike the sky light pass below.
+    const auto compute_initial_block_light = [&](lcu::voxel::ChunkCoord coord) {
         const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
         if (!chunk) {
             return;
         }
         lcu::lighting::Light& light = world_light.chunk_light(coord);
         lcu::lighting::compute_block_light(*chunk, block_registry, light);
-        lcu::lighting::compute_sky_light(*chunk, block_registry, light);
+    };
+
+    // Initial sky light for one just-loaded chunk (Phase 30):
+    // cross-chunk-aware, seeded from the chunk directly above via
+    // world_light (see compute_sky_light_column_cross_chunk's doc
+    // comment). Callers MUST process an (x,z) column's chunks top-down
+    // (highest chunk_y first) for this to actually cascade correctly -
+    // see the load loop below.
+    const auto compute_initial_sky_light = [&](lcu::voxel::ChunkCoord coord) {
+        const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
+        if (!chunk) {
+            return;
+        }
+        lcu::lighting::compute_sky_light_cross_chunk(*chunk, block_registry, world_light, coord);
     };
 
     // Incremental local lighting update after a single block at
@@ -587,9 +598,10 @@ int main() {
             return;
         }
         // Phase 28: mesh with this chunk's real, already-computed
-        // per-voxel light (compute_initial_light runs for every loaded
-        // chunk before its first remesh_and_upload call - see the load
-        // loop and every edit/streaming call site below). Falls back to
+        // per-voxel light (compute_initial_block_light/
+        // compute_initial_sky_light run for every loaded chunk before
+        // its first remesh_and_upload call - see the load loop and
+        // every edit/streaming call site below). Falls back to
         // the light-less (full-bright) mesh_chunk_greedy overload only
         // if that invariant is somehow violated, rather than asserting/
         // crashing on what would be a genuine ordering bug elsewhere.
@@ -621,11 +633,26 @@ int main() {
                  load_settings.radius_xz, load_settings.min_chunk_y, load_settings.max_chunk_y);
     for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
         for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
+            // Three passes per column, not one: block light (Phase 6)
+            // and sky light (Phase 30) are computed separately because
+            // sky light must cascade top-down (the highest chunk_y in
+            // this column needs its own light computed before the one
+            // below it can correctly seed from it - see
+            // compute_initial_sky_light's doc comment); block light and
+            // meshing have no such ordering requirement, but meshing
+            // still has to happen last, after both light passes, since
+            // Phase 28's mesh_chunk_greedy reads whatever's already in
+            // world_light for a chunk.
             for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                 const lcu::voxel::ChunkCoord coord{cx, cy, cz};
                 world.load_chunk(coord);
-                compute_initial_light(coord);
-                remesh_and_upload(coord);
+                compute_initial_block_light(coord);
+            }
+            for (lcu::i32 cy = load_settings.max_chunk_y; cy >= load_settings.min_chunk_y; --cy) {
+                compute_initial_sky_light({cx, cy, cz});
+            }
+            for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                remesh_and_upload({cx, cy, cz});
             }
         }
     }
@@ -689,13 +716,26 @@ int main() {
     const auto stream_chunks_around = [&](lcu::voxel::ChunkCoord center) {
         for (lcu::i32 cx = center.x - load_settings.radius_xz; cx <= center.x + load_settings.radius_xz; ++cx) {
             for (lcu::i32 cz = center.z - load_settings.radius_xz; cz <= center.z + load_settings.radius_xz; ++cz) {
+                // Same three-pass split as the initial spawn-area load
+                // above (block light any order, sky light top-down,
+                // then remesh) - collected into a vector first since
+                // (unlike the spawn load) not every cy in range is
+                // necessarily newly-loaded here (state_of's Unloaded
+                // check may skip some).
+                std::vector<lcu::voxel::ChunkCoord> newly_loaded;
                 for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                     const lcu::voxel::ChunkCoord coord{cx, cy, cz};
                     if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
                         continue;
                     }
                     world.load_chunk(coord);
-                    compute_initial_light(coord);
+                    compute_initial_block_light(coord);
+                    newly_loaded.push_back(coord);
+                }
+                for (auto it = newly_loaded.rbegin(); it != newly_loaded.rend(); ++it) {
+                    compute_initial_sky_light(*it);
+                }
+                for (const lcu::voxel::ChunkCoord& coord : newly_loaded) {
                     remesh_and_upload(coord);
                 }
             }
@@ -999,7 +1039,23 @@ int main() {
                                 // edits applied before this client
                                 // connected.
                                 *target = server_chunk;
-                                compute_initial_light(coord);
+                                compute_initial_block_light(coord);
+                                // Sky light here can't guarantee the
+                                // top-down cascade ordering
+                                // compute_initial_sky_light's doc
+                                // comment asks for - a networked
+                                // ChunkData can arrive in any vertical
+                                // order relative to its own neighbors.
+                                // Real, but not yet fully cross-chunk-
+                                // correct for this specific call site
+                                // (a chunk streamed in below an
+                                // already-loaded, already-lit neighbor
+                                // above it self-corrects; the reverse
+                                // order doesn't retroactively relight
+                                // what was already computed) - closing
+                                // that gap needs the neighbor-dirtying
+                                // Phase 35 is chartered for.
+                                compute_initial_sky_light(coord);
                                 remesh_and_upload(coord);
                                 for (const lcu::voxel::ChunkCoord& neighbor :
                                      {lcu::voxel::ChunkCoord{coord.x - 1, coord.y, coord.z},

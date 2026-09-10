@@ -27,11 +27,12 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (item_crafted: EventBus's second real event)**, **Phase 25
 (macOS build audit)**, **Phase 26 (visible terrain: per-block/
 per-face colors + procedural shader noise)**, **Phase 27 (skybox +
-sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**, and
-**Phase 29 (WorldLight data structure)** are done; see "Reality Audit"
-and "Last Completed Task" below for what they cover and what's next. A
-large, user-directed program (Phases 26-42: visible terrain colors,
-skybox, cross-chunk global lighting with real performance constraints,
+sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**,
+**Phase 29 (WorldLight data structure)**, and **Phase 30 (sky-light
+cross-chunk propagation)** are done; see "Reality Audit" and "Last
+Completed Task" below for what they cover and what's next. A large,
+user-directed program (Phases 26-42: visible terrain colors, skybox,
+cross-chunk global lighting with real performance constraints,
 procedural terrain with sea level at y=0, water, biomes, caves/ores,
 vegetation) is now in progress - see TASK_QUEUE.md for per-phase detail
 as each lands.
@@ -966,6 +967,43 @@ byte-identical log output to Phase 28 - confirming this is a real,
 behavior-preserving refactor. `ctest` 371/371 (bgfx, up from 362) /
 368/368 (non-bgfx, up from 359).
 
+**Phase 30 (sky-light cross-chunk propagation)**: sky light only ever
+travels straight down in this engine (Phase 6's known simplification),
+so "cross-chunk propagation" here is a seeded column scan, not a
+BFS - `compute_sky_light_column` gained a `sky_open_above` parameter
+(default `true`, so every existing caller keeps its old behavior); the
+new `compute_sky_light_column_cross_chunk`/`compute_sky_light_cross_
+chunk` supply a real value by querying the chunk directly above via
+`WorldLight::sky_light_at` (checking just its bottom cell is enough,
+since a blocked column is always uniformly 0 top-to-bottom). A solid
+roof in the chunk above a chunk now actually darkens it - the real bug
+this phase fixes; before, that chunk's own top layer always showed
+full brightness regardless of what was above it.
+
+This only works if every column's chunks are lit top-down (highest
+`chunk_y` first) - `client/main.cpp`'s load loops were restructured
+into three explicit passes per column (block light any order, sky
+light strictly top-down, then meshing) instead of one interleaved
+ascending pass. The one honestly-scoped gap: a chunk arriving over the
+network (`ChunkData`) can't guarantee that ordering relative to its own
+vertical neighbors by itself - a chunk streamed in *below* an
+already-lit neighbor self-corrects, but the reverse order doesn't yet
+retroactively relight what was already computed; closing that fully is
+Phase 35's job (neighbor-dirtying).
+
+4 new unit tests. Verified via a real two-process networked run (36
+chunks streamed via `ChunkData`, break/place round-trips cleanly, zero
+warnings) and real `LCU_VERIFY_BREAK_PLACE` runs (bgfx + non-bgfx)
+producing byte-identical output to Phase 29. `ctest` 375/375 (bgfx, up
+from 371) / 372/372 (non-bgfx, up from 368).
+
+Honestly scoped: **whether a cross-chunk shadow actually looks correct
+on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION**; block light still doesn't cross a chunk boundary at all
+(Phase 31, a genuine BFS unlike this phase's column scan); lateral sky
+light bleed under overhangs remains an unchanged, documented
+simplification.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1442,17 +1480,19 @@ before content/polish):
    per-voxel light, duck-typed LightStorageT template parameter to
    avoid a circular engine/voxel<->engine/lighting dependency, a real
    vertex-stride bug found and fixed)~~, ~~Phase 29 (WorldLight data
-   structure - cross-chunk-aware query surface, no propagation yet)~~ -
-   see PROJECT_STATE.md "Phase 25"/"Phase 26"/"Phase 27"/"Phase 28"/
-   "Phase 29" above and TASK_QUEUE.md for full per-phase detail. Next:
-   Phase 30 (sky-light cross-chunk propagation, built on Phase 29's
-   WorldLight), Phase 31 (block-light cross-chunk propagation), Phase
-   32 (boundary buffer, optional), then Phase 33 (VoxelClient
-   integration + smooth lighting), Phase 34 (torch block + lighting
-   benchmarks), Phase 35 (unload marks neighbors dirty), entity
-   rendering/debug overlay (36), then the worldgen phases (37-41: sea
-   level, water, continents, biomes, caves/ores, vegetation), then docs
-   (42).
+   structure - cross-chunk-aware query surface, no propagation yet)~~,
+   ~~Phase 30 (sky-light cross-chunk propagation - a seeded column
+   scan, not a BFS; client/main.cpp's load loops restructured for
+   top-down ordering)~~ - see PROJECT_STATE.md "Phase 25" through
+   "Phase 30" above and TASK_QUEUE.md for full per-phase detail. Next:
+   Phase 31 (block-light cross-chunk propagation, a real BFS crossing
+   chunk boundaries via WorldLight), Phase 32 (boundary buffer,
+   optional), then Phase 33 (VoxelClient integration + smooth
+   lighting), Phase 34 (torch block + lighting benchmarks), Phase 35
+   (unload marks neighbors dirty - also closes Phase 30's networked-
+   ChunkData ordering gap), entity rendering/debug overlay (36), then
+   the worldgen phases (37-41: sea level, water, continents, biomes,
+   caves/ores, vegetation), then docs (42).
 7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained

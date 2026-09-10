@@ -1912,3 +1912,56 @@ convention:** `WorldLight::find_chunk_light` (const) and
 own `chunk_at`/`chunk_at_mutable` split, rather than classic C++
 `const`/non-`const` overloading of the same name - consistency with an
 established pattern already in this codebase, not a new convention.
+
+## 2026-09-10 — Sky light cross-chunk propagation is a seeded column scan, not a BFS, and needs top-down load ordering (Phase 30)
+
+**Context:** `compute_sky_light_column`'s existing algorithm (Phase 6)
+already scans a column top-to-bottom in O(EdgeLength); the only thing
+missing for cross-chunk correctness is knowing whether sky is still
+open by the time the scan reaches this chunk's own top layer, i.e.
+whether the chunk directly above it already blocked sky for that same
+(x,z) column. Unlike block light (a true multi-directional flood that
+needs a real BFS to cross a boundary - Phase 31), sky light in this
+engine only ever travels straight down, so "propagating across a
+vertical chunk boundary" is exactly "seed the next column scan with
+one boolean from the chunk above", not a queue-based algorithm at all.
+
+**Decision:** `compute_sky_light_column` gained a `sky_open_above`
+parameter (default `true`) instead of writing a parallel cross-chunk-
+only implementation - the single-chunk and cross-chunk cases share the
+same scan, differing only in their starting `blocked` state.
+`compute_sky_light_column_cross_chunk` supplies the real value by
+querying `WorldLight::sky_light_at` at the neighbor's bottom cell
+(`y=0`) - checking just that one cell is sufficient because
+`compute_sky_light_column` itself guarantees a blocked column is
+uniformly 0 top-to-bottom, so the bottom cell alone tells the whole
+column's story.
+
+**A real ordering requirement this phase's own correctness depends
+on, made explicit rather than assumed:** for the cascade to actually
+work, every (x,z) column's chunks must have their sky light computed
+top-down (highest `chunk_y` first) - a chunk queries the one *above*
+it, so that neighbor must already have valid light. `client/main.cpp`'s
+existing load loops iterated `chunk_y` ascending (bottom-up, matching
+how a player typically stands on the ground and looks up); this phase
+restructures them into three explicit passes per column (block light
+any order, sky light strictly top-down, then meshing) rather than
+interleaving light computation with `world.load_chunk` in a single
+ascending pass as before. The one remaining honestly-scoped gap is the
+networked `ChunkData` receipt path: a single chunk arriving over the
+network in arbitrary order relative to its own vertical neighbors
+can't guarantee this ordering by itself - closing that gap needs a
+chunk, once lit, to be able to trigger its neighbors to re-light too,
+which is exactly what Phase 35 ("chunk unload marks neighbors dirty")
+is chartered to add. Until then, a chunk streamed in *below* an
+already-lit neighbor above it self-corrects (the common case, matching
+normal top-to-bottom terrain generation and streaming order); the
+reverse order doesn't retroactively relighten what was already
+computed - a real, narrow, documented limitation, not a silent one.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real cross-chunk sky light actually looks correct on a real
+GPU/display (a shadow correctly extending from one chunk into the one
+below it) - none of that is knowable from a code read or a headless
+Noop-backend run. Block light still doesn't cross a chunk boundary at
+all (Phase 31, a genuine BFS, unlike this phase's column scan).

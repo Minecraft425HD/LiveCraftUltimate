@@ -1,9 +1,11 @@
 #pragma once
 
+#include <optional>
 #include <queue>
 #include <utility>
 
 #include "lcu/lighting/light_storage.h"
+#include "lcu/lighting/world_light.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 
@@ -191,7 +193,13 @@ void unpropagate_block_light(const voxel::ChunkStorage<EdgeLength>& chunk, const
 
 // Fills sky light straight down one column (x,z) of `chunk`: full
 // brightness (kMaxLightLevel) until the first opaque block, 0 at and
-// below it. Genuinely local - after a single block edit, call this
+// below it. `sky_open_above` (Phase 30) seeds whether sky is still open
+// by the time it reaches this chunk's own top layer - default `true`
+// preserves this function's original single-chunk-scoped behavior (the
+// chunk's own top is always treated as open) for every existing caller;
+// `compute_sky_light_column_cross_chunk` below is what actually passes
+// a real value, queried from the chunk directly above via WorldLight.
+// Genuinely local otherwise - after a single block edit, call this
 // again for just that block's (x,z) column (16 cells) rather than
 // recomputing the whole chunk; compute_sky_light below is only the
 // initial full-chunk pass, built by calling this once per column.
@@ -199,20 +207,62 @@ void unpropagate_block_light(const voxel::ChunkStorage<EdgeLength>& chunk, const
 // Known simplification: no lateral spreading under overhangs (real
 // sunlight leaks a little sideways beneath a ledge; block light spreads
 // in all 6 directions but sky light here only ever travels straight
-// down) and no cross-chunk awareness (a chunk with something solid
-// directly above it, in the chunk above, will incorrectly show full sky
-// light at its own top layer until cross-chunk propagation exists) -
-// see DECISIONS.md.
+// down) - see DECISIONS.md. Vertical cross-chunk awareness (a chunk
+// with something solid directly above it, in the chunk above,
+// correctly darkening this chunk's own top layer) exists as of Phase
+// 30, via `sky_open_above`/compute_sky_light_column_cross_chunk - but
+// only when the neighbor chunk is loaded and its own light has already
+// been computed; an unloaded/not-yet-lit neighbor still means "assume
+// open" (see WorldLight's own doc comment), same as before this phase.
 template <u32 EdgeLength>
 void compute_sky_light_column(const voxel::ChunkStorage<EdgeLength>& chunk, const voxel::BlockRegistry& registry,
-                               LightStorage<EdgeLength>& light, u32 x, u32 z) {
-    bool blocked = false;
+                               LightStorage<EdgeLength>& light, u32 x, u32 z, bool sky_open_above = true) {
+    bool blocked = !sky_open_above;
     for (i32 y = static_cast<i32>(EdgeLength) - 1; y >= 0; --y) {
         const u32 uy = static_cast<u32>(y);
         if (!blocked && detail::is_opaque(chunk, registry, x, uy, z)) {
             blocked = true;
         }
         light.set_sky_light(x, uy, z, blocked ? 0 : LightStorage<EdgeLength>::kMaxLightLevel);
+    }
+}
+
+// Cross-chunk-aware sky light for one column (Phase 30): queries the
+// chunk directly above (coord.y + 1) via `world_light` and seeds this
+// column's `sky_open_above` from whether that neighbor's own column is
+// still open by its bottom cell (sky_light(x, 0, z) > 0) - if the
+// neighbor isn't loaded, or hasn't been lit yet, assumes open sky
+// (WorldLight's own "unknown -> best case, not guessed dark"
+// convention), which is also exactly this function's behavior for a
+// chunk at the top of the currently-loaded world (nothing above it to
+// query), identical to compute_sky_light_column's original default.
+// Writes into `world_light`'s own LightStorage for `coord`
+// (get-or-create, same as WorldLight::chunk_light).
+template <u32 EdgeLength>
+void compute_sky_light_column_cross_chunk(const voxel::ChunkStorage<EdgeLength>& chunk,
+                                           const voxel::BlockRegistry& registry, WorldLight<EdgeLength>& world_light,
+                                           voxel::ChunkCoord coord, u32 x, u32 z) {
+    const voxel::ChunkCoord above{coord.x, coord.y + 1, coord.z};
+    const std::optional<u8> above_bottom_light = world_light.sky_light_at(above, static_cast<i32>(x), 0, static_cast<i32>(z));
+    const bool sky_open_above = !above_bottom_light.has_value() || *above_bottom_light > 0;
+    compute_sky_light_column(chunk, registry, world_light.chunk_light(coord), x, z, sky_open_above);
+}
+
+// Whole-chunk cross-chunk-aware sky light (Phase 30): the vertical-
+// cross-chunk-aware counterpart to compute_sky_light below. Callers
+// computing an entire loaded world's sky light must still process
+// chunks top-down within each (x,z) column stack (highest chunk_y
+// first) for this to actually cascade correctly - this function only
+// computes one chunk correctly *given* that the chunk above (if any)
+// was already computed; it doesn't itself enforce an evaluation order
+// across multiple chunks.
+template <u32 EdgeLength>
+void compute_sky_light_cross_chunk(const voxel::ChunkStorage<EdgeLength>& chunk, const voxel::BlockRegistry& registry,
+                                    WorldLight<EdgeLength>& world_light, voxel::ChunkCoord coord) {
+    for (u32 z = 0; z < EdgeLength; ++z) {
+        for (u32 x = 0; x < EdgeLength; ++x) {
+            compute_sky_light_column_cross_chunk(chunk, registry, world_light, coord, x, z);
+        }
     }
 }
 

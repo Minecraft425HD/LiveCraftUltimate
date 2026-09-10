@@ -2,7 +2,49 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30
+
+### Phase 30
+
+- `compute_sky_light_column` gained a `sky_open_above` parameter
+  (defaulted `true`, preserving every existing caller's behavior) -
+  when `false`, the whole column starts pre-blocked, so a chunk with a
+  solid roof directly above it (in the *neighboring* chunk) actually
+  darkens instead of showing full brightness.
+- New `compute_sky_light_column_cross_chunk`/`compute_sky_light_cross_
+  chunk`: query the chunk directly above via `WorldLight::sky_light_at`
+  (its bottom cell) to seed `sky_open_above` for real - an unloaded or
+  not-yet-lit neighbor still means "assume open" (WorldLight's own
+  "unknown -> best case, not guessed dark" convention), identical to
+  this function's behavior before this phase.
+- `client/main.cpp`'s chunk-load loops (initial spawn-area load, and
+  per-movement streaming) restructured into three passes per (x,z)
+  column instead of one: block light (any order), sky light
+  (**top-down**, highest `chunk_y` first - required for the cascade to
+  actually work), then meshing (after both light passes). The
+  networked `ChunkData` receipt path (a single chunk, arbitrary
+  vertical order) uses the same split but honestly can't guarantee the
+  top-down ordering - documented as a known gap closed by Phase 35's
+  neighbor-dirtying.
+- 4 new unit tests covering: no-neighbor-above behaves like the old
+  default, a solid roof one chunk up darkens the chunk below (the real
+  bug this phase fixes), open sky above leaves the chunk fully lit, and
+  a chunk's own internal roof still shadows regardless of what's above.
+- Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient` over loopback UDP): all 36 chunks received via
+  `ChunkData` and correctly lit/meshed through the new split path,
+  break/place round-trips cleanly, zero warnings/errors - plus real
+  `LCU_VERIFY_BREAK_PLACE` runs (bgfx and non-bgfx) producing
+  byte-identical `"Sky light 5 blocks above spawn column: 15"` output
+  to Phase 29 (the topmost loaded chunk still has nothing above it to
+  darken it, exactly as before).
+- `ctest` 375/375 (bgfx, up from 371) / 372/372 (non-bgfx, up from
+  368).
+- Honestly scoped: block light still doesn't cross a chunk boundary
+  (Phase 31); a chunk that loads or is edited *after* its neighbor
+  below was already lit doesn't yet retroactively relight that
+  neighbor (Phase 35); lateral sky light bleed under overhangs remains
+  a documented simplification, unchanged from before this phase.
 
 ### Phase 29
 

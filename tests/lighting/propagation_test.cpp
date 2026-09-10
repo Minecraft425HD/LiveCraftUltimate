@@ -225,6 +225,95 @@ TEST(ComputeSkyLight, AdjacentColumnsAreIndependent) {
     EXPECT_EQ(light.sky_light(4, 9, 3), lcu::lighting::Light::kMaxLightLevel);
 }
 
+TEST(ComputeSkyLightCrossChunk, NoChunkAboveAssumesOpenSkySameAsSingleChunkDefault) {
+    // Phase 30: with nothing loaded above (the common "topmost loaded
+    // chunk" case), a cross-chunk column must behave identically to the
+    // original single-chunk compute_sky_light_column default.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    Chunk chunk;  // all air
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord coord{0, 0, 0};
+
+    lcu::lighting::compute_sky_light_cross_chunk(chunk, registry, world_light, coord);
+
+    for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+        EXPECT_EQ(world_light.chunk_light(coord).sky_light(3, y, 3), lcu::lighting::Light::kMaxLightLevel) << "y=" << y;
+    }
+}
+
+TEST(ComputeSkyLightCrossChunk, SolidRoofInTheChunkAboveDarkensThisChunksTopLayer) {
+    // The real bug Phase 30 fixes: a chunk with a solid roof directly
+    // above it (in the neighboring chunk) must show 0 sky light at its
+    // own top layer, not full brightness.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;
+    above_chunk.set_block(3, 0, 3, stone);  // solid floor at the bottom of the chunk above
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, Chunk::kEdgeLength - 1, 3), 0u);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 0, 3), 0u);
+    // An unrelated column (no roof above it anywhere) stays fully lit -
+    // proves the darkening is column-specific, not a whole-chunk effect.
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(4, Chunk::kEdgeLength - 1, 4),
+              lcu::lighting::Light::kMaxLightLevel);
+}
+
+TEST(ComputeSkyLightCrossChunk, OpenSkyInTheChunkAboveLeavesThisChunkFullyLit) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, Chunk::kEdgeLength - 1, 3),
+              lcu::lighting::Light::kMaxLightLevel);
+}
+
+TEST(ComputeSkyLightCrossChunk, AChunksOwnRoofStillShadowsRegardlessOfWhatsAboveIt) {
+    // The chunk's own solid block still blocks light independent of
+    // sky_open_above - a chunk with open sky above it but its own roof
+    // partway down must still go dark below that roof.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;  // all air - open sky
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;
+    below_chunk.set_block(3, 10, 3, stone);
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 15, 3), lcu::lighting::Light::kMaxLightLevel);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 10, 3), 0u);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 0, 3), 0u);
+}
+
 TEST(LightStorage, CombinedLightIsTheBrighterChannel) {
     lcu::lighting::Light light;
     light.set_sky_light(1, 1, 1, 4);
