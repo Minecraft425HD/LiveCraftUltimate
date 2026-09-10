@@ -10,8 +10,10 @@
 using lcu::voxel::BlockId;
 using lcu::voxel::Chunk;
 using lcu::serialization::ChunkLoadResult;
+using lcu::serialization::deserialize_chunk_from_bytes;
 using lcu::serialization::load_chunk_from_file;
 using lcu::serialization::save_chunk_to_file;
+using lcu::serialization::serialize_chunk_to_bytes;
 
 namespace {
 
@@ -135,4 +137,67 @@ TEST(ChunkSerializer, FailedLoadLeavesOutputChunkUntouched) {
 
     EXPECT_EQ(result, ChunkLoadResult::FileNotFound);
     EXPECT_EQ(out.block_at(3, 3, 3), 111);
+}
+
+// --- In-memory byte-buffer API (Phase 13's chunk network streaming) ----
+
+TEST(ChunkSerializer, InMemoryRoundTripPreservesAllBlocks) {
+    Chunk original;
+    for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+                original.set_block(x, y, z, static_cast<BlockId>((x + y * 16 + z * 256) % 500));
+            }
+        }
+    }
+
+    const std::vector<lcu::u8> bytes = serialize_chunk_to_bytes(original);
+    ASSERT_FALSE(bytes.empty());
+
+    Chunk loaded;
+    ASSERT_EQ(deserialize_chunk_from_bytes(bytes, loaded), ChunkLoadResult::Ok);
+    for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+                ASSERT_EQ(loaded.block_at(x, y, z), original.block_at(x, y, z));
+            }
+        }
+    }
+}
+
+TEST(ChunkSerializer, InMemoryBytesMatchFileBytes) {
+    // serialize_chunk_to_bytes/save_chunk_to_file must produce the exact
+    // same layout - save_chunk_to_file is now a thin wrapper around the
+    // byte-buffer function, and this pins that down.
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, 7);
+    const std::vector<lcu::u8> bytes = serialize_chunk_to_bytes(chunk);
+
+    const std::string path = temp_file_path("in_memory_matches_file.chunk");
+    ASSERT_TRUE(save_chunk_to_file(chunk, path));
+
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    ASSERT_NE(file, nullptr);
+    std::vector<lcu::u8> file_bytes(bytes.size());
+    ASSERT_EQ(std::fread(file_bytes.data(), 1, file_bytes.size(), file), file_bytes.size());
+    std::fclose(file);
+
+    EXPECT_EQ(bytes, file_bytes);
+    std::filesystem::remove(path);
+}
+
+TEST(ChunkSerializer, DeserializeRejectsTruncatedBytes) {
+    Chunk chunk;
+    chunk.set_block(1, 1, 1, 9);
+    std::vector<lcu::u8> bytes = serialize_chunk_to_bytes(chunk);
+    ASSERT_GT(bytes.size(), 20u);
+    bytes.resize(15);  // shorter than the 20-byte header
+
+    Chunk loaded;
+    EXPECT_EQ(deserialize_chunk_from_bytes(bytes, loaded), ChunkLoadResult::CorruptHeader);
+}
+
+TEST(ChunkSerializer, DeserializeRejectsEmptyBytes) {
+    Chunk loaded;
+    EXPECT_EQ(deserialize_chunk_from_bytes({}, loaded), ChunkLoadResult::CorruptHeader);
 }

@@ -3,6 +3,7 @@ add_library(LcuNetwork STATIC
     src/udp_socket.cpp
     src/packet_header.cpp
     src/connection.cpp
+    src/fragmentation.cpp
 )
 add_library(Lcu::Network ALIAS LcuNetwork)
 
