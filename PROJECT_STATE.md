@@ -31,8 +31,9 @@ sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**,
 **Phase 29 (WorldLight data structure)**, **Phase 30 (sky-light
 cross-chunk propagation)**, **Phase 31 (block-light cross-chunk
 propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
-and **Phase 33 (VoxelClient integration + smooth lighting)** are done;
-see "Reality Audit" and "Last Completed Task" below for what they cover
+**Phase 33 (VoxelClient integration + smooth lighting)**, and
+**Phase 34 (torch block + lighting benchmarks)** are done; see
+"Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
 performance constraints, procedural terrain with sea level at y=0,
@@ -1096,6 +1097,55 @@ Honestly scoped: **what smooth lighting actually looks like on a real
 GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; a chunk
 loading after a nearby source's BFS already finished still isn't
 retroactively relit or remeshed (Phase 35's job).
+
+**Phase 34 (torch block + lighting benchmarks)**: new light-emitting
+content (`game:torch`, `light_emission=14`) plus actually meeting the
+brief's explicit lighting-performance budgets, not just claiming them.
+`is_transparent` is deliberately `false` - a transparent torch would
+have been correctly lit and collidable but completely invisible
+(`mesh_chunk_greedy` never meshes the transparent layer - it doesn't
+exist), a real fake-feature trap caught and fixed before it became a
+bug, not after. A new `LCU_VERIFY_TORCH` headless hook breaks the
+spawn block, grants a torch, hotbar-cycles to it, places it, and logs
+the real light value read back post-place: `"Placed game:torch at
+world (0, 28, -1): block_light=14"`.
+
+3 new `tools/benchmark` cases target the brief's own explicit budgets
+(chunk-with-neighbors < 2ms, torch place/unplace at a chunk edge each
+< 0.5ms). First finding: this project's only `CMAKE_BUILD_TYPE`
+("Development") isn't a CMake built-in type, so no target anywhere has
+ever built with real optimization flags - confirmed by Google
+Benchmark's own "built as DEBUG" warning. A dedicated `build/
+bench-release` (`-O3 -DNDEBUG`, confirmed via cache) was created to get
+trustworthy numbers - see DECISIONS.md; the underlying project-wide gap
+is left open, documented, for a dedicated future pass.
+
+Second finding, a real one: even under genuine `-O3`, torch place/
+unplace still missed the 500us budget (639us/767us). Root cause: the
+cross-chunk BFS paid up to ~13 redundant `unordered_map` lookups across
+two separate maps per popped cell, plus unconditional floor-division,
+for the common case where a step never leaves the current chunk. Fixed
+with an in-bounds fast path (plain integer range check, reuses
+already-held pointers, zero hash lookups for in-chunk steps), proven
+behavior-preserving by the unchanged full `ctest` suite (385/385 bgfx /
+382/382 non-bgfx) before and after. Re-measured: 115,649 ns / 99,158
+ns - both now comfortably under budget; the compute-chunk-with-
+neighbors case (16,616 ns) stayed comfortably under its own 2ms budget
+throughout.
+
+No new unit tests this phase (the BFS change is proven by the existing
+suite staying green; the new content is proven by the real
+`LCU_VERIFY_TORCH` run and the new benchmarks). Verified via a real
+two-process networked run (600 server ticks, 36 chunks streamed, zero
+warnings) and real `LCU_VERIFY_TORCH`/`LCU_VERIFY_BREAK_PLACE`/
+`LCU_VERIFY_CRAFT` runs, zero regressions.
+
+Honestly scoped: **what a placed, lit torch actually looks like on a
+real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+`CMAKE_BUILD_TYPE="Development"` no-optimization gap remains project-
+wide outside `build/bench-release`; a chunk loading after a nearby
+source's BFS already finished still isn't retroactively relit or
+remeshed (Phase 35's job, next).
 
 ## Build Status
 

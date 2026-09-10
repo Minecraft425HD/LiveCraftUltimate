@@ -21,6 +21,7 @@
 #include "lcu/ecs/registry.h"
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
+#include "lcu/lighting/world_light.h"
 #include "lcu/network/connection.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
@@ -179,6 +180,123 @@ static void BM_Lighting_ComputeSkyLight(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_Lighting_ComputeSkyLight);
+
+// The three benchmarks below (Phase 34) are the brief's own explicit
+// perf budgets, unlike the rest of this file's "numbers to profile
+// against, not a target" numbers: BM_Lighting_ComputeChunkWithNeighbors
+// < 2ms, BM_Lighting_PlaceTorchAtChunkEdge / BM_Lighting_
+// UnplaceTorchAtChunkEdge < 0.5ms each - real, measured, and confirmed
+// under budget on this sandbox's CPU before this phase's commit (see
+// BUILD_STATUS.md for the actual numbers and the reproduce command);
+// "optimize before continuing" if a future change pushes any of them
+// over.
+
+static void BM_Lighting_ComputeChunkWithNeighbors(benchmark::State& state) {
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    // A partial roof in the chunk above (not fully open, not fully
+    // solid) so the chunk below's own sky light genuinely depends on
+    // real cross-chunk seeding (Phase 30) - a representative case, not
+    // the trivial "nothing above" one.
+    World world(1, [&](Chunk& chunk, ChunkCoord coord) {
+        if (coord.y == 1) {
+            for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+                for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+                    if ((x + z) % 3 != 0) {
+                        chunk.set_block(x, 0, z, stone_id);
+                    }
+                }
+            }
+        }
+    });
+    world.load_chunk({0, 1, 0});
+    world.load_chunk({0, 0, 0});
+    const Chunk* above = world.chunk_at({0, 1, 0});
+    const Chunk* below = world.chunk_at({0, 0, 0});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    // The neighbor above is loaded and lit once, before timing starts -
+    // this measures the real per-chunk-load cost given an already-lit
+    // neighbor (client/main.cpp's actual load-loop shape - see
+    // compute_initial_sky_light's top-down ordering requirement), not
+    // the neighbor's own light cost too.
+    lcu::lighting::compute_block_light(*above, registry, world_light.chunk_light({0, 1, 0}));
+    lcu::lighting::compute_sky_light_cross_chunk(*above, registry, world_light, {0, 1, 0});
+
+    for (auto _ : state) {
+        lcu::lighting::compute_block_light(*below, registry, world_light.chunk_light({0, 0, 0}));
+        lcu::lighting::compute_sky_light_cross_chunk(*below, registry, world_light, {0, 0, 0});
+    }
+}
+BENCHMARK(BM_Lighting_ComputeChunkWithNeighbors);
+
+static void BM_Lighting_PlaceTorchAtChunkEdge(benchmark::State& state) {
+    BlockRegistry registry;
+    BlockDefinition torch;
+    torch.namespaced_id = "bench:torch";
+    torch.display_name = "Torch";
+    torch.is_transparent = false;
+    torch.light_emission = 14;
+    const BlockId torch_id = registry.register_block(torch);
+
+    // Worst-case reach for a single placement: right at the +X chunk
+    // boundary, with the neighbor chunk actually loaded so the BFS has
+    // somewhere real to spread into (see engine/lighting/propagation.h
+    // "flood_block_light_cross_chunk").
+    World world(1, [](Chunk&, ChunkCoord) {});  // both chunks all-air
+    world.load_chunk({0, 0, 0});
+    world.load_chunk({1, 0, 0});
+    Chunk* origin = world.chunk_at_mutable({0, 0, 0});
+    origin->set_block(Chunk::kEdgeLength - 1, 8, 8, torch_id);
+
+    for (auto _ : state) {
+        // A fresh WorldLight per iteration - constructing an empty
+        // 2-entry unordered_map is negligible next to the BFS itself,
+        // and guarantees no residual light from a prior iteration
+        // silently makes a later iteration cheaper (propagate only
+        // writes when the new level is strictly brighter than what's
+        // already there).
+        lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+        world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, 14);
+        lcu::lighting::propagate_added_block_light_cross_chunk(world, registry, world_light, {0, 0, 0},
+                                                                 Chunk::kEdgeLength - 1, 8, 8);
+        benchmark::DoNotOptimize(world_light);
+    }
+}
+BENCHMARK(BM_Lighting_PlaceTorchAtChunkEdge);
+
+static void BM_Lighting_UnplaceTorchAtChunkEdge(benchmark::State& state) {
+    BlockRegistry registry;
+    BlockDefinition torch;
+    torch.namespaced_id = "bench:torch";
+    torch.display_name = "Torch";
+    torch.is_transparent = false;
+    torch.light_emission = 14;
+    const BlockId torch_id = registry.register_block(torch);
+
+    World world(1, [](Chunk&, ChunkCoord) {});
+    world.load_chunk({0, 0, 0});
+    world.load_chunk({1, 0, 0});
+    Chunk* origin = world.chunk_at_mutable({0, 0, 0});
+    origin->set_block(Chunk::kEdgeLength - 1, 8, 8, torch_id);
+
+    for (auto _ : state) {
+        // Priming (the place half) is excluded from the timed region -
+        // this benchmark measures unpropagate_block_light_cross_chunk
+        // alone, not place+unplace combined.
+        state.PauseTiming();
+        lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+        world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, 14);
+        lcu::lighting::propagate_added_block_light_cross_chunk(world, registry, world_light, {0, 0, 0},
+                                                                 Chunk::kEdgeLength - 1, 8, 8);
+        state.ResumeTiming();
+
+        lcu::lighting::unpropagate_block_light_cross_chunk(world, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8, 14);
+        benchmark::DoNotOptimize(world_light);
+    }
+}
+BENCHMARK(BM_Lighting_UnplaceTorchAtChunkEdge);
 
 // --- Physics (engine/physics) -----------------------------------------------
 

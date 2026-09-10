@@ -213,6 +213,23 @@ int main(int argc, char** argv) {
     dirt_def.has_collision = true;
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
+    // Mirrors VoxelClient's own registration exactly, same as every
+    // other block above (Phase 34) - the server needs its own
+    // authoritative copy of game:torch's light_emission/is_transparent/
+    // has_collision so a real placed torch validates and replicates
+    // correctly (handle_block_action below already works generically
+    // off whatever's in block_registry, no torch-specific code needed
+    // there). is_transparent=false (a solid glowing cube, not a
+    // cross/billboard shape) for the same reason VoxelClient's own copy
+    // is - see that file's comment on this exact field.
+    lcu::voxel::BlockDefinition torch_def;
+    torch_def.namespaced_id = "game:torch";
+    torch_def.display_name = "Torch";
+    torch_def.is_transparent = false;
+    torch_def.has_collision = true;
+    torch_def.light_emission = 14;
+    const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
+
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
     // register the same one item in the same order, so their ItemIds
@@ -241,6 +258,12 @@ int main(int argc, char** argv) {
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
+
+    lcu::items::ItemDefinition torch_item_def;
+    torch_item_def.namespaced_id = "game:torch";
+    torch_item_def.display_name = "Torch";
+    torch_item_def.max_stack_size = 64;
+    const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Mods run here too (Phase 9) so a mod's registered blocks/items exist
@@ -400,6 +423,7 @@ int main(int argc, char** argv) {
     block_item_mapping.register_pair(stone_id, stone_item_id);
     block_item_mapping.register_pair(grass_id, grass_item_id);
     block_item_mapping.register_pair(dirt_id, dirt_item_id);
+    block_item_mapping.register_pair(torch_id, torch_item_id);
     const auto item_for_block = [&](lcu::voxel::BlockId block_id) {
         return block_item_mapping.item_for_block(block_id);
     };
@@ -410,7 +434,8 @@ int main(int argc, char** argv) {
     // touched, so a stale guess for an *unrelated* tracked item (e.g.
     // from an earlier request that arrived out of order) also gets
     // corrected eventually.
-    const std::array<lcu::items::ItemId, 3> tracked_items{stone_item_id, grass_item_id, dirt_item_id};
+    const std::array<lcu::items::ItemId, 4> tracked_items{stone_item_id, grass_item_id, dirt_item_id,
+                                                            torch_item_id};
 
     // Sends `client`'s current authoritative count for every tracked
     // item - called after every BlockAction that could have affected

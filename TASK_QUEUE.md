@@ -1143,6 +1143,74 @@ GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
 ambient occlusion; a chunk loading after a nearby source's BFS already
 finished still isn't retroactively relit or remeshed (Phase 35's job).
 
+## Phase 34 — Torch block + lighting benchmarks
+
+New light-emitting content, plus meeting the brief's own explicit
+lighting-performance budgets for real, not just claiming them.
+
+- [x] **`game:torch`**: `light_emission=14`, deliberately `is_
+  transparent=false` - a transparent torch would be correctly lit but
+  completely invisible (`mesh_chunk_greedy` only meshes the opaque
+  layer, and no transparent-layer mesher exists), a real fake-feature
+  trap caught and corrected before any verification run, not after -
+  see DECISIONS.md. Registered identically on `VoxelClient`/
+  `VoxelServer`; wired into `placeable_items`, `block_item_mapping`,
+  `tracked_items`.
+- [x] New headless hook `LCU_VERIFY_TORCH`: breaks the spawn block,
+  grants one `game:torch` item directly (nothing drops one yet),
+  hotbar-cycles to it, places it into the hole, and logs the real
+  post-place `block_light` value read back through `WorldLight::
+  block_light_at` - the full place -> propagate -> query pipeline,
+  verified via a real run: `"Placed game:torch at world (0, 28, -1):
+  block_light=14"`.
+- [x] 3 new `tools/benchmark` cases against the brief's own explicit
+  budgets (not the file's usual "numbers to profile against"):
+  `BM_Lighting_ComputeChunkWithNeighbors` (< 2ms), `BM_Lighting_
+  PlaceTorchAtChunkEdge`/`BM_Lighting_UnplaceTorchAtChunkEdge` (each
+  < 0.5ms, torch placed at the worst-case chunk-edge position).
+- [x] **Build-configuration finding**: `CMAKE_BUILD_TYPE=
+  "Development"` (this project's only configured value) is not a
+  CMake built-in type, so no optimization flags were ever applied to
+  any target - confirmed by Google Benchmark's own `Library was built
+  as DEBUG` warning on the first run. Created a dedicated `build/
+  bench-release` directory (`-DCMAKE_BUILD_TYPE=Release`, confirmed
+  `-O3 -DNDEBUG` in its cache) to get trustworthy numbers - see
+  DECISIONS.md. Left as a documented, project-wide gap outside this
+  one benchmark directory (not fixed this phase, out of scope).
+- [x] **Budget miss found and fixed for real**: even under genuine
+  `-O3`, place/unplace still exceeded budget (639,123 ns / 766,988 ns
+  vs. 500,000 ns). Root-caused to redundant `unordered_map` lookups
+  (two separate maps, ~13 per popped BFS cell) and unconditional
+  floor-division for the common case where a BFS step stays within
+  the current chunk. Added an in-bounds fast path (plain integer range
+  check, reuses already-held pointers, zero hash lookups) to both
+  `flood_block_light_cross_chunk` and `unpropagate_block_light_cross_
+  chunk`, falling back to the original logic only for genuine
+  boundary crossings - behavior-preserving by construction, confirmed
+  via the unchanged full `ctest` suite (385/385 bgfx / 382/382
+  non-bgfx) before and after. Re-measured: 115,649 ns / 99,158 ns -
+  both now comfortably under budget; `BM_Lighting_
+  ComputeChunkWithNeighbors` (16,616 ns) stayed comfortably under its
+  2ms budget throughout.
+- [x] Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP, 600 server ticks, 36 chunks streamed,
+  zero warnings/errors) and real `LCU_VERIFY_TORCH`/`LCU_VERIFY_
+  BREAK_PLACE`/`LCU_VERIFY_CRAFT` runs (bgfx) - all pre-existing hooks
+  behave identically to Phase 33, confirming the BFS optimization
+  changed nothing observable.
+
+`ctest` unchanged at 385/385 (bgfx) / 382/382 (non-bgfx) - no new unit
+tests this phase (the BFS change is proven behavior-preserving by the
+existing suite; the new content is proven by the real `LCU_VERIFY_
+TORCH` run and the new benchmarks).
+
+Honestly scoped: **what a placed, lit torch actually looks like on a
+real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+`CMAKE_BUILD_TYPE="Development"` no-optimization gap remains project-
+wide outside `build/bench-release`; a chunk loading after a nearby
+source's BFS already finished still isn't retroactively relit or
+remeshed (Phase 35's job, next).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

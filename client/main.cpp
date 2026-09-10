@@ -145,6 +145,26 @@ constexpr lcu::u64 kVerifyCycleHotbarFrame = 5;
 // race in a real networked run. Single-player mutates instantly, so
 // these delays cost it nothing but a bit of wall-clock time.
 constexpr lcu::f32 kVerifyCraftSecondBreakDelaySeconds = 1.0f;
+
+// A third, independent headless hook (LCU_VERIFY_TORCH, Phase 34):
+// breaks the block the player spawns on (same kVerifyBreakFrame value
+// as LCU_VERIFY_BREAK_PLACE, a proven-working target/timing), grants
+// the player one game:torch item directly (nothing in this build's
+// world drops one to break/craft yet, so this is the synthetic setup
+// the hook needs, the same honest "hook synthesizes exactly the
+// input/state a real key press or drop would produce" approach
+// LCU_VERIFY_BREAK_PLACE/LCU_VERIFY_CRAFT already use), cycles the
+// hotbar three times to reach it (index 3 - see `placeable_items`),
+// then places it into the hole the break just made. Proves the real
+// end-to-end pipeline: a placed torch actually reaches update_
+// lighting_for_edit -> propagate_added_block_light_cross_chunk -> a
+// real, observably nonzero block_light value at its own position,
+// logged below - not just "it compiled and didn't crash".
+constexpr lcu::u64 kVerifyTorchBreakFrame = 3;
+constexpr lcu::u64 kVerifyTorchCycleFrame1 = 5;
+constexpr lcu::u64 kVerifyTorchCycleFrame2 = 7;
+constexpr lcu::u64 kVerifyTorchCycleFrame3 = 9;
+constexpr lcu::u64 kVerifyTorchPlaceFrame = 11;
 constexpr lcu::f32 kVerifyCraftFirstCraftDelaySeconds = 1.2f;
 // A second Craft press after the first one succeeds: by now the player
 // holds only game:compost (grass/dirt were fully consumed) - a single
@@ -311,6 +331,38 @@ int main() {
     dirt_def.color = {0.4f, 0.25f, 0.1f};
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
+    // First real light-emitting, player-placeable block (Phase 34,
+    // closing the "torch block" half of the brief's own phase): every
+    // earlier block in this file is dark (light_emission=0 by
+    // BlockDefinition's own default) - this one emits real block light
+    // that Phases 6/28/30/31's already-built propagation/rendering
+    // pipeline picks up with zero further wiring, a genuine end-to-end
+    // exercise of that whole pipeline, not new lighting code of its
+    // own.
+    //
+    // Deliberately `is_transparent = false` (a solid glowing cube, not
+    // a wall/floor-mounted cross/billboard shape): mesh_chunk_greedy
+    // only ever meshes the *opaque* layer into real geometry today
+    // (engine/voxel::ChunkMesh::transparent/water exist structurally
+    // but stay empty - see DECISIONS.md "no transparent block
+    // registered anywhere" from Phase 26, now literally not true, but
+    // no transparent-layer *meshing* exists to make one visible yet).
+    // A `true` here would make this block real, correctly-lit, and
+    // completely invisible - exactly the kind of half-working gap
+    // brief section 96's "no fake features" exists to catch. Solid and
+    // collidable like every other block here until a real cross-shaped
+    // block-rendering path exists to justify the visual difference.
+    // Warm orange-yellow tint (no flame animation/particle - see Known
+    // Limitations).
+    lcu::voxel::BlockDefinition torch_def;
+    torch_def.namespaced_id = "game:torch";
+    torch_def.display_name = "Torch";
+    torch_def.is_transparent = false;
+    torch_def.has_collision = true;
+    torch_def.light_emission = 14;
+    torch_def.color = {1.0f, 0.65f, 0.2f};
+    const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -340,6 +392,12 @@ int main() {
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
+
+    lcu::items::ItemDefinition torch_item_def;
+    torch_item_def.namespaced_id = "game:torch";
+    torch_item_def.display_name = "Torch";
+    torch_item_def.max_stack_size = 64;
+    const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
     // First crafted-only item (Phase 23, closing brief section 55's
     // "no crafting-grid caller anywhere" gap): game:compost has no
@@ -382,10 +440,11 @@ int main() {
         lcu::items::ItemId item_id;
         const char* name;
     };
-    const std::array<PlaceableItem, 3> placeable_items{{
+    const std::array<PlaceableItem, 4> placeable_items{{
         {stone_id, stone_item_id, "game:stone"},
         {grass_id, grass_item_id, "game:grass"},
         {dirt_id, dirt_item_id, "game:dirt"},
+        {torch_id, torch_item_id, "game:torch"},
     }};
     lcu::usize selected_placeable_index = 0;
 
@@ -401,6 +460,7 @@ int main() {
     block_item_mapping.register_pair(stone_id, stone_item_id);
     block_item_mapping.register_pair(grass_id, grass_item_id);
     block_item_mapping.register_pair(dirt_id, dirt_item_id);
+    block_item_mapping.register_pair(torch_id, torch_item_id);
 
     // Block-break's item drop (brief section 55) - still a direct 1:1
     // block->item mapping (Phase 17), not a loot-table system, just
@@ -868,6 +928,8 @@ int main() {
     const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
     int verify_craft_step = 0;
     const auto verify_craft_start = std::chrono::steady_clock::now();
+    const bool verify_torch = std::getenv("LCU_VERIFY_TORCH") != nullptr;
+    bool verify_torch_granted = false;
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -927,6 +989,22 @@ int main() {
             const lcu::f32 elapsed =
                 std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_move_start).count();
             input.set_down(lcu::platform::Action::MoveForward, elapsed < verify_move_seconds);
+        }
+        if (verify_torch) {
+            if (!verify_torch_granted) {
+                // Synthetic setup (see kVerifyTorchBreakFrame's doc
+                // comment above): nothing in this build's world drops a
+                // torch to pick up yet, so this hook grants one
+                // directly, the same way LCU_VERIFY_CRAFT's own setup
+                // breaks real blocks to seed its inventory state.
+                player_inventory.add_item(item_registry, {torch_item_id, 1});
+                verify_torch_granted = true;
+            }
+            input.set_down(lcu::platform::Action::Interact, frame == kVerifyTorchBreakFrame);
+            input.set_down(lcu::platform::Action::CycleHotbar,
+                            frame == kVerifyTorchCycleFrame1 || frame == kVerifyTorchCycleFrame2 ||
+                                frame == kVerifyTorchCycleFrame3);
+            input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyTorchPlaceFrame);
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -1342,6 +1420,17 @@ int main() {
                         update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
                     remesh_and_upload(split.chunk);
                     remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                    if (selected_placeable.block_id == torch_id) {
+                        // Real confirmation a placed light source actually
+                        // lit itself (Phase 34) - not test-only scaffolding,
+                        // this fires for any real torch placement, headless
+                        // verification included.
+                        const auto placed_light = world_light.block_light_at(
+                            split.chunk, static_cast<lcu::i32>(split.local.x), static_cast<lcu::i32>(split.local.y),
+                            static_cast<lcu::i32>(split.local.z));
+                        LCU_LOG_INFO("Placed game:torch at world ({}, {}, {}): block_light={}", place_pos.x,
+                                     place_pos.y, place_pos.z, placed_light.value_or(0));
+                    }
                     {
                         const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
                                                              static_cast<lcu::f32>(place_pos.y) + 0.5f,

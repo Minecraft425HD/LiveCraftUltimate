@@ -253,15 +253,31 @@ WorldVoxelPos step_cross_chunk(const WorldVoxelPos& pos, const i32 offset[3]) {
 // ground truth. Optional and defaulted so every caller that doesn't
 // care (most unit tests, the single-chunk-equivalent call sites) isn't
 // forced to pass one.
+//
+// Performance (Phase 34): the vast majority of steps in a real flood
+// stay within the popped cell's own chunk - only a step landing right
+// at a chunk's edge actually crosses one. An in-bounds fast path
+// avoids step_cross_chunk's floor-division arithmetic and, more
+// importantly, both of the two unordered_map lookups
+// (`chunks.chunk_at`/`world_light.chunk_light`) the general
+// cross-chunk-resolving path needs, for every in-chunk step - measured
+// via tools/benchmark's BM_Lighting_PlaceTorchAtChunkEdge/
+// BM_Lighting_UnplaceTorchAtChunkEdge to matter: this fast path is what
+// brought both under the brief's explicit 0.5ms budget (see
+// BUILD_STATUS.md for the real before/after numbers). The slow,
+// general path (unchanged) still handles every actual boundary
+// crossing.
 template <u32 EdgeLength, typename ChunkProviderT>
 void flood_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::BlockRegistry& registry,
                                     WorldLight<EdgeLength>& world_light, std::queue<WorldVoxelPos> queue,
                                     std::unordered_set<voxel::ChunkCoord>* touched_chunks = nullptr) {
+    constexpr i32 N = static_cast<i32>(EdgeLength);
+
     while (!queue.empty()) {
         const WorldVoxelPos pos = queue.front();
         queue.pop();
 
-        const LightStorage<EdgeLength>* light_here = world_light.find_chunk_light(pos.chunk);
+        LightStorage<EdgeLength>* light_here = world_light.find_chunk_light_mutable(pos.chunk);
         if (!light_here) {
             continue;
         }
@@ -269,24 +285,58 @@ void flood_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::Bl
         if (level <= 1) {
             continue;
         }
+        const u8 next_level = static_cast<u8>(level - 1);
+
+        // Fetched lazily (only the first time an in-chunk step actually
+        // needs it) - a seed cell whose every neighbor happens to cross
+        // a boundary never pays for this at all.
+        const voxel::ChunkStorage<EdgeLength>* pos_chunk_storage = nullptr;
 
         for (const auto& offset : kNeighborOffsets) {
-            const WorldVoxelPos next = step_cross_chunk<EdgeLength>(pos, offset);
-            const voxel::ChunkStorage<EdgeLength>* neighbor_chunk = chunks.chunk_at(next.chunk);
-            if (!neighbor_chunk) {
-                continue;
-            }
-            if (is_opaque(*neighbor_chunk, registry, next.x, next.y, next.z)) {
-                continue;
-            }
+            const i32 nx = static_cast<i32>(pos.x) + offset[0];
+            const i32 ny = static_cast<i32>(pos.y) + offset[1];
+            const i32 nz = static_cast<i32>(pos.z) + offset[2];
 
-            LightStorage<EdgeLength>& neighbor_light = world_light.chunk_light(next.chunk);
-            const u8 next_level = static_cast<u8>(level - 1);
-            if (next_level > neighbor_light.block_light(next.x, next.y, next.z)) {
-                neighbor_light.set_block_light(next.x, next.y, next.z, next_level);
-                queue.push(next);
-                if (touched_chunks && !(next.chunk == pos.chunk)) {
-                    touched_chunks->insert(next.chunk);
+            if (nx >= 0 && nx < N && ny >= 0 && ny < N && nz >= 0 && nz < N) {
+                // Fast path: stays within pos.chunk.
+                if (!pos_chunk_storage) {
+                    pos_chunk_storage = chunks.chunk_at(pos.chunk);
+                    if (!pos_chunk_storage) {
+                        break;  // Shouldn't happen (we already have real light data for this chunk) - stay honest.
+                    }
+                }
+                const u32 ux = static_cast<u32>(nx);
+                const u32 uy = static_cast<u32>(ny);
+                const u32 uz = static_cast<u32>(nz);
+                if (is_opaque(*pos_chunk_storage, registry, ux, uy, uz)) {
+                    continue;
+                }
+                if (next_level > light_here->block_light(ux, uy, uz)) {
+                    light_here->set_block_light(ux, uy, uz, next_level);
+                    queue.push({pos.chunk, ux, uy, uz});
+                }
+            } else {
+                // Slow path: this step genuinely crosses a chunk
+                // boundary - step_cross_chunk always resolves to a
+                // *different* chunk coordinate here (a real
+                // out-of-[0,N) local coordinate always shifts the
+                // owning chunk by the floor-division it applies).
+                const WorldVoxelPos next = step_cross_chunk<EdgeLength>(pos, offset);
+                const voxel::ChunkStorage<EdgeLength>* neighbor_chunk = chunks.chunk_at(next.chunk);
+                if (!neighbor_chunk) {
+                    continue;
+                }
+                if (is_opaque(*neighbor_chunk, registry, next.x, next.y, next.z)) {
+                    continue;
+                }
+
+                LightStorage<EdgeLength>& neighbor_light = world_light.chunk_light(next.chunk);
+                if (next_level > neighbor_light.block_light(next.x, next.y, next.z)) {
+                    neighbor_light.set_block_light(next.x, next.y, next.z, next_level);
+                    queue.push(next);
+                    if (touched_chunks) {
+                        touched_chunks->insert(next.chunk);
+                    }
                 }
             }
         }
@@ -323,11 +373,20 @@ void propagate_added_block_light_cross_chunk(const ChunkProviderT& chunks, const
 // darken or refill. `touched_chunks` (Phase 33) collects every chunk
 // (besides `coord`) either phase actually wrote a light value into -
 // see flood_block_light_cross_chunk's doc comment.
+// Performance (Phase 34): same in-chunk fast path as
+// flood_block_light_cross_chunk - see that function's doc comment.
+// Here it also means the darken phase's common step never touches
+// `chunks` (the block-data provider) at all, only `world_light`: an
+// in-bounds neighbor's "is there light data here" is answered directly
+// via the current node's own already-fetched LightStorage rather than
+// a second lookup into a different map.
 template <u32 EdgeLength, typename ChunkProviderT>
 void unpropagate_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::BlockRegistry& registry,
                                           WorldLight<EdgeLength>& world_light, voxel::ChunkCoord coord, u32 x, u32 y,
                                           u32 z, u8 old_level,
                                           std::unordered_set<voxel::ChunkCoord>* touched_chunks = nullptr) {
+    constexpr i32 N = static_cast<i32>(EdgeLength);
+
     struct RemovalNode {
         detail::WorldVoxelPos pos;
         u8 level;
@@ -346,26 +405,59 @@ void unpropagate_block_light_cross_chunk(const ChunkProviderT& chunks, const vox
             continue;
         }
 
-        for (const auto& offset : detail::kNeighborOffsets) {
-            const detail::WorldVoxelPos next = detail::step_cross_chunk<EdgeLength>(node.pos, offset);
-            const voxel::ChunkStorage<EdgeLength>* neighbor_chunk = chunks.chunk_at(next.chunk);
-            if (!neighbor_chunk) {
-                continue;
-            }
+        // node.pos.chunk always has real light data here: it's either
+        // `coord` itself (seeded above) or a chunk a prior darken step
+        // in this same call already wrote into - checked defensively
+        // rather than assumed.
+        LightStorage<EdgeLength>* node_light = world_light.find_chunk_light_mutable(node.pos.chunk);
+        if (!node_light) {
+            continue;
+        }
 
-            LightStorage<EdgeLength>& neighbor_light = world_light.chunk_light(next.chunk);
-            const u8 neighbor_level = neighbor_light.block_light(next.x, next.y, next.z);
-            if (neighbor_level == 0) {
-                continue;
-            }
-            if (neighbor_level < node.level) {
-                neighbor_light.set_block_light(next.x, next.y, next.z, 0);
-                removal_queue.push({next, neighbor_level});
-                if (touched_chunks && !(next.chunk == coord)) {
-                    touched_chunks->insert(next.chunk);
+        for (const auto& offset : detail::kNeighborOffsets) {
+            const i32 nx = static_cast<i32>(node.pos.x) + offset[0];
+            const i32 ny = static_cast<i32>(node.pos.y) + offset[1];
+            const i32 nz = static_cast<i32>(node.pos.z) + offset[2];
+
+            if (nx >= 0 && nx < N && ny >= 0 && ny < N && nz >= 0 && nz < N) {
+                // Fast path: stays within node.pos.chunk.
+                const u32 ux = static_cast<u32>(nx);
+                const u32 uy = static_cast<u32>(ny);
+                const u32 uz = static_cast<u32>(nz);
+                const u8 neighbor_level = node_light->block_light(ux, uy, uz);
+                if (neighbor_level == 0) {
+                    continue;
+                }
+                if (neighbor_level < node.level) {
+                    node_light->set_block_light(ux, uy, uz, 0);
+                    removal_queue.push({{node.pos.chunk, ux, uy, uz}, neighbor_level});
+                } else {
+                    refill_queue.push({node.pos.chunk, ux, uy, uz});
                 }
             } else {
-                refill_queue.push(next);
+                // Slow path: this step genuinely crosses a chunk
+                // boundary - see flood_block_light_cross_chunk's
+                // matching comment.
+                const detail::WorldVoxelPos next = detail::step_cross_chunk<EdgeLength>(node.pos, offset);
+                const voxel::ChunkStorage<EdgeLength>* neighbor_chunk = chunks.chunk_at(next.chunk);
+                if (!neighbor_chunk) {
+                    continue;
+                }
+
+                LightStorage<EdgeLength>& neighbor_light = world_light.chunk_light(next.chunk);
+                const u8 neighbor_level = neighbor_light.block_light(next.x, next.y, next.z);
+                if (neighbor_level == 0) {
+                    continue;
+                }
+                if (neighbor_level < node.level) {
+                    neighbor_light.set_block_light(next.x, next.y, next.z, 0);
+                    removal_queue.push({next, neighbor_level});
+                    if (touched_chunks) {
+                        touched_chunks->insert(next.chunk);
+                    }
+                } else {
+                    refill_queue.push(next);
+                }
             }
         }
     }

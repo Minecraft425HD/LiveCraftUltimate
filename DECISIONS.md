@@ -2126,3 +2126,110 @@ natural, well-scoped future addition if wanted.
 whether smooth lighting actually looks smooth (not blocky, not broken)
 on a real GPU/display - none of that is knowable from a code read or a
 headless Noop-backend run.
+
+## 2026-09-10 — game:torch is a solid opaque cube, not a transparent one (Phase 34)
+
+**Context:** Phase 34 adds the first real light-emitting placeable
+block. A torch's real-world shape (a thin cross/billboard) is not
+implemented anywhere in this codebase - `mesh_chunk_greedy` only ever
+meshes the **opaque** layer into real geometry; `ChunkMesh::transparent`
+and `::water` exist structurally (Phase 2) but are always empty, since
+no transparent-layer meshing pass has ever been written.
+
+**Decision:** register `game:torch` with `is_transparent = false` - a
+solid glowing cube occupying the full voxel, not a cross/billboard
+shape. Documented at length in-code at the registration site.
+
+**Rationale:** the alternative, `is_transparent = true`, would have
+been a real, dangerous trap: an `is_transparent` block is correctly
+excluded from the opaque mesh layer (that's what the flag is *for* -
+letting light and raycasts pass through), but since the transparent
+layer is never meshed, the block would render as **nothing at all** -
+invisible, despite having correct light-propagation and collision
+behavior. That would be exactly the kind of fake/incomplete feature
+this project's discipline forbids (brief section 96: no
+stubs/placeholders presented as working) - a torch you can place, that
+correctly lights the world, that you can walk into, but can never see.
+Caught and corrected before any verification run, not after.
+
+**Alternatives considered:** building a real transparent-layer mesher
+and a cross/billboard shape for the torch (rejected for this phase -
+real, substantial new meshing work, not what Phase 34's brief item
+asks for; a natural candidate for a dedicated future phase once more
+transparent/non-cube content exists to justify it, e.g. glass, foliage,
+water surfaces which already have an empty `ChunkMesh::water` layer
+waiting).
+
+**Consequence, honestly noted:** the placed torch in this build is
+a plain glowing cube, not the classic thin torch shape - visually
+wrong by Minecraft convention, but a real, correctly-lit, correctly-
+collidable, actually-visible block, which is the honest trade given
+what this phase's scope covers.
+
+## 2026-09-10 — Lighting benchmarks needed a dedicated Release build directory; a real BFS hot-path optimization followed (Phase 34)
+
+**Context:** Phase 34's brief item is explicit perf budgets for the
+cross-chunk lighting primitives: chunk-with-neighbors compute under
+2ms, single-torch place/unplace under 0.5ms each. The existing
+`tools/benchmark` binary is built inside `build/dev-bgfx`, whose only
+configured `CMAKE_BUILD_TYPE` is the project's own custom string
+`"Development"` (used elsewhere to gate debug-only behavior) - CMake
+does not recognize that string as one of its built-in types
+(`Debug`/`Release`/`RelWithDebInfo`/`MinSizeRel`), so none of the
+`CMAKE_CXX_FLAGS_<TYPE>` optimization flags for any built-in type ever
+apply. The first benchmark run confirmed this isn't theoretical: Google
+Benchmark itself printed `***WARNING*** Library was built as DEBUG.
+Timings may be affected` and reported numbers 20-40x slower than what a
+real optimized build later showed for the same code.
+
+**Decision:** create a separate, purpose-built benchmark build
+directory (`build/bench-release`,
+`-DCMAKE_BUILD_TYPE=Release -DLCU_BUILD_TOOLS=ON -DLCU_ENABLE_BGFX=OFF
+-DLCU_BUILD_CLIENT=OFF -DLCU_BUILD_SERVER=OFF -DLCU_BUILD_TESTS=OFF`)
+purely to get trustworthy timing numbers (confirmed `CMAKE_CXX_FLAGS_
+RELEASE:STRING=-O3 -DNDEBUG` in its cache), rather than either trusting
+the misleading debug numbers or trying to retrofit optimization flags
+onto the existing dev build type (which other phases' debug-assertion-
+gated behavior may depend on - out of scope to touch here).
+
+**Then a real optimization, not just a build-flag fix:** even under
+genuine `-O3`, `BM_Lighting_PlaceTorchAtChunkEdge`/`BM_Lighting_
+UnplaceTorchAtChunkEdge` still exceeded the 0.5ms budget (639us/767us).
+Root cause, found by reading the hot path: `flood_block_light_cross_
+chunk`/`unpropagate_block_light_cross_chunk` looked up **two** separate
+`unordered_map`s (the `ChunkProviderT`'s chunk-storage map and
+`WorldLight`'s per-chunk-light map) for every one of a popped cell's 6
+neighbor steps, plus ran `step_cross_chunk`'s floor-division arithmetic
+unconditionally - even though the overwhelming majority of BFS steps
+never leave the current chunk. Added an in-bounds fast path: a plain
+integer range check (`[0, EdgeLength)`) lets an in-chunk step reuse the
+already-held `LightStorage*`/`ChunkStorage*` pointers with zero hash
+lookups and zero floor-division, falling back to the original
+(`step_cross_chunk`-based) logic only for a genuine chunk-boundary
+crossing. This is a pure performance change with no intended behavior
+difference, verified as such: the full `ctest` suite (385/385 bgfx,
+382/382 non-bgfx, unchanged counts) passed unmodified before and after,
+including every cross-chunk-specific test individually re-run.
+Re-measured in `build/bench-release` after the fix: place 115,649 ns,
+unplace 99,158 ns - both now comfortably under the 500us budget (down
+from 639us/767us), and the compute-chunk-with-neighbors case (16,616
+ns) remained comfortably under its 2ms budget throughout.
+
+**Alternatives considered:** a lock-free/work-stealing scheduler change
+(rejected - the bottleneck was memory-access pattern, not scheduling,
+confirmed by reading the actual hot loop rather than guessing);
+reducing the light-emission radius or chunk edge length to hit the
+budget artificially (rejected - changes observable game behavior/
+content for a performance number, exactly the kind of trade this
+project's discipline avoids without being asked).
+
+**Known gap, left open on purpose:** the `CMAKE_BUILD_TYPE=
+"Development"` no-real-optimization issue is project-wide, not
+specific to lighting or to this benchmark - every other target
+(`VoxelClient`, `VoxelServer`, `VoxelTests`, and any other `tools/`
+binary) still builds unoptimized in `build/dev-bgfx`/`build/dev-nobgfx`
+today. Fixing that properly (deciding what `"Development"` *should*
+map to, and whether/how to add a real opt-in `Release` preset) is a
+build-system-wide decision outside this phase's torch/benchmark scope
+- flagged here for a dedicated future pass, not silently left
+undocumented.

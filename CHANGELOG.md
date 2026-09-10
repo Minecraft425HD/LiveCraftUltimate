@@ -2,7 +2,75 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34
+
+### Phase 34
+
+- **New content**: `game:torch` (light_emission=14, a solid glowing
+  cube - deliberately `is_transparent = false`, since `mesh_chunk_
+  greedy` only ever meshes the opaque layer; a transparent torch would
+  be correctly lit and completely invisible, a real fake-feature trap
+  avoided before it became a bug, see DECISIONS.md). Registered
+  identically on `VoxelClient`/`VoxelServer`, added to `placeable_
+  items`/`block_item_mapping`/`tracked_items`. New headless hook
+  `LCU_VERIFY_TORCH`: breaks the spawn block, grants one torch
+  directly (nothing drops one yet), cycles the hotbar to it, places it
+  into the hole, and logs the real post-place `block_light` value read
+  back through `WorldLight::block_light_at` - proving the full
+  place -> propagate -> query pipeline end to end. Verified via a real
+  run: `"Placed game:torch at world (0, 28, -1): block_light=14"`.
+- **Lighting benchmarks** (`tools/benchmark`, gated `LCU_BUILD_TOOLS`):
+  3 new Google Benchmark cases against the brief's own explicit perf
+  budgets (not the file's usual "numbers to profile against"):
+  `BM_Lighting_ComputeChunkWithNeighbors` (< 2ms), `BM_Lighting_
+  PlaceTorchAtChunkEdge`/`BM_Lighting_UnplaceTorchAtChunkEdge` (each
+  < 0.5ms, torch placed at the worst-case chunk-edge position).
+- **Build-configuration finding**: this project's only configured
+  `CMAKE_BUILD_TYPE` is the custom string `"Development"`, which CMake
+  does not recognize as a built-in type - no optimization flags are
+  ever applied (effectively `-O0`). Google Benchmark itself warned
+  `Library was built as DEBUG` on the first run. A dedicated `-DCMAKE_
+  CXX_FLAGS_RELEASE... -DCMAKE_BUILD_TYPE=Release` build directory
+  (`build/bench-release`) was created to get trustworthy numbers - see
+  DECISIONS.md. This is an existing project-wide gap (not introduced
+  this phase, not fixed this phase beyond this one benchmark
+  directory) worth a dedicated future pass.
+- **Real optimization made and verified**: under genuine `-O3`, the
+  place/unplace benchmarks still exceeded budget (639,123 ns / 639us
+  and 766,988 ns / 767us against a 500us budget). Root cause: the
+  cross-chunk BFS (`flood_block_light_cross_chunk`/`unpropagate_
+  block_light_cross_chunk`) paid up to ~13 `unordered_map` lookups
+  across two separate maps per popped cell, plus floor-division
+  arithmetic, for every one of 6 neighbor steps - even though the
+  overwhelming majority of steps stay within the same chunk as the
+  cell being processed. Added an in-bounds fast path: a plain integer
+  range check against `[0, EdgeLength)` lets an in-chunk step reuse
+  the already-held `LightStorage*`/`ChunkStorage*` pointers directly,
+  falling back to the original (`step_cross_chunk`) logic only for
+  genuine boundary crossings. Behavior-preserving by construction and
+  confirmed so: full `ctest` suite unchanged at 385/385 (bgfx) /
+  382/382 (non-bgfx) before and after. Re-measured after the fix:
+  `BM_Lighting_ComputeChunkWithNeighbors` 16,616 ns (well under 2ms),
+  `BM_Lighting_PlaceTorchAtChunkEdge` 115,649 ns (under 500us),
+  `BM_Lighting_UnplaceTorchAtChunkEdge` 99,158 ns (under 500us) - both
+  budgets now met, by a wide margin.
+- Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP, 600 server ticks, 36 chunks streamed,
+  zero warnings/errors) and real `LCU_VERIFY_TORCH`/`LCU_VERIFY_
+  BREAK_PLACE`/`LCU_VERIFY_CRAFT` headless runs (bgfx build) - all
+  pre-existing hooks byte-identical to Phase 33's behavior, confirming
+  the BFS optimization changed nothing observable.
+- `ctest` unchanged at 385/385 (bgfx) / 382/382 (non-bgfx) - no new
+  unit tests this phase (the BFS change is proven behavior-preserving
+  by the existing suite; the new content is proven by the real
+  `LCU_VERIFY_TORCH` run and the new benchmarks, not by new GoogleTest
+  cases).
+- Honestly scoped: **what a placed, lit torch actually looks like on a
+  real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  the `CMAKE_BUILD_TYPE="Development"` no-optimization gap remains
+  project-wide outside `build/bench-release`; a chunk loading after a
+  nearby light source's BFS already finished still isn't retroactively
+  relit/remeshed (Phase 35's job, next).
 
 ### Phase 33
 
