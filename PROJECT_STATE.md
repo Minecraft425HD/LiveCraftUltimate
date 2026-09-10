@@ -27,13 +27,14 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (item_crafted: EventBus's second real event)**, **Phase 25
 (macOS build audit)**, **Phase 26 (visible terrain: per-block/
 per-face colors + procedural shader noise)**, **Phase 27 (skybox +
-sun/moon)**, and **Phase 28 (renderer consumes real per-voxel light)**
-are done; see "Reality Audit" and "Last Completed Task" below for what
-they cover and what's next. A large, user-directed program (Phases
-26-42: visible terrain colors, skybox, cross-chunk global lighting with
-real performance constraints, procedural terrain with sea level at
-y=0, water, biomes, caves/ores, vegetation) is now in progress - see
-TASK_QUEUE.md for per-phase detail as each lands.
+sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**, and
+**Phase 29 (WorldLight data structure)** are done; see "Reality Audit"
+and "Last Completed Task" below for what they cover and what's next. A
+large, user-directed program (Phases 26-42: visible terrain colors,
+skybox, cross-chunk global lighting with real performance constraints,
+procedural terrain with sea level at y=0, water, biomes, caves/ores,
+vegetation) is now in progress - see TASK_QUEUE.md for per-phase detail
+as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -937,6 +938,34 @@ cross-chunk light doesn't exist yet (a chunk-boundary face
 unconditionally defaults to full-bright, honestly, not guessed) - see
 Phase 29-31; lighting isn't smoothed per-vertex yet - see Phase 33.
 
+**Phase 29 (WorldLight data structure)**: Phase 30/31's cross-chunk
+light propagation needs to read and write light in a *neighboring*
+chunk's `LightStorage`, not just its own - the prerequisite this phase
+adds. New `lcu::lighting::WorldLight<EdgeLength>` owns a `ChunkCoord ->
+LightStorage` map (replacing `client/main.cpp`'s Phase 6-era ad hoc
+`std::unordered_map<ChunkCoord, Light>`) and exposes `sky_light_at`/
+`block_light_at` queries that resolve a local coordinate outside
+`[0, EdgeLength)` into its real owning chunk, reusing `voxel::
+world_to_chunk_and_local`'s existing floor-division logic (the same
+helper `engine/world` already uses for block edits) rather than a
+second hand-written version of that arithmetic living inside lighting
+code. Both return `std::optional<u8>`: `std::nullopt` means "that
+chunk's light isn't computed" honestly, never a guessed brightness -
+the same discipline Phase 28's `mesh_chunk_greedy` boundary-face
+fallback already established.
+
+This phase is deliberately just the data structure and query surface -
+it does not itself propagate light across a chunk boundary. A torch
+near a chunk edge still stops exactly at that edge, identical to
+before this phase; Phase 30/31's BFS is what will actually walk across
+the boundary and write into the neighbor. 9 new unit tests (in-bounds
+lookups, positive- and negative-direction cross-chunk resolution,
+not-loaded-neighbor returns `std::nullopt`). Verified via real
+`LCU_VERIFY_BREAK_PLACE` runs (both bgfx and non-bgfx builds) producing
+byte-identical log output to Phase 28 - confirming this is a real,
+behavior-preserving refactor. `ctest` 371/371 (bgfx, up from 362) /
+368/368 (non-bgfx, up from 359).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1412,15 +1441,18 @@ before content/polish):
    real bugs found and fixed)~~, ~~Phase 28 (renderer consumes real
    per-voxel light, duck-typed LightStorageT template parameter to
    avoid a circular engine/voxel<->engine/lighting dependency, a real
-   vertex-stride bug found and fixed)~~ - see PROJECT_STATE.md "Phase
-   25"/"Phase 26"/"Phase 27"/"Phase 28" above and TASK_QUEUE.md for
-   full per-phase detail. Next: Phase 29 (WorldLight data structure -
-   prerequisite for the cross-chunk sky/block light work in Phases
-   30-32), then Phase 33 (VoxelClient integration + smooth lighting),
-   Phase 34 (torch block + lighting benchmarks), Phase 35 (unload marks
-   neighbors dirty), entity rendering/debug overlay (36), then the
-   worldgen phases (37-41: sea level, water, continents, biomes,
-   caves/ores, vegetation), then docs (42).
+   vertex-stride bug found and fixed)~~, ~~Phase 29 (WorldLight data
+   structure - cross-chunk-aware query surface, no propagation yet)~~ -
+   see PROJECT_STATE.md "Phase 25"/"Phase 26"/"Phase 27"/"Phase 28"/
+   "Phase 29" above and TASK_QUEUE.md for full per-phase detail. Next:
+   Phase 30 (sky-light cross-chunk propagation, built on Phase 29's
+   WorldLight), Phase 31 (block-light cross-chunk propagation), Phase
+   32 (boundary buffer, optional), then Phase 33 (VoxelClient
+   integration + smooth lighting), Phase 34 (torch block + lighting
+   benchmarks), Phase 35 (unload marks neighbors dirty), entity
+   rendering/debug overlay (36), then the worldgen phases (37-41: sea
+   level, water, continents, biomes, caves/ores, vegetation), then docs
+   (42).
 7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained

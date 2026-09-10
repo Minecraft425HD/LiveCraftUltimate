@@ -28,6 +28,7 @@
 #include "lcu/jobs/job_system.h"
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
+#include "lcu/lighting/world_light.h"
 #include "lcu/network/address.h"
 #include "lcu/network/connection.h"
 #include "lcu/network/fragmentation.h"
@@ -483,13 +484,15 @@ int main() {
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_meshes;
 #endif
 
-    // Per-chunk light data (brief section 24) - CPU-side only, not
-    // rendering-gated like gpu_meshes: nothing samples this into the
-    // shader yet (the chunk shader is flat directional+ambient lit, no
-    // per-vertex/per-voxel light lookup - see DECISIONS.md), but the
-    // data itself is real and kept correct through every block edit
-    // below, ready for a renderer to consume once one exists.
-    std::unordered_map<lcu::voxel::ChunkCoord, lcu::lighting::Light> chunk_light;
+    // Per-chunk light data (brief section 24), fed into meshing since
+    // Phase 28 (real per-voxel light in the chunk shader). A real
+    // lcu::lighting::WorldLight (Phase 29) rather than a bare
+    // std::unordered_map<ChunkCoord, Light> - still single-chunk-scoped
+    // in what it computes today (see compute_initial_light below;
+    // cross-chunk propagation is Phase 30/31), but its find_chunk_light/
+    // sky_light_at/block_light_at query surface is exactly what those
+    // phases' cross-chunk BFS will need, not reinvented per call site.
+    lcu::lighting::DefaultWorldLight world_light;
 
     // Full initial light computation for one just-loaded chunk (block
     // light from any emitters, plus a straight top-down sky light pass -
@@ -500,7 +503,7 @@ int main() {
         if (!chunk) {
             return;
         }
-        lcu::lighting::Light& light = chunk_light[coord];
+        lcu::lighting::Light& light = world_light.chunk_light(coord);
         lcu::lighting::compute_block_light(*chunk, block_registry, light);
         lcu::lighting::compute_sky_light(*chunk, block_registry, light);
     };
@@ -514,11 +517,11 @@ int main() {
     const auto update_lighting_for_edit = [&](lcu::voxel::ChunkCoord coord, lcu::voxel::LocalBlockCoord local,
                                                lcu::voxel::BlockId old_id, lcu::voxel::BlockId new_id) {
         const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
-        auto light_it = chunk_light.find(coord);
-        if (!chunk || light_it == chunk_light.end()) {
+        lcu::lighting::Light* light_ptr = world_light.find_chunk_light_mutable(coord);
+        if (!chunk || !light_ptr) {
             return;
         }
-        lcu::lighting::Light& light = light_it->second;
+        lcu::lighting::Light& light = *light_ptr;
 
         const lcu::u8 old_emission = block_registry.definition_of(old_id).light_emission;
         const lcu::u8 new_emission = block_registry.definition_of(new_id).light_emission;
@@ -590,12 +593,12 @@ int main() {
         // the light-less (full-bright) mesh_chunk_greedy overload only
         // if that invariant is somehow violated, rather than asserting/
         // crashing on what would be a genuine ordering bug elsewhere.
-        const auto light_it = chunk_light.find(coord);
+        const lcu::lighting::Light* light_ptr = world_light.find_chunk_light(coord);
         lcu::voxel::ChunkMesh mesh;
         const auto job = job_system.submit(
             [&] {
-                mesh = light_it != chunk_light.end() ? lcu::voxel::mesh_chunk_greedy(*chunk, block_registry, light_it->second)
-                                                      : lcu::voxel::mesh_chunk_greedy(*chunk, block_registry);
+                mesh = light_ptr ? lcu::voxel::mesh_chunk_greedy(*chunk, block_registry, *light_ptr)
+                                  : lcu::voxel::mesh_chunk_greedy(*chunk, block_registry);
             },
             lcu::jobs::JobPriority::High);
         job_system.wait(job);
@@ -634,10 +637,9 @@ int main() {
         // solid/air boundary convention) should read full sky light.
         const auto open_air_split = lcu::voxel::world_to_chunk_and_local(
             {0, lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 5, 0}, lcu::voxel::Chunk::kEdgeLength);
-        if (const auto it = chunk_light.find(open_air_split.chunk); it != chunk_light.end()) {
-            LCU_LOG_INFO(
-                "Sky light 5 blocks above spawn column: {}",
-                it->second.sky_light(open_air_split.local.x, open_air_split.local.y, open_air_split.local.z));
+        if (const auto sky_light = world_light.sky_light_at(open_air_split.chunk, open_air_split.local.x,
+                                                              open_air_split.local.y, open_air_split.local.z)) {
+            LCU_LOG_INFO("Sky light 5 blocks above spawn column: {}", *sky_light);
         }
     }
 

@@ -21,6 +21,7 @@ add_executable(VoxelTests
     items/recipe_registry_test.cpp
     ecs/registry_test.cpp
     lighting/propagation_test.cpp
+    lighting/world_light_test.cpp
     game/systems/ai_wander_system_test.cpp
     game/systems/day_night_cycle_test.cpp
     game/systems/replication_protocol_test.cpp

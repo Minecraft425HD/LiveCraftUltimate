@@ -1863,3 +1863,52 @@ Cross-chunk light (a block-boundary face reading a neighboring chunk's
 actual light instead of defaulting full-bright) is explicitly Phase
 29-31's job, not this phase's; smooth (interpolated) lighting is Phase
 33's.
+
+## 2026-09-10 — WorldLight is a query surface, not a propagation algorithm (Phase 29)
+
+**Context:** Phase 30 (sky) and Phase 31 (block) need to propagate
+light *across* chunk boundaries - a BFS that, at a chunk's edge, has to
+read and write light in the *neighboring* chunk's own `LightStorage`.
+Building that BFS directly against `client/main.cpp`'s existing ad hoc
+`std::unordered_map<ChunkCoord, Light>` would mean reimplementing
+"resolve an out-of-range local coordinate into its owning chunk" (and
+its floor-division edge cases - see `world_to_chunk_and_local`'s own
+doc comment on negative coordinates) inline inside that BFS, with no
+separate place to unit-test the resolution logic on its own.
+
+**Decision:** Phase 29 adds `lcu::lighting::WorldLight<EdgeLength>`
+now, purely as a data structure and query surface, before Phase 30/31
+write any actual cross-chunk propagation code against it. It owns the
+`ChunkCoord -> LightStorage` map (replacing `client/main.cpp`'s bare
+one) and exposes `sky_light_at`/`block_light_at` that accept a local
+coordinate outside `[0, EdgeLength)` and internally convert it to a
+`BlockWorldCoord` to reuse `voxel::world_to_chunk_and_local` - the
+exact same floor-division helper `engine/world` already uses for block
+edits, rather than a second, independently-written version of the same
+arithmetic living inside lighting code. Both return `std::optional<u8>`:
+`std::nullopt` means "that chunk's light isn't computed" (unloaded, or
+loaded but the caller hasn't lit it yet), never a guessed brightness -
+the same "report real data or honestly don't know" discipline
+`mesh_chunk_greedy`'s own boundary-face fallback (Phase 28) already
+established for chunk-edge light.
+
+**This phase deliberately does not propagate anything across a chunk
+boundary.** `sky_light_at`/`block_light_at` can *read* a neighbor
+chunk's already-computed light; nothing yet *writes* light that
+originated in one chunk into another chunk's `LightStorage`. A torch
+near a chunk edge still stops exactly at that edge today, identically
+to before this phase - Phase 30/31's BFS is what will actually walk
+across the boundary and write into the neighbor. Splitting "the query
+surface" from "the algorithm that uses it" into separate phases (with
+this phase's own real tests covering only the query surface: in-bounds
+lookups, positive- and negative-direction cross-chunk resolution, and
+the not-loaded-neighbor case) keeps each phase's own verification
+honest about what it actually changed, rather than one large phase
+where a real bug in either half would be hard to isolate.
+
+**`chunk_light`/`chunk_at` naming split, matching an existing
+convention:** `WorldLight::find_chunk_light` (const) and
+`find_chunk_light_mutable` (non-const) mirror `engine/world::World`'s
+own `chunk_at`/`chunk_at_mutable` split, rather than classic C++
+`const`/non-`const` overloading of the same name - consistency with an
+established pattern already in this codebase, not a new convention.

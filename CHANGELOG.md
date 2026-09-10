@@ -2,7 +2,41 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29
+
+### Phase 29
+
+- New `lcu::lighting::WorldLight<EdgeLength>` (`engine/lighting/include/
+  lcu/lighting/world_light.h`): an owning `ChunkCoord -> LightStorage`
+  map plus boundary-aware `sky_light_at`/`block_light_at` queries that
+  resolve a local coordinate outside `[0, EdgeLength)` into its real
+  owning neighbor chunk (reusing `voxel::world_to_chunk_and_local`'s
+  floor-division logic), returning `std::optional<u8>` - real data or
+  honestly "don't know" (an unloaded/unlit neighbor), never a guess.
+  This is the prerequisite data structure Phase 30 (sky) and Phase 31
+  (block) cross-chunk propagation build on - it does not itself
+  propagate light across chunks yet.
+- `client/main.cpp`'s ad hoc `std::unordered_map<ChunkCoord, Light>
+  chunk_light` (Phase 6) replaced with a real `DefaultWorldLight`; the
+  "sky light 5 blocks above spawn" startup log now goes through
+  `sky_light_at` instead of a hand-rolled `.find()`/`.end()` iterator
+  lookup.
+- 9 new unit tests, including explicit positive- and negative-direction
+  cross-chunk boundary resolution and the "neighbor not loaded returns
+  nullopt" case.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build and a real
+  headless `LCU_VERIFY_BREAK_PLACE` run (both bgfx and non-bgfx
+  configs) - byte-identical log output to Phase 28 (`"Sky light 5
+  blocks above spawn column: 15"`), confirming this is a real,
+  behavior-preserving refactor, not just new code that happens to
+  compile.
+- `ctest` 371/371 (bgfx, up from 362) / 368/368 (non-bgfx, up from 359).
+- Honestly scoped: light still doesn't actually cross a chunk boundary
+  yet - `sky_light_at`/`block_light_at` can *query* a neighbor chunk's
+  light, but nothing yet *writes* light that originated in one chunk
+  into another (that's Phase 30/31); `mesh_chunk_greedy`'s own
+  boundary-face handling (Phase 28) is unchanged, still defaulting to
+  full-bright at a chunk edge.
 
 ### Phase 28
 

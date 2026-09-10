@@ -922,6 +922,56 @@ Cross-chunk light doesn't exist yet - a chunk-boundary face
 unconditionally defaults to full-bright, honestly, not guessed (Phase
 29-31's job); lighting isn't smoothed per-vertex yet (Phase 33).
 
+## Phase 29 — WorldLight-Datenstruktur (WorldLight data structure)
+
+Prerequisite for Phase 30 (sky) / Phase 31 (block) cross-chunk light
+propagation: a BFS that crosses a chunk boundary needs to read and
+write light in a *neighboring* chunk's `LightStorage`, which a
+per-chunk-only map (or a bare `std::unordered_map<ChunkCoord, Light>`)
+can't do without every caller reimplementing chunk-boundary coordinate
+resolution itself.
+
+- [x] New `lcu::lighting::WorldLight<EdgeLength>` - an owning
+  `ChunkCoord -> LightStorage` map plus `sky_light_at`/`block_light_at`
+  queries that resolve a local coordinate outside `[0, EdgeLength)`
+  into its real owning chunk, reusing `voxel::world_to_chunk_and_local`
+  (the same floor-division helper `engine/world` already uses for block
+  edits) rather than a second hand-written version of that arithmetic.
+- [x] Both queries return `std::optional<u8>`: `std::nullopt` means
+  "that chunk's light isn't computed" (not loaded, or loaded but not
+  yet lit) - honestly, never a guessed brightness. Matches the same
+  discipline `mesh_chunk_greedy`'s own boundary-face fallback (Phase
+  28) already established for chunk-edge light.
+- [x] `find_chunk_light`/`find_chunk_light_mutable` naming mirrors
+  `engine/world::World`'s existing `chunk_at`/`chunk_at_mutable` split
+  - consistency with an established convention, not a new one.
+- [x] `client/main.cpp`'s Phase 6-era ad hoc
+  `std::unordered_map<ChunkCoord, Light> chunk_light` replaced with a
+  real `DefaultWorldLight world_light` - every call site (initial light
+  compute, per-edit incremental update, meshing, the startup "sky light
+  above spawn" debug log) now goes through the new type's real API.
+- [x] Deliberately does NOT propagate light across a chunk boundary
+  yet - a torch near a chunk edge still stops exactly at that edge,
+  identical to before this phase. Phase 30/31's BFS is what will
+  actually walk across the boundary and write into the neighbor; this
+  phase is only the data structure and query surface those phases
+  build on.
+- [x] 9 new unit tests: in-bounds same-chunk lookup, positive- and
+  negative-direction cross-chunk boundary resolution, not-loaded-
+  neighbor returns `std::nullopt`, get-or-create/find/remove map
+  hygiene.
+- [x] Verified via real `LCU_VERIFY_BREAK_PLACE` runs (both bgfx and
+  non-bgfx builds): byte-identical log output to Phase 28
+  (`"Sky light 5 blocks above spawn column: 15"`), confirming this is a
+  real, behavior-preserving refactor, not just new code that happens to
+  compile.
+
+`ctest` 371/371 (bgfx) / 368/368 (non-bgfx), up from 362/359.
+
+Honestly scoped: light still doesn't actually cross a chunk boundary -
+that's Phase 30 (sky)/Phase 31 (block)'s job, built on this phase's
+data structure.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
