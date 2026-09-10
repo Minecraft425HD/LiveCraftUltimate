@@ -535,6 +535,65 @@ both client and server), then further content/gameplay systems.
 
 ---
 
+## Phase 22 — Data-driven block-id-to-item-id mapping (post-original-queue; closes Phase 19's remaining honest gap)
+
+Phase 19 generalized the server's inventory bookkeeping to cover
+grass/dirt alongside stone, but the lookup underneath it -
+`item_for_block` on the server, `grant_item_for_broken_block` on the
+client - was still three explicit `if (block_id == X)` checks, one per
+block, hand-duplicated between the two files and needing a matching
+edit in both places for every new item-backed block added.
+
+- [x] New `game::items::BlockItemMapping` (`game/items/`, a new
+  gameplay-layer module alongside `game/components`/`game/systems`,
+  matching the GAME -> ENGINE layering `ARCHITECTURE.md` already
+  documents) - a small `register_pair(block_id, item_id)`/
+  `item_for_block(block_id)` table, `kNoItemId` for anything
+  unregistered. No engine-level change needed: `Lcu::EngineCore`
+  already transitively provides both `lcu::voxel::BlockId` and
+  `lcu::items::ItemId` to `game/`.
+- [x] `VoxelClient`'s `grant_item_for_broken_block` and `VoxelServer`'s
+  `item_for_block` both now populate the same table shape (three
+  `register_pair` calls right after each block/item pair is
+  registered) and do a single lookup instead of their own hardcoded
+  chain - the two are still independently populated (client and server
+  are separate processes with separate `ItemRegistry` instances, same
+  as every other piece of content each side registers), but the *logic
+  shape* is now identical and adding a fourth pair is one call in each,
+  not a new `if` branch in each.
+- [x] 4 new unit tests (`BlockItemMapping.*`): unmapped block returns
+  `kNoItemId`, a registered pair round-trips, re-registering a block id
+  overwrites its previous mapping, and multiple blocks can map to the
+  same item (proving the table isn't accidentally 1:1-only, even though
+  today's actual content happens to be).
+- [x] Verified via a real single-player run and a real two-process
+  networked run - both reproduce the exact same log lines Phase 21's
+  own verification produced (`"Picked up 1 game:grass..."`,
+  `"Applied server BlockChange at world (0, 29, -1): block_id=2"`),
+  confirming the refactor changed *how* the lookup works, not *what* it
+  returns - a true refactor, not a behavior change.
+
+`ctest` now 344/344 (non-bgfx, up from 340) / 347/347 (bgfx, up from
+343) - the 4 new `BlockItemMapping` tests.
+
+Honestly scoped: client and server still each maintain their own
+separate table populated from their own separate content registration
+(no cross-process sync of the mapping itself - same "must agree by
+construction" simplification every other piece of shared content in
+this project already carries, see NETWORKING.md); still not loaded
+from an external data file - "data-driven" here means a real runtime
+table populated by code, matching how `BlockRegistry`/`ItemRegistry`
+themselves are "datadriven" (in-code registration, not external
+config), not a JSON/config-file content pipeline (a separate, larger
+piece of future work if modding ever needs it).
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task": further content/gameplay systems (a real crafting-UI caller for
+`RecipeRegistry`, more block/item variety), then modding depth, then
+platform verification, then performance work, then UI/audio polish.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet
@@ -785,15 +844,29 @@ client-selected non-stone block converges server-authoritatively for
 the first time). Still no graphical hotbar - text log only, same
 current state as the debug overlay.
 
+Phase 22 (data-driven block-id-to-item-id mapping, post-queue) closes
+Phase 19's remaining honest gap: a new `game::items::BlockItemMapping`
+(`game/items/`) replaces the hardcoded `if (block_id == X)` chains
+`VoxelClient` and `VoxelServer` each carried since Phase 17-19 with a
+real `register_pair`/`item_for_block` table - adding a new item-backed
+block is now one call per side, not a new branch in two files kept in
+sync by hand. 4 new unit tests. Verified via real single-player and
+two-process networked runs reproducing Phase 21's exact same log
+lines, confirming the refactor changed how the lookup works, not what
+it returns. `ctest` 344/344 (non-bgfx) / 347/347 (bgfx).
+
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
-crafting-UI caller; item drops are a direct, hardcoded 1:1 block->item
-mapping (stone/grass/dirt, both client- and now server-side as of Phase
-19), not a data-driven table or a loot-table system; placing a block
-now selects among stone/grass/dirt via a plain cycled index (Phase 21),
-not a graphical hotbar UI (no on-screen slot rendering/selection
-highlight yet - needs `engine/ui`'s texture-atlas work); worldgen still
-has no climate/biome/caves/ores/structures/
+crafting-UI caller; item drops are now looked up through a real
+`game::items::BlockItemMapping` table (Phase 22) rather than hardcoded
+`if` chains, but that table is still populated from three explicit
+`register_pair` calls per process (client and server each maintain
+their own, matching content by construction, not synced), not loaded
+from an external data file, and still isn't a loot-table system;
+placing a block selects among stone/grass/dirt via a plain cycled index
+(Phase 21), not a graphical hotbar UI (no on-screen slot rendering/
+selection highlight yet - needs `engine/ui`'s texture-atlas work);
+worldgen still has no climate/biome/caves/ores/structures/
 vegetation (brief section 21's later pipeline stages - every column
 uses the same three block ids regardless of position); lighting is
 single-chunk scoped (no cross-chunk

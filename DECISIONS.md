@@ -1399,3 +1399,53 @@ server-authoritative path for a client-selected non-stone block was
 already correct, just never previously exercised by a real client
 request, which the real two-process verification run for this phase
 now confirms directly.
+
+## 2026-09-10 — BlockItemMapping lives in game/items, not engine/items or engine/voxel (Phase 22)
+
+**Context:** Phase 19 left `item_for_block` (server) and
+`grant_item_for_broken_block` (client) as three explicit
+`if (block_id == X)` checks each, honestly flagged as "won't scale
+past a handful more blocks." The fix is a real lookup table associating
+a `lcu::voxel::BlockId` with a `lcu::items::ItemId` - but `engine/voxel`
+and `engine/items` are deliberately independent modules (neither
+depends on the other, confirmed by their CMakeLists: both link only
+`Lcu::Core`), so a type that references both block and item ids can't
+live inside either without creating a new cross-engine-module
+dependency neither currently has or needs for anything else.
+
+**Decision:** Add `game::items::BlockItemMapping` under a new
+`game/items/` directory instead - gameplay-layer content wiring a
+block registry to an item registry, the same GAME -> ENGINE layering
+`game/systems` (AI wander, day/night) already follows per
+ARCHITECTURE.md, and one of the exact placeholder directories
+`game/CMakeLists.txt` already named as "populated once their
+respective phases give them real content." No new engine-level link
+dependency was needed either: `Lcu::EngineCore` (which `LcuGame` already
+links) already aggregates `Lcu::Voxel` and `Lcu::Items` transitively,
+so `game/items/block_item_mapping.h` can include both `lcu/voxel/
+block_id.h` and `lcu/items/item_id.h` for free.
+
+**Why client and server each keep their own table instead of sharing
+one instance or syncing it over the network:** they're separate
+processes with separate `ItemRegistry`/`BlockRegistry` instances
+already (each independently registers "game:stone" etc. and gets
+whatever numeric ids its own registration order produces) - the
+mapping table is just one more piece of content each side already
+builds independently and must agree on by construction, the same
+simplification every other piece of shared game content in this
+project carries (see NETWORKING.md "mod-registered block/item ids
+aren't synced"). Building real cross-process sync for just this one
+table, while everything else it depends on (the registries themselves)
+still isn't synced, would be solving a smaller problem than the one
+that actually exists.
+
+**Why "data-driven" here doesn't mean loaded from a file:** the brief
+task was named "data-driven," and this delivers a real runtime
+association table (data) built and queried through a small API
+(`register_pair`/`item_for_block`), not a compile-time `if` chain -
+matching how `BlockDefinition`/`ItemDefinition` themselves are already
+called "datadriven" throughout this project despite being populated by
+C++ struct literals, not JSON. An external config-file pipeline is
+real, larger future work (relevant once modding needs to declare
+block/item associations without recompiling), not something this
+phase's actual gap required.

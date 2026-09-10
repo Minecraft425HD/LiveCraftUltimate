@@ -20,10 +20,11 @@ edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
 **Phase 17 (surface/subsurface terrain content)**, **Phase 18 (item
 mappings for grass/dirt)**, **Phase 19 (server-side inventory
 extended past game:stone)**, **Phase 20 (interest-scoped chunk
-unloading, real chunk persistence, disconnect detection)**, and
-**Phase 21 (hotbar item selection for placing grass/dirt)** are done;
-see "Reality Audit" and "Last Completed Task" below for what they
-cover and what's next.
+unloading, real chunk persistence, disconnect detection)**, **Phase 21
+(hotbar item selection for placing grass/dirt)**, and **Phase 22
+(data-driven block-id-to-item-id mapping)** are done; see "Reality
+Audit" and "Last Completed Task" below for what they cover and what's
+next.
 
 ## Reality Audit (2026-09-10)
 
@@ -651,6 +652,56 @@ loop and every other `Action`-keyed test already generalize to the new
 enumerator automatically. `ctest` unchanged at 343/343 (bgfx) / 340/340
 (non-bgfx).
 
+**Phase 22 (data-driven block-id-to-item-id mapping)**: closed Phase
+19's remaining honest gap - `item_for_block` (server) and
+`grant_item_for_broken_block` (client) were both still three explicit
+`if (block_id == X)` checks, one per block, hand-duplicated between
+the two files and needing a matching edit in both for every new
+item-backed block.
+
+New `game::items::BlockItemMapping` (`game/items/` - a new
+gameplay-layer module alongside `game/components`/`game/systems`,
+matching the GAME -> ENGINE layering `ARCHITECTURE.md` already
+documents, not an engine-level primitive since it's gameplay content
+wiring a block registry to an item registry): a small
+`register_pair(block_id, item_id)`/`item_for_block(block_id)` table,
+`kNoItemId` for anything unregistered. No new engine-level dependency
+needed - `Lcu::EngineCore` already transitively provides both
+`lcu::voxel::BlockId` and `lcu::items::ItemId` to `game/`.
+
+`VoxelClient`'s `grant_item_for_broken_block` and `VoxelServer`'s
+`item_for_block` both now populate the same table shape (three
+`register_pair` calls right after each block/item pair is registered)
+and do a single lookup instead of their own hardcoded chain. Client
+and server still each maintain their own separate table populated from
+their own separate content registration - no cross-process sync of the
+mapping itself, the same "must agree by construction" simplification
+every other piece of shared content in this project already carries
+(see NETWORKING.md) - but the *logic shape* is now identical, and
+adding a fourth block/item pair from here on is one `register_pair`
+call per side, not a new `if` branch in each.
+
+4 new unit tests (`BlockItemMapping.*`): unmapped block returns
+`kNoItemId`, a registered pair round-trips, re-registering a block id
+overwrites its previous mapping, and multiple blocks can map to the
+same item (proving the table isn't accidentally 1:1-only, even though
+today's actual content happens to be). `ctest` now 344/344 (non-bgfx,
+up from 340) / 347/347 (bgfx, up from 343).
+
+Verified via a real single-player run and a real two-process networked
+run - both reproduce the exact same log lines Phase 21's own
+verification produced ("Picked up 1 game:grass...", "Applied server
+BlockChange at world (0, 29, -1): block_id=2"), confirming this was a
+true refactor (changed *how* the lookup works) with zero behavior
+change (*what* it returns is identical).
+
+Honestly scoped: not loaded from an external data file - "data-driven"
+here means a real runtime table populated by code, matching how
+`BlockRegistry`/`ItemRegistry` themselves are "datadriven" (in-code
+registration, not external config), not a JSON/config-file content
+pipeline (a separate, larger piece of future work if modding ever
+needs one).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -663,11 +714,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 343/343 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 347/347 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 340/340 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 344/344 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -847,9 +898,15 @@ None currently tracked.
   tracked item) after every `BlockAction`, closing the "unrefunded on
   rejection" gap for `game:stone`/`game:grass`/`game:dirt` alike. What
   none of these phases covers: any block/item beyond those three isn't
-  inventory-gated (no general, data-driven block-id-to-item-id mapping
-  - `item_for_block` is three explicit `if` checks, not configuration),
-  server-side inventory has no persistence across a disconnect, and the
+  inventory-gated - ~~no general, data-driven block-id-to-item-id
+  mapping, `item_for_block` is three explicit `if` checks, not
+  configuration~~ **Fixed** (Phase 22): both sides now use a real
+  `game::items::BlockItemMapping` table instead (see PROJECT_STATE.md
+  "Phase 22" above) - still only three pairs actually registered today,
+  so "any block/item beyond those three" remains accurate, just via a
+  table that scales to a fourth pair with one call instead of a new
+  branch. Server-side inventory has no persistence across a disconnect,
+  and the
   edit history itself is unbounded for the server process's lifetime
   rather than compacted against persisted state (see NETWORKING.md).
   The shared `World`'s loaded-chunk set does now shrink back down
@@ -1065,10 +1122,13 @@ before content/polish):
    CycleHotbar` lets the player choose which of stone/grass/dirt
    `PlaceBlock` places next - see PROJECT_STATE.md "Phase 21" above.
    Still no graphical hotbar UI (log-line-only selection feedback).
-3. **A general, data-driven block-id-to-item-id mapping**, closing
-   Phase 19's remaining honest gap: `item_for_block` on both client and
-   server is still three explicit `if` checks, not configuration -
-   fine for three blocks, won't scale past a handful more.
+3. ~~A general, data-driven block-id-to-item-id mapping~~ **Done
+   (Phase 22)**: a new `game::items::BlockItemMapping` table replaces
+   the hardcoded `if` chains on both client and server - see
+   PROJECT_STATE.md "Phase 22" above. Still only three pairs actually
+   registered (stone/grass/dirt) and each process populates its own
+   table independently (not synced), but adding a fourth is now one
+   `register_pair` call per side, not a new branch in two files.
 4. Continue down brief section 10's list after that: further
    content/gameplay systems (a real crafting-UI caller for the
    already-implemented `RecipeRegistry`, more block/item variety), then

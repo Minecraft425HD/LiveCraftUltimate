@@ -2,7 +2,34 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22
+
+### Phase 22
+
+- New `game::items::BlockItemMapping` (`game/items/`) - a real
+  `register_pair(block_id, item_id)`/`item_for_block(block_id)` table,
+  closing Phase 19's remaining honest gap: `item_for_block` (server)
+  and `grant_item_for_broken_block` (client) were both still three
+  explicit `if (block_id == X)` checks, one per block, hand-duplicated
+  between the two files.
+- `VoxelClient`/`VoxelServer` both now populate the same table shape
+  (three `register_pair` calls right after each block/item pair is
+  registered) and do a single lookup instead of their own hardcoded
+  chain - adding a fourth item-backed block is now one call per side.
+- 4 new unit tests (`BlockItemMapping.*`): unmapped block returns
+  `kNoItemId`, a registered pair round-trips, re-registering a block id
+  overwrites its previous mapping, multiple blocks can map to the same
+  item.
+- Verified via a real single-player run and a real two-process
+  networked run reproducing Phase 21's exact same log lines - a true
+  refactor, zero behavior change.
+- `ctest` now 344/344 (non-bgfx, up from 340) / 347/347 (bgfx, up from
+  343).
+- Honestly scoped: client and server still each maintain their own
+  separate table populated independently (not synced across the
+  network); still not loaded from an external data file - a real
+  runtime table populated by code, not a JSON/config-file content
+  pipeline.
 
 ### Phase 21
 

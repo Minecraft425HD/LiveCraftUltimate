@@ -14,6 +14,7 @@
 
 #include "game/components/ai_wander.h"
 #include "game/components/position.h"
+#include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/replication_protocol.h"
 #include "lcu/core/log.h"
@@ -379,22 +380,23 @@ int main(int argc, char** argv) {
     // forever.
     std::vector<protocol::BlockChange> block_change_history;
 
-    // Direct 1:1 block->item mapping (brief section 76/98 - no general
-    // data-driven table exists, same simplification VoxelClient's own
-    // grant_item_for_broken_block carries, see DECISIONS.md "Phase
-    // 17"/"Phase 19"). Returns kNoItemId for anything else (mod content
-    // included) - not every block has to be item-backed.
+    // Data-driven block->item mapping (Phase 22, closing this file's
+    // own remaining honest gap: `item_for_block` used to be three
+    // explicit `if` checks, one per block, that had to be extended by
+    // hand every time a new item-backed block was added - and kept in
+    // sync with VoxelClient's own identical chain by hand too. Same
+    // `game::items::BlockItemMapping` table VoxelClient now uses,
+    // populated with the same three pairs (this server's own
+    // stone/grass/dirt ItemIds, not shared with the client process -
+    // see DECISIONS.md "server connection model"). Returns kNoItemId
+    // for anything else (mod content included) - not every block has
+    // to be item-backed.
+    game::items::BlockItemMapping block_item_mapping;
+    block_item_mapping.register_pair(stone_id, stone_item_id);
+    block_item_mapping.register_pair(grass_id, grass_item_id);
+    block_item_mapping.register_pair(dirt_id, dirt_item_id);
     const auto item_for_block = [&](lcu::voxel::BlockId block_id) {
-        if (block_id == stone_id) {
-            return stone_item_id;
-        }
-        if (block_id == grass_id) {
-            return grass_item_id;
-        }
-        if (block_id == dirt_id) {
-            return dirt_item_id;
-        }
-        return lcu::items::kNoItemId;
+        return block_item_mapping.item_for_block(block_id);
     };
 
     // Every item this server tracks a per-client authoritative count

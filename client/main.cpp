@@ -11,6 +11,7 @@
 
 #include "game/components/ai_wander.h"
 #include "game/components/position.h"
+#include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/replication_protocol.h"
@@ -298,27 +299,31 @@ int main() {
     }};
     lcu::usize selected_placeable_index = 0;
 
-    // Block-break's item drop (brief section 55) - a direct 1:1
-    // block->item mapping (Phase 17), still not a loot-table system.
-    // Shared by both the networked (optimistic, client-authoritative -
-    // see DECISIONS.md) and single-player break paths below so the two
+    // Data-driven block->item mapping (Phase 22, closing Phase 19's
+    // remaining honest gap): replaces the hardcoded if/else chain this
+    // lambda used to carry (one `if (broken_block == X)` per block,
+    // Phase 17-19) with a single table populated once, right after each
+    // block/item pair is registered above. Adding a new item-backed
+    // block from here on is one register_pair call, not a new branch
+    // here and a matching one in VoxelServer's own item_for_block - see
+    // game/items/block_item_mapping.h and DECISIONS.md.
+    game::items::BlockItemMapping block_item_mapping;
+    block_item_mapping.register_pair(stone_id, stone_item_id);
+    block_item_mapping.register_pair(grass_id, grass_item_id);
+    block_item_mapping.register_pair(dirt_id, dirt_item_id);
+
+    // Block-break's item drop (brief section 55) - still a direct 1:1
+    // block->item mapping (Phase 17), not a loot-table system, just
+    // data-driven now instead of hardcoded (Phase 22). Shared by both
+    // the networked (optimistic, client-authoritative - see
+    // DECISIONS.md) and single-player break paths below so the two
     // don't drift out of sync with each other.
     const auto grant_item_for_broken_block = [&](lcu::voxel::BlockId broken_block) {
-        lcu::items::ItemId item_id = lcu::items::kNoItemId;
-        const char* item_name = "";
-        if (broken_block == stone_id) {
-            item_id = stone_item_id;
-            item_name = "game:stone";
-        } else if (broken_block == grass_id) {
-            item_id = grass_item_id;
-            item_name = "game:grass";
-        } else if (broken_block == dirt_id) {
-            item_id = dirt_item_id;
-            item_name = "game:dirt";
-        }
+        const lcu::items::ItemId item_id = block_item_mapping.item_for_block(broken_block);
         if (item_id == lcu::items::kNoItemId) {
             return;
         }
+        const std::string& item_name = item_registry.definition_of(item_id).namespaced_id;
         const lcu::u32 leftover = player_inventory.add_item(item_registry, {item_id, 1});
         if (leftover == 0) {
             LCU_LOG_INFO("Picked up 1 {} (inventory: {})", item_name, player_inventory.count_item(item_id));
