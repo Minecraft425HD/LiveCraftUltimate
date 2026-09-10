@@ -250,6 +250,10 @@ int main() {
     stone_def.display_name = "Stone";
     stone_def.is_transparent = false;
     stone_def.has_collision = true;
+    // Base tint (Phase 26) - see fs_chunk.sc for the procedural
+    // noise/top-vs-side pattern this multiplies against, since there's
+    // still no texture atlas (brief section 12/Phase 12).
+    stone_def.color = {0.5f, 0.5f, 0.5f};
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
     // Surface/subsurface terrain content (brief section 21) - a real
@@ -266,6 +270,12 @@ int main() {
     grass_def.display_name = "Grass";
     grass_def.is_transparent = false;
     grass_def.has_collision = true;
+    grass_def.color = {0.3f, 0.7f, 0.2f};
+    // Real grass-block convention (per-face color, Phase 26): green on
+    // top, dirt-brown on the sides (bottom_color left unset - falls back
+    // to side_color, since the underside looks like the sides, not the
+    // top).
+    grass_def.side_color = {0.4f, 0.25f, 0.1f};
     const lcu::voxel::BlockId grass_id = block_registry.register_block(grass_def);
 
     lcu::voxel::BlockDefinition dirt_def;
@@ -273,6 +283,7 @@ int main() {
     dirt_def.display_name = "Dirt";
     dirt_def.is_transparent = false;
     dirt_def.has_collision = true;
+    dirt_def.color = {0.4f, 0.25f, 0.1f};
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
     // Block-break's first real item consumer (brief section 55): the

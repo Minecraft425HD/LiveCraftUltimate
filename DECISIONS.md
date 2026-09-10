@@ -1661,3 +1661,56 @@ visible output, and real Apple Silicon performance - none of that is
 knowable from a code read. See `BUILDING.md` "macOS" for the exact
 commands someone with a real Mac needs to run, and what they should
 see if everything above is correct.
+
+## 2026-09-10 — Per-face color is selected at mesh time, not in the shader (Phase 26)
+
+**Context:** The user wants visible, differently-colored terrain
+(stone gray, grass green-top/brown-sides, dirt brown) with no texture
+atlas built yet. The classic grass-block look needs a block to show a
+*different* color on its top face than its sides - naively, a shader
+would need to know "this is specifically a grass block" to do that,
+which means either a hardcoded block-id check in the fragment shader
+(brief section 84's "modding-first" - a mod's block could never get
+this treatment) or a texture atlas (real content-pipeline work, not
+this phase's scope).
+
+**Decision:** `BlockDefinition` gained three fields - `color` (top/
+default), `side_color`, `bottom_color` (both `std::optional`, falling
+back to `color`/`side_color` respectively when unset) - and
+`mesh_chunk_greedy` picks the right one per quad at mesh-build time,
+using information it already computes (the sweep axis `d` and
+`positive_facing`) to know whether it's building a top, bottom, or
+side face. The shader receives a plain per-vertex color with no face
+concept at all. This means: (1) any block, mod-registered or not, can
+declare face-varying colors purely through data, no shader change
+needed; (2) the face-selection logic is fully unit-testable headlessly
+(`GreedyMesher.PerFaceColorUsesTopSideBottomFallbackChain`) since it's
+ordinary C++ over already-known quad geometry, unlike anything that
+would live in the shader; (3) it generalizes cleanly to a real texture
+atlas later (Phase 12) - swapping `color` for a per-face texture
+index at the same call site is a small, contained change, not a
+rewrite.
+
+**Why the fragment shader's noise is generic, not per-block-typed
+either:** the same reasoning applies - a hardcoded "if this is stone,
+add noise; if dirt, add different noise" would need the shader to know
+block identity, which it deliberately doesn't. Instead, `fs_chunk.sc`
+applies one generic hash-noise formula to whatever color it receives;
+since that color already varies correctly per block/face (per the
+decision above), the same generic noise reads as "subtle gray noise"
+on stone and "brown noise" on dirt for free, with zero block-specific
+shader code.
+
+**A real bug this phase's own change exposed, not introduced:**
+`engine/voxel/CMakeLists.txt` only ever declared `LcuVoxel PUBLIC
+Lcu::Core`, never `Lcu::Math` - yet `greedy_mesher.h` had already used
+`math::Vec3` since Phase 2. This silently worked only because every
+real consumer of `LcuVoxel` also linked `Lcu::Math` transitively via
+some other aggregating target (`Lcu::EngineCore`), so the missing
+include-directory dependency never actually failed to resolve. Adding
+a `Vec3` field to `BlockDefinition` meant `block_registry.cpp` itself
+(part of `LcuVoxel`, with no other path to `Lcu::Math`) needed to
+compile against it directly, and promptly failed - a real, if minor,
+CMake hygiene gap this phase's change happened to surface and fix
+(`target_link_libraries(LcuVoxel PUBLIC Lcu::Core Lcu::Math)`), not
+something deliberately introduced by this phase's own design.

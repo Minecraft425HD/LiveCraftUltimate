@@ -2,7 +2,38 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26
+
+### Phase 26
+
+- `BlockDefinition` gained `color`/`side_color`/`bottom_color` - real
+  per-block/per-face tint, no texture atlas needed. `mesh_chunk_greedy`
+  selects the right one per face at mesh time (it already knows the
+  axis/facing direction), so this is real data selection, not a
+  shader-side special case for any specific block.
+- `MeshVertex` gained a `color` field; the bgfx vertex layout gained a
+  matching `Color0` attribute (both appended last, in lockstep, since
+  the struct is `memcpy`'d straight into a GPU buffer).
+- Registered real colors: `game:stone` gray, `game:grass` green top /
+  brown sides, `game:dirt` brown.
+- `client/shaders/{vs_chunk,fs_chunk}.sc` rewritten: real per-face
+  color, a small explicit top-face light lift, and a subtle
+  deterministic-per-voxel hash-noise pattern - no per-block branching
+  in the shader itself.
+- Real bug found and fixed: `engine/voxel` used `math::Vec3` without
+  `LcuVoxel` ever linking `Lcu::Math` - previously silent, exposed once
+  `BlockDefinition` gained a `Vec3` field and `block_registry.cpp`
+  itself failed to compile.
+- 2 new unit tests for the per-face color selection.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build (bgfx's actual
+  `shaderc`, not just C++ compilation): "Chunk shader program
+  valid=true", plus a real headless `LCU_VERIFY_BREAK_PLACE` run under
+  that build showing zero regressions.
+- `ctest` 352/352 (bgfx, up from 350) / 349/349 (non-bgfx, up from
+  347).
+- Honestly scoped: what a real GPU/display shows is still NOT VERIFIED
+  — ENVIRONMENT LIMITATION; no texture atlas; water/sand colors
+  deferred to Phase 37/39.
 
 ### Phase 25
 

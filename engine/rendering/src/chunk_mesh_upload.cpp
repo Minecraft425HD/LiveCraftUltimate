@@ -10,6 +10,10 @@ bgfx::VertexLayout chunk_mesh_vertex_layout() {
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Normal, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        // Phase 26 - must stay last, matching voxel::MeshVertex::color
+        // being the last struct field (this layout describes the exact
+        // byte layout of that struct; see upload_chunk_mesh_layer below).
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
         .end();
     return layout;
 }

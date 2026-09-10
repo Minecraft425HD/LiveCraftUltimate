@@ -24,14 +24,15 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (hotbar item selection for placing grass/dirt)**, **Phase 22
 (data-driven block-id-to-item-id mapping)**, **Phase 23
 (quick-craft: RecipeRegistry's first real caller)**, **Phase 24
-(item_crafted: EventBus's second real event)**, and **Phase 25
-(macOS build audit)** are done; see "Reality Audit" and "Last
-Completed Task" below for what they cover and what's next. A large,
-user-directed program (Phases 26-42: visible terrain colors, skybox,
-cross-chunk global lighting with real performance constraints,
-procedural terrain with sea level at y=0, water, biomes, caves/ores,
-vegetation) is now in progress - see TASK_QUEUE.md for per-phase
-detail as each lands.
+(item_crafted: EventBus's second real event)**, **Phase 25
+(macOS build audit)**, and **Phase 26 (visible terrain: per-block/
+per-face colors + procedural shader noise)** are done; see "Reality
+Audit" and "Last Completed Task" below for what they cover and what's
+next. A large, user-directed program (Phases 26-42: visible terrain
+colors, skybox, cross-chunk global lighting with real performance
+constraints, procedural terrain with sea level at y=0, water, biomes,
+caves/ores, vegetation) is now in progress - see TASK_QUEUE.md for
+per-phase detail as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -804,6 +805,41 @@ only two real events now - both client-triggered content moments,
 nothing server-side fires one yet; a third event still needs a genuine
 third engine-side moment to justify it, not speculative expansion.
 
+**Phase 26 (visible terrain: per-block/per-face colors + procedural
+shader noise)**: the chunk shader was still Phase 21's placeholder -
+one flat gray-blue material, ignoring block identity entirely.
+`BlockDefinition` gained `color`/`side_color`/`bottom_color`;
+`mesh_chunk_greedy` selects the right one per face at mesh time (it
+already knows the axis/facing direction, so this is real data
+selection, not a shader-side special case for e.g. "grass"); grass
+gets the classic green-top/brown-sides treatment this way.
+`client/shaders/{vs_chunk,fs_chunk}.sc` were rewritten to carry and
+use that color, adding a subtle deterministic-per-voxel hash-noise
+multiply and a small top-face light lift. A real bug surfaced and was
+fixed along the way: `engine/voxel` used `math::Vec3` without
+`LcuVoxel` ever declaring a link to `Lcu::Math` - previously silent
+because every real consumer got it transitively some other way; adding
+a `Vec3` field to `BlockDefinition` broke `block_registry.cpp`'s own
+compilation, exposing it.
+
+Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build (the only way to
+actually compile `.sc` files through bgfx's `shaderc`, not just the
+C++ side): `"Chunk shader program valid=true"` - the new `Color0`
+attribute, varying wiring, and fragment shader logic all link
+correctly through the real bgfx pipeline. A real headless run under
+that build confirms `LCU_VERIFY_BREAK_PLACE` still works with the real
+program loaded, zero regressions. 2 new unit tests for the real,
+headlessly-testable part (per-face color selection); the shader's own
+noise pattern can only be confirmed by actually looking at it - see
+Known Limitations. `ctest` 352/352 (bgfx, up from 350) / 349/349
+(non-bgfx, up from 347).
+
+Honestly scoped: **what a real GPU/display shows is still NOT VERIFIED
+— ENVIRONMENT LIMITATION** - "valid=true" proves the shader compiles
+and links, not that it looks right; no texture atlas exists yet (Phase
+12); `game:water`/`game:sand` colors are deferred to Phase 37/39 since
+those blocks don't exist yet.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -816,11 +852,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 350/350 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 352/352 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 347/347 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 349/349 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -1118,9 +1154,13 @@ None currently tracked.
   default — most builds/CI runs won't have a real draw call unless this
   is explicitly turned on, since it adds real build time (shaderc +
   glslang/SPIRV-Tools/SPIRV-Cross/Dawn-Tint).
-- Chunk shaders have no texturing — flat lit color only. `MeshVertex.u`/
-  `.v` are populated but unused downstream until a texture atlas exists
-  (Phase 12).
+- ~~Chunk shaders have no texturing — flat lit color only~~ **Partially
+  fixed** (Phase 26): real per-block/per-face color plus a subtle
+  procedural noise pattern now varies the surface, but it's still not
+  texturing - no texture atlas exists (Phase 12), `MeshVertex.u`/`.v`
+  are populated but unused downstream, and there's no per-block visual
+  detail beyond a flat tint + generic noise (no grain/bump/pattern
+  distinguishing e.g. stone from a hypothetical different gray block).
 - No visual verification of any rendering exists or can exist in this
   sandbox — every claim above about the draw call is about the API
   calls succeeding (valid handles, no crash, bgfx accepts the shader
@@ -1261,11 +1301,23 @@ before content/polish):
    above. Both real events are still client-triggered content moments;
    nothing server-side fires one yet, and `ModLoader` still has no
    manifest/dependency/version format.
-6. Continue down brief section 10's list after that: more block/item
-   variety (more real recipes and content now that both RecipeRegistry
-   and BlockItemMapping have real callers), then platform verification
-   (Android/iOS on an actual toolchain), then performance work informed
-   by `VoxelBenchmarks`' real numbers, then UI/audio polish.
+6. **Active, user-directed program (Phases 25-42)**: the user wants to
+   run `VoxelClient` on a real Mac and see it for the first time -
+   visible colored terrain, a skybox, real global cross-chunk lighting
+   (with explicit performance constraints - never per-frame, bounded
+   BFS, off the JobSystem), procedural terrain with sea level at y=0,
+   water, biomes, caves/ores, and vegetation. This supersedes brief
+   section 10's generic "more content" item above with a concrete,
+   larger-scoped plan. Done so far: ~~Phase 25 (macOS build audit,
+   one real Metal-shader-profile bug found and fixed)~~, ~~Phase 26
+   (visible terrain: per-block/per-face colors + procedural shader
+   noise)~~ - see PROJECT_STATE.md "Phase 25"/"Phase 26" above and
+   TASK_QUEUE.md for full per-phase detail. Next: Phase 27 (skybox +
+   sun/moon), then Phase 28 (renderer consumes per-voxel light -
+   prerequisite for the cross-chunk lighting work in Phases 29-35),
+   then entity rendering/debug overlay (36), then the worldgen phases
+   (37-41: sea level, water, continents, biomes, caves/ores,
+   vegetation), then docs (42).
 7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained

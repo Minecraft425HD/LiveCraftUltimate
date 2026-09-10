@@ -75,6 +75,72 @@ TEST(GreedyMesher, SingleIsolatedBlockProducesSixUnmergedFaces) {
     expect_all_triangles_wound_correctly(mesh.opaque);
 }
 
+TEST(GreedyMesher, PerFaceColorUsesTopSideBottomFallbackChain) {
+    // Phase 26: a block with distinct top/side/bottom colors (the real
+    // grass-block convention - green top, brown sides, brown-by-
+    // fallback bottom) must mesh each of its six faces with the correct
+    // color, purely from BlockDefinition data - no shader-side special
+    // casing needed.
+    BlockRegistry registry;
+    BlockDefinition grass_like;
+    grass_like.namespaced_id = "test:grass";
+    grass_like.color = {0.3f, 0.7f, 0.2f};        // top
+    grass_like.side_color = {0.4f, 0.25f, 0.1f};  // sides; bottom_color left unset
+    const auto grass = registry.register_block(grass_like);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, grass);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+
+    const auto color_of_face_with_normal = [&](const lcu::math::Vec3& normal) {
+        for (const auto& vertex : mesh.opaque.vertices) {
+            if (lcu::math::dot(vertex.normal, normal) > 0.99f) {
+                return vertex.color;
+            }
+        }
+        ADD_FAILURE() << "no vertex found with the expected face normal";
+        return lcu::math::Vec3{};
+    };
+
+    const lcu::math::Vec3 top_color = color_of_face_with_normal({0.0f, 1.0f, 0.0f});
+    const lcu::math::Vec3 bottom_color = color_of_face_with_normal({0.0f, -1.0f, 0.0f});
+    const lcu::math::Vec3 side_color = color_of_face_with_normal({1.0f, 0.0f, 0.0f});
+
+    EXPECT_FLOAT_EQ(top_color.x, 0.3f);
+    EXPECT_FLOAT_EQ(top_color.y, 0.7f);
+    EXPECT_FLOAT_EQ(top_color.z, 0.2f);
+
+    // bottom_color unset -> falls back to side_color, not top color().
+    EXPECT_FLOAT_EQ(bottom_color.x, 0.4f);
+    EXPECT_FLOAT_EQ(bottom_color.y, 0.25f);
+    EXPECT_FLOAT_EQ(bottom_color.z, 0.1f);
+
+    EXPECT_FLOAT_EQ(side_color.x, 0.4f);
+    EXPECT_FLOAT_EQ(side_color.y, 0.25f);
+    EXPECT_FLOAT_EQ(side_color.z, 0.1f);
+}
+
+TEST(GreedyMesher, UnsetSideAndBottomColorFallBackToTopColorOnEveryFace) {
+    BlockRegistry registry;
+    BlockDefinition stone;
+    stone.namespaced_id = "test:stone";
+    stone.color = {0.5f, 0.5f, 0.5f};
+    const auto stone_id = registry.register_block(stone);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone_id);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_FLOAT_EQ(vertex.color.x, 0.5f);
+        EXPECT_FLOAT_EQ(vertex.color.y, 0.5f);
+        EXPECT_FLOAT_EQ(vertex.color.z, 0.5f);
+    }
+}
+
 TEST(GreedyMesher, AdjacentSameTypeBlocksMergeCoplanarFaces) {
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");

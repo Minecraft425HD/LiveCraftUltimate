@@ -741,6 +741,69 @@ DECISIONS.md "Phase 25" for the full audit writeup.
 
 ---
 
+## Phase 26 — Visible terrain: per-block/per-face colors + procedural shader noise
+
+Closes the first of four things flagged as "not what the user expects
+to see": the chunk shader (still the Phase 21 placeholder) never used
+per-block color, so every block rendered the same flat gray-blue.
+
+- [x] `BlockDefinition` gained `color` (top-face/default tint) plus
+  optional `side_color`/`bottom_color` overrides - real per-face
+  color selection happens in `mesh_chunk_greedy` (which already knows
+  the axis + facing direction it's building a quad for), not a
+  shader-side special case for any specific block name.
+- [x] `MeshVertex` gained a `color` field (appended last, matching a
+  new `Color0` attribute appended last to the bgfx vertex layout -
+  `chunk_mesh_upload.cpp`'s `.add()` order must match the struct's
+  memory layout exactly, since it's `memcpy`'d straight into a GPU
+  buffer).
+- [x] Registered real colors: `game:stone` gray, `game:grass` green
+  top / brown sides (the classic grass-block convention, achieved via
+  data, not a shader hack), `game:dirt` brown. `game:water`/
+  `game:sand`/`game:compost` colors are deferred to their own later
+  phases (37+) rather than tinting blocks that don't exist yet - see
+  DECISIONS.md.
+- [x] `client/shaders/{vs_chunk,fs_chunk}.sc` rewritten: the vertex
+  shader passes color and an un-transformed chunk-local position
+  through; the fragment shader multiplies the real per-face color by
+  the existing directional light (plus a small explicit top-face lift)
+  and a subtle procedural hash-noise pattern (deterministic per voxel,
+  not per frame) - covers "grau mit subtilem Noise" (stone), "braunes
+  Rauschen" (dirt) generically, with no per-block branching in the
+  shader itself.
+- [x] Real bug caught while wiring this up: `engine/voxel`'s
+  `BlockDefinition`/`greedy_mesher.h` used `math::Vec3` without
+  `LcuVoxel` ever linking `Lcu::Math` - previously an undeclared
+  transitive dependency that happened to work only because every real
+  consumer also linked `Lcu::Math` some other way; adding a `Vec3`
+  field to `BlockDefinition` broke `block_registry.cpp`'s own
+  compilation and exposed it. Fixed by adding the missing link.
+- [x] 2 new unit tests (`GreedyMesher.PerFaceColorUsesTopSideBottom
+  FallbackChain`, `GreedyMesher.UnsetSideAndBottomColorFallBackTo
+  TopColorOnEveryFace`) - the per-face color selection is fully
+  testable headlessly (it's C++ data selection, not a shader branch),
+  unlike the shader's own noise pattern.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` build (the only
+  way to actually compile `.sc` shaders through bgfx's `shaderc`, not
+  just compile the C++ side): `"Chunk shader program valid=true"` -
+  proves the new `Color0` attribute, varying wiring, and fragment
+  shader logic all link correctly through the real bgfx shader
+  pipeline. Verified via a real headless run (`LCU_VERIFY_BREAK_PLACE`)
+  under that same shader-enabled build that break/place still works
+  with the real program loaded, zero regressions.
+
+`ctest` 352/352 (bgfx) / 349/349 (non-bgfx), up from 350/347.
+
+Honestly scoped: **what a real GPU/display would actually show is
+still NOT VERIFIED — ENVIRONMENT LIMITATION** - this sandbox has no
+GPU/display, so "Chunk shader program valid=true" proves the shader
+*compiles and links*, not that it *looks right*. No texture atlas
+exists yet (Phase 12) - this is color-only surface detail, not
+texturing. `game:water`/`game:sand` colors aren't registered yet since
+those blocks don't exist until Phase 37/39.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet

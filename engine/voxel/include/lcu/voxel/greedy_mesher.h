@@ -13,6 +13,12 @@ struct MeshVertex {
     math::Vec3 normal;
     f32 u = 0.0f;
     f32 v = 0.0f;
+    // Per-block base tint (Phase 26, BlockDefinition::color) - appended
+    // last so the bgfx vertex layout (chunk_mesh_upload.cpp) can add its
+    // matching Color0 attribute last too, keeping struct field order and
+    // layout attribute order in lockstep (this struct is memcpy'd
+    // straight into a GPU buffer, see upload_chunk_mesh_layer).
+    math::Vec3 color{1.0f, 1.0f, 1.0f};
 };
 
 // One renderable layer's worth of geometry: a plain vertex/index buffer,
@@ -33,12 +39,12 @@ struct ChunkMeshLayer {
     // anything downstream today - they exist so meshing doesn't need a
     // breaking change once atlas mapping lands.
     void add_quad(const math::Vec3& v0, const math::Vec3& v1, const math::Vec3& v2, const math::Vec3& v3,
-                  const math::Vec3& normal, f32 width, f32 height) {
+                  const math::Vec3& normal, f32 width, f32 height, const math::Vec3& color = {1.0f, 1.0f, 1.0f}) {
         const u32 base = static_cast<u32>(vertices.size());
-        vertices.push_back({v0, normal, 0.0f, 0.0f});
-        vertices.push_back({v1, normal, width, 0.0f});
-        vertices.push_back({v2, normal, width, height});
-        vertices.push_back({v3, normal, 0.0f, height});
+        vertices.push_back({v0, normal, 0.0f, 0.0f, color});
+        vertices.push_back({v1, normal, width, 0.0f, color});
+        vertices.push_back({v2, normal, width, height, color});
+        vertices.push_back({v3, normal, 0.0f, height, color});
 
         indices.push_back(base + 0);
         indices.push_back(base + 1);
@@ -213,12 +219,25 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     // c0->c1->c2->c3 is therefore correct for a
                     // positive-facing quad, and reversed
                     // (c0->c3->c2->c1) for a negative-facing one.
+                    // Per-face color (Phase 26): d==1 is the Y axis, so
+                    // positive_facing there means the top face (normal
+                    // +Y) and non-positive_facing means the bottom face
+                    // (normal -Y); d==0/d==2 are the four side faces.
+                    // See BlockDefinition::color's doc comment for the
+                    // fallback chain.
+                    const BlockDefinition& def = registry.definition_of(current.block_id);
+                    math::Vec3 quad_color = def.color;
+                    if (d == 1 && !current.positive_facing) {
+                        quad_color = def.bottom_color.value_or(def.side_color.value_or(def.color));
+                    } else if (d != 1) {
+                        quad_color = def.side_color.value_or(def.color);
+                    }
                     if (current.positive_facing) {
                         mesh.opaque.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height));
+                                              static_cast<f32>(height), quad_color);
                     } else {
                         mesh.opaque.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height));
+                                              static_cast<f32>(height), quad_color);
                     }
 
                     for (i32 l = 0; l < height; ++l) {

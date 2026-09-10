@@ -1,10 +1,12 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "lcu/core/types.h"
+#include "lcu/math/vec3.h"
 #include "lcu/voxel/block_id.h"
 
 namespace lcu::voxel {
@@ -22,6 +24,26 @@ struct BlockDefinition {
     bool is_transparent = false;  // affects meshing (Phase 2): opaque neighbors cull shared faces
     bool has_collision = true;
     u8 light_emission = 0;  // 0-15, brief section 24
+    // Base tint (Phase 26) - real per-block color a chunk's mesh vertices
+    // carry directly (no texture atlas exists yet, see DECISIONS.md). The
+    // fragment shader multiplies this by a procedural noise pattern, not
+    // a flat fill - see client/shaders/fs_chunk.sc. Default white so an
+    // unset color reads as "untinted", matching every other optional
+    // field's zero-value-means-default convention in this file.
+    //
+    // `color` is the top-face (and default-everywhere) tint;
+    // `side_color`/`bottom_color` optionally override it per face -
+    // mesh_chunk_greedy already knows which face it's building (the axis
+    // + facing direction that drove the greedy sweep), so this is a real,
+    // data-driven per-face lookup at mesh time, not a shader-side special
+    // case for "this is specifically grass". A block that doesn't set
+    // them (most blocks) is uniformly `color` on every face, same as
+    // before this field existed. `bottom_color` falls back to
+    // `side_color` (then `color`) if unset - most blocks' undersides
+    // look like their sides, not their tops (grass: dirt-brown both).
+    math::Vec3 color{1.0f, 1.0f, 1.0f};
+    std::optional<math::Vec3> side_color;
+    std::optional<math::Vec3> bottom_color;
 };
 
 // Central, namespaced block type registry (brief section 16). Namespacing
