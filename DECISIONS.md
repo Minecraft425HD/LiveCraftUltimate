@@ -1965,3 +1965,76 @@ GPU/display (a shadow correctly extending from one chunk into the one
 below it) - none of that is knowable from a code read or a headless
 Noop-backend run. Block light still doesn't cross a chunk boundary at
 all (Phase 31, a genuine BFS, unlike this phase's column scan).
+
+## 2026-09-10 — Block-light cross-chunk BFS is duck-typed on a ChunkProvider, mirroring Phase 28's LightStorageT (Phase 31)
+
+**Context:** Unlike Phase 30's sky light (a straight-down column scan,
+needing only one boolean seeded from the chunk above), block light
+genuinely floods in all 6 directions - crossing a chunk boundary means
+the BFS frontier itself has to continue into the neighbor chunk's own
+`LightStorage`, which also means checking block opacity in that
+neighbor chunk's own `ChunkStorage` (not just its light). The existing
+single-chunk `flood_block_light` only ever receives one `ChunkStorage`;
+a cross-chunk version needs a way to fetch *any* chunk's storage by
+coordinate as the frontier moves.
+
+**Decision:** The cross-chunk BFS functions
+(`flood_block_light_cross_chunk`/`propagate_added_block_light_cross_
+chunk`/`unpropagate_block_light_cross_chunk`) are templated on a
+`ChunkProviderT` type parameter, duck-typed against exactly
+`lcu::world::World`'s own `const ChunkStorage<EdgeLength>*
+chunk_at(ChunkCoord) const` - the same reasoning Phase 28's DECISIONS.md
+entry already established for `mesh_chunk_greedy`'s `LightStorageT`.
+`engine/world` doesn't depend on `engine/lighting` (checked: `LcuWorld`
+links only `Lcu::Core`/`Lcu::Voxel`), so `engine/lighting` depending on
+`engine/world` directly would in fact be dependency-cycle-safe here,
+unlike Phase 28's `engine/voxel`<->`engine/lighting` situation - but
+the duck-typed template is still preferred for a second reason beyond
+cycle-avoidance: it keeps `propagation_test.cpp` able to construct a
+minimal `TestChunkProvider` (a bare `ChunkCoord -> ChunkStorage` map)
+without needing a full `lcu::world::World` and its own chunk lifecycle
+machinery just to unit-test the propagation algorithm itself.
+`client/main.cpp`'s real call sites pass the actual `World` instance
+directly - no adapter needed, since its `chunk_at` already matches the
+required shape exactly.
+
+**An unloaded neighbor is never touched, by design, not by oversight:**
+if `chunks.chunk_at(next.chunk)` returns `nullptr` mid-BFS, that
+direction is simply not explored - the frontier doesn't wait, doesn't
+buffer, and doesn't guess. This means a torch placed near a chunk edge
+today only lights the neighbor chunk if that neighbor happens to
+already be loaded at the moment of placement; a chunk that loads
+afterward doesn't retroactively receive that light. Closing this gap
+for real needs either the optional "boundary buffer" (Phase 32 -
+explicitly optional in the brief) or the neighbor-dirtying Phase 35 is
+chartered to add (a freshly-loaded chunk re-requesting light from
+whichever already-loaded neighbors could plausibly have lit it) -
+correctly out of this phase's scope, and honestly documented rather
+than silently left broken.
+
+**The termination bound ("max 15 voxels around the trigger") falls out
+of the existing algorithm for free:** block light values are capped at
+`LightStorage::kMaxLightLevel` (15), and `flood_block_light`/
+`flood_block_light_cross_chunk` both already stop spreading once a
+cell's level would decrement to 0 - so no BFS from any single-emission
+source can ever visit a cell more than 15 steps away in any direction,
+cross-chunk or not. No separate radius cap was added, since one already
+exists as an emergent property of the level-decrement termination
+condition, and adding a redundant second check would just be dead code
+duplicating an invariant the algorithm already guarantees.
+
+**Real correctness fixes riding along with the wiring, not left half-
+done:** `client/main.cpp`'s "let light flow back in from the brightest
+neighbor" logic (for a newly-opened air cell) previously only checked
+neighbors inside the same chunk via a hand-rolled bounds check;
+switched to `WorldLight::block_light_at`, it now correctly considers a
+neighbor across a chunk boundary too - a real bug this phase's own
+wiring pass surfaced and fixed along the way, not a separate,
+independently-motivated change.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real cross-chunk torchlight actually looks correct on a real
+GPU/display - none of that is knowable from a code read or a headless
+Noop-backend run. A chunk that loads after a nearby source's BFS
+already finished still doesn't retroactively receive that light (Phase
+32/35's job, not this phase's).

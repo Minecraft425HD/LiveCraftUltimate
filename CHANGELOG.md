@@ -2,7 +2,57 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31
+
+### Phase 31
+
+- New `flood_block_light_cross_chunk`/`propagate_added_block_light_
+  cross_chunk`/`unpropagate_block_light_cross_chunk`: a genuine BFS
+  that crosses chunk boundaries, unlike sky light's seeded column scan
+  (Phase 30) - block light spreads in all 6 directions, so a boundary
+  crossing needs a real frontier that continues into the neighbor
+  chunk's own `LightStorage` (via `WorldLight`) and keeps spreading
+  from there, decrementing exactly as it would within a single chunk.
+- Templated on a duck-typed `ChunkProviderT` (matches
+  `lcu::world::World`'s own `chunk_at(ChunkCoord) const` exactly) rather
+  than a concrete `#include` - same reasoning as Phase 28's
+  `LightStorageT`, keeps the header usable from tests that only
+  construct bare `ChunkStorage` instances.
+- A neighbor chunk that isn't loaded is never crossed into or written
+  to - honestly nothing to propagate into, not a guess (same
+  "unknown -> can't say, don't guess" convention `WorldLight` already
+  established); a chunk that loads *later* doesn't retroactively
+  receive light from a BFS that already finished (Phase 32/35
+  territory).
+- Terminates in at most `kMaxLightLevel` (15) steps from any seed in
+  any direction, same as the single-chunk version - satisfies "BFS
+  queue only runs over the radius actually affected by a change"
+  without a separate hard cap, since the existing level-decrements-to-
+  zero termination already bounds it.
+- `client/main.cpp`'s `update_lighting_for_edit` now calls the
+  cross-chunk versions (passing `world` itself as the `ChunkProviderT`)
+  instead of the single-chunk ones, and its own "let light flow back in
+  from the brightest neighbor" logic now queries
+  `WorldLight::block_light_at` instead of only checking neighbors
+  inside the same chunk - both real correctness fixes right at a chunk
+  boundary, not just new plumbing.
+- 4 new unit tests: light crossing into a loaded neighbor with correct
+  continued decay, not crossing into an unloaded neighbor, removing a
+  cross-chunk source darkens both chunks, and - the trickiest case -
+  removing one of two cross-chunk sources correctly refills the overlap
+  from the remaining one without leaving a dark gap or wrongly
+  darkening the surviving source.
+- Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP): a real break/place round-trip through
+  the new cross-chunk edit path, zero warnings/errors - plus real
+  `LCU_BUILD_SHADER_TOOLS=ON` and `LCU_VERIFY_BREAK_PLACE` runs (bgfx
+  and non-bgfx) with byte-identical output to Phase 30.
+- `ctest` 379/379 (bgfx, up from 375) / 376/376 (non-bgfx, up from
+  372).
+- Honestly scoped: a chunk that loads *after* a nearby light source's
+  BFS already finished doesn't retroactively receive that light (Phase
+  32/35's job); what real cross-chunk torchlight actually looks like on
+  a real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION.
 
 ### Phase 30
 

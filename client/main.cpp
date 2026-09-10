@@ -540,50 +540,54 @@ int main() {
 
         if (old_emission > 0) {
             const lcu::u8 old_level = light.block_light(local.x, local.y, local.z);
-            lcu::lighting::unpropagate_block_light(*chunk, block_registry, light, local.x, local.y, local.z,
-                                                    old_level);
+            lcu::lighting::unpropagate_block_light_cross_chunk(world, block_registry, world_light, coord, local.x,
+                                                                local.y, local.z, old_level);
         }
 
         if (new_emission > 0) {
             light.set_block_light(local.x, local.y, local.z, new_emission);
-            lcu::lighting::propagate_added_block_light(*chunk, block_registry, light, local.x, local.y, local.z);
+            lcu::lighting::propagate_added_block_light_cross_chunk(world, block_registry, world_light, coord,
+                                                                    local.x, local.y, local.z);
         } else if (new_is_opaque) {
             // The new block blocks light - retract whatever was there
             // before (a no-op if it was already dark).
             const lcu::u8 stale_level = light.block_light(local.x, local.y, local.z);
             if (stale_level > 0) {
-                lcu::lighting::unpropagate_block_light(*chunk, block_registry, light, local.x, local.y, local.z,
-                                                        stale_level);
+                lcu::lighting::unpropagate_block_light_cross_chunk(world, block_registry, world_light, coord,
+                                                                    local.x, local.y, local.z, stale_level);
             }
         } else {
             // The cell is now open (air, or another transparent block)
             // and wasn't a light source itself - let light flow back in
             // from whichever neighbor is currently brightest, the same
             // way removing a wall lets a hallway's existing torchlight
-            // spill into the newly opened room.
+            // spill into the newly opened room. Cross-chunk-aware
+            // (Phase 31) via WorldLight::block_light_at, so this works
+            // correctly right at a chunk boundary too, not just for
+            // neighbors inside this same chunk.
             lcu::u8 best_neighbor_level = 0;
             constexpr lcu::i32 kOffsets[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
             for (const auto& offset : kOffsets) {
-                const lcu::i32 nx = static_cast<lcu::i32>(local.x) + offset[0];
-                const lcu::i32 ny = static_cast<lcu::i32>(local.y) + offset[1];
-                const lcu::i32 nz = static_cast<lcu::i32>(local.z) + offset[2];
-                constexpr lcu::i32 kEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
-                if (nx < 0 || ny < 0 || nz < 0 || nx >= kEdge || ny >= kEdge || nz >= kEdge) {
-                    continue;
+                const auto neighbor_level = world_light.block_light_at(
+                    coord, static_cast<lcu::i32>(local.x) + offset[0], static_cast<lcu::i32>(local.y) + offset[1],
+                    static_cast<lcu::i32>(local.z) + offset[2]);
+                if (neighbor_level) {
+                    best_neighbor_level = std::max(best_neighbor_level, *neighbor_level);
                 }
-                best_neighbor_level = std::max(
-                    best_neighbor_level,
-                    light.block_light(static_cast<lcu::u32>(nx), static_cast<lcu::u32>(ny), static_cast<lcu::u32>(nz)));
             }
             if (best_neighbor_level > 1) {
                 light.set_block_light(local.x, local.y, local.z, static_cast<lcu::u8>(best_neighbor_level - 1));
-                lcu::lighting::propagate_added_block_light(*chunk, block_registry, light, local.x, local.y, local.z);
+                lcu::lighting::propagate_added_block_light_cross_chunk(world, block_registry, world_light, coord,
+                                                                        local.x, local.y, local.z);
             }
         }
 
-        // Sky light is genuinely local to its own (x,z) column - no
-        // whole-chunk work needed here either.
-        lcu::lighting::compute_sky_light_column(*chunk, block_registry, light, local.x, local.z);
+        // Sky light: genuinely local to its own (x,z) column, but
+        // cross-chunk-aware vertically as of Phase 30 (the chunk
+        // directly above, if loaded and lit, seeds this column's
+        // sky_open_above).
+        lcu::lighting::compute_sky_light_column_cross_chunk(*chunk, block_registry, world_light, coord, local.x,
+                                                             local.z);
     };
 
     // Meshes (and, under bgfx, uploads) one loaded chunk's current block
