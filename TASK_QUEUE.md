@@ -285,6 +285,50 @@ before content/polish) - see PROJECT_STATE.md "Next Task" for the full
 reasoning: extending server-side inventory past `game:stone`, then
 interest-scoped chunk unloading to close Phase 16's own remaining gap.
 
+## Phase 17 — Surface/subsurface terrain content (post-original-queue; closes a long-flagged content gap)
+
+Worldgen only ever placed one block type below the terrain height - no
+`game:grass`/`game:dirt` registered anywhere real, so there was nothing
+else to place. Honestly flagged in Known Limitations since Phase 3.
+
+- [x] `lcu::world::worldgen::generate_terrain_chunk`'s signature changed
+  from a single `solid_block` to `(surface_block, subsurface_block,
+  stone_block)`: the topmost solid layer is `surface_block`, the next
+  `kSubsurfaceDepth` (3) layers are `subsurface_block`, everything
+  deeper is `stone_block`.
+- [x] `VoxelClient`/`VoxelServer` both register `game:grass`/`game:dirt`
+  block definitions - identical fields, identical registration order
+  right after `game:stone` on both sides, so their `BlockId`s coincide
+  by construction (the same simplification already carried for item
+  ids, see DECISIONS.md) - and pass them into `generate_terrain_chunk`.
+- [x] Both new blocks are fully real content: real collision/meshing
+  (entirely data-driven off `BlockRegistry`, never hardcoded by block
+  id - no changes needed anywhere in physics/meshing/lighting), real
+  network replication (a `ChunkData` snapshot just contains whatever
+  block ids the chunk actually holds), real break/place through the
+  existing generic edit paths.
+- [x] Updated 4 existing unit tests and added 2 new ones
+  (`SurfaceLayerIsExactlyOneBlockThickAtTheHeight`, and renamed
+  `ChunkFarBelowTerrainIsEntirelySolid` to `...IsEntirelyStone`) for the
+  new layering behavior.
+- [x] Verified via a real single-player run (36-chunk world generates,
+  no crash) and a real two-process networked run (`Sent 1 chunk(s) (1
+  fragment(s))` / `Applied server ChunkData` for a chunk now containing
+  the layered content, zero warnings/errors) - confirming the new
+  content flows through the *existing* pipeline unmodified. `ctest`
+  343/343 (bgfx) / 340/340 (non-bgfx), up from 342/342 / 339/339.
+
+Honestly scoped: only `game:stone` has an item mapping (Phase 5) - the
+break->item drop for grass/dirt doesn't exist yet, so breaking either
+currently grants no item. No climate/biome/caves/ores/structures/
+vegetation (brief section 21's later pipeline stages) - every column
+still uses the same three block ids regardless of position.
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task" for the full reasoning: item mappings for grass/dirt, then
+extending server-side inventory past `game:stone`, then interest-scoped
+chunk unloading.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
@@ -475,16 +519,30 @@ locally. Verified via a real two-process run (a client moves for 6 real
 seconds, crossing a chunk boundary - server streams and broadcasts the
 new chunk, client applies it) and a real three-process run (adding a
 second, stationary client that independently receives the same
-broadcast, proving it isn't limited to the triggering client). See
+broadcast, proving it isn't limited to the triggering client).
+
+Phase 17 (surface/subsurface terrain content, post-queue) closes a
+long-flagged content gap: `generate_terrain_chunk` now places a real
+`game:grass` surface layer, `game:dirt` beneath it, and `game:stone`
+deeper - both new blocks registered identically (and in the same
+order) on `VoxelClient` and `VoxelServer`, flowing through the
+*existing* collision/meshing/replication pipeline unmodified (nothing
+in those systems hardcodes block ids). Verified via a real
+single-player run and a real two-process networked run streaming a
+chunk that actually contains the new layered content. See
 PROJECT_STATE.md "Reality Audit" and "Next Task" for the full picture
-and what's next (extending server-side inventory past `game:stone`,
-then interest-scoped chunk unloading).
+and what's next (item mappings for grass/dirt, then extending
+server-side inventory past `game:stone`, then interest-scoped chunk
+unloading).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
 crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
-a loot-table system (now server-enforced for `game:stone` specifically,
-see Phase 15 - still no general mapping for anything else); lighting is
+a loot-table system (server-enforced for `game:stone` specifically, see
+Phase 15 - `game:grass`/`game:dirt` have no item mapping yet at all, see
+Phase 17); worldgen still has no climate/biome/caves/ores/structures/
+vegetation (brief section 21's later pipeline stages - every column
+uses the same three block ids regardless of position); lighting is
 single-chunk scoped (no cross-chunk
 bleed); `World::update_streaming` itself (the unload-capable version)
 still isn't called by either `VoxelClient` or `VoxelServer` - both now

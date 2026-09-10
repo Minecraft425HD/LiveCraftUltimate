@@ -215,6 +215,29 @@ int main() {
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
+    // Surface/subsurface terrain content (brief section 21) - a real
+    // grass-over-dirt-over-stone column instead of a single block type
+    // filling everything below the terrain height (see
+    // lcu::world::worldgen::generate_terrain_chunk below and
+    // DECISIONS.md). Both breakable/collidable/opaque like stone; no
+    // item mapping exists for either yet (only "game:stone" has one -
+    // see the break/place handling below), so breaking one currently
+    // removes it without granting an item, same as any other
+    // not-yet-item-backed block.
+    lcu::voxel::BlockDefinition grass_def;
+    grass_def.namespaced_id = "game:grass";
+    grass_def.display_name = "Grass";
+    grass_def.is_transparent = false;
+    grass_def.has_collision = true;
+    const lcu::voxel::BlockId grass_id = block_registry.register_block(grass_def);
+
+    lcu::voxel::BlockDefinition dirt_def;
+    dirt_def.namespaced_id = "game:dirt";
+    dirt_def.display_name = "Dirt";
+    dirt_def.is_transparent = false;
+    dirt_def.has_collision = true;
+    const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -285,7 +308,7 @@ int main() {
     }
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, stone_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id);
     });
 
 #if defined(LCU_ENABLE_BGFX)

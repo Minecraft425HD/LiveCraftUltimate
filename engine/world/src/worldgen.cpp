@@ -73,6 +73,14 @@ constexpr i32 kBaseHeight = 32;
 constexpr i32 kHeightVariation = 24;
 constexpr f32 kNoiseScale = 0.01f;
 
+// How many layers of `subsurface_block` sit directly beneath the
+// surface layer before `stone_block` takes over - matches the common
+// voxel-game convention this genre's players already expect (a grass
+// top, a few blocks of dirt, then stone), not tuned against anything
+// more specific since there's no other block variation yet to balance
+// it against.
+constexpr i32 kSubsurfaceDepth = 3;
+
 }  // namespace
 
 i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
@@ -80,7 +88,8 @@ i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
     return kBaseHeight + static_cast<i32>((n - 0.5f) * 2.0f * static_cast<f32>(kHeightVariation));
 }
 
-void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, voxel::BlockId solid_block) {
+void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, voxel::BlockId surface_block,
+                             voxel::BlockId subsurface_block, voxel::BlockId stone_block) {
     constexpr u32 kEdge = voxel::Chunk::kEdgeLength;
 
     for (u32 lz = 0; lz < kEdge; ++lz) {
@@ -91,9 +100,16 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
 
             for (u32 ly = 0; ly < kEdge; ++ly) {
                 const i32 world_y = coord.y * static_cast<i32>(kEdge) + static_cast<i32>(ly);
-                if (world_y <= height) {
-                    chunk.set_block(lx, ly, lz, solid_block);
+                if (world_y > height) {
+                    continue;  // air - the chunk's default fill, nothing to set.
                 }
+                voxel::BlockId block_id = stone_block;
+                if (world_y == height) {
+                    block_id = surface_block;
+                } else if (world_y > height - kSubsurfaceDepth) {
+                    block_id = subsurface_block;
+                }
+                chunk.set_block(lx, ly, lz, block_id);
             }
         }
     }

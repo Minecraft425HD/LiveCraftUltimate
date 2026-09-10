@@ -2,7 +2,45 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17
+
+### Phase 17
+
+- `lcu::world::worldgen::generate_terrain_chunk`'s signature changed
+  from a single `solid_block` parameter to `(surface_block,
+  subsurface_block, stone_block)` - the topmost solid layer is now
+  `surface_block`, the next `kSubsurfaceDepth` (3) layers are
+  `subsurface_block`, everything deeper is `stone_block`, closing a
+  content gap flagged since Phase 3 ("single block type fills
+  everything below the height").
+- `VoxelClient`/`VoxelServer` both register `game:grass` and
+  `game:dirt` block definitions - identical fields, identical
+  registration order right after `game:stone` on both sides, so their
+  `BlockId`s coincide by construction - and pass them into
+  `generate_terrain_chunk`.
+- Both new blocks are fully real content, not placeholders: real
+  collision/meshing (entirely data-driven off `BlockRegistry`, never
+  hardcoded by block id - no changes needed anywhere in
+  physics/meshing/lighting), real network replication (a `ChunkData`
+  snapshot's compressed bytes are whatever block ids the chunk actually
+  holds), real break/place through the existing generic edit paths.
+- Updated 4 existing unit tests and added 2 new ones
+  (`SurfaceLayerIsExactlyOneBlockThickAtTheHeight`; renamed
+  `ChunkFarBelowTerrainIsEntirelySolid` to `...IsEntirelyStone`) for the
+  new layering behavior.
+- Verified via a real single-player run (36-chunk world generates and
+  loads with no crash, `LCU_VERIFY_BREAK_PLACE` round-trips cleanly)
+  and a real two-process networked run (server logs `Sent 1 chunk(s) (1
+  fragment(s))`, client logs `Applied server ChunkData for chunk (0, 1,
+  0)` for a chunk now containing the layered grass/dirt/stone content,
+  zero warnings/errors) - confirming the new content flows through the
+  *existing* pipeline unmodified.
+- `ctest` 343/343 passing (bgfx build) / 340/340 (non-bgfx build), up
+  from 342/342 / 339/339.
+- Honestly scoped: only `game:stone` has an item mapping (Phase 5), so
+  breaking grass or dirt currently removes the block without granting
+  an item. No climate/biome/caves/ores/structures/vegetation (brief
+  section 21's later pipeline stages).
 
 ### Phase 16
 

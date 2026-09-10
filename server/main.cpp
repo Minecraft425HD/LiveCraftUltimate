@@ -146,6 +146,13 @@ int main(int argc, char** argv) {
     LCU_LOG_INFO("Headless dedicated server: no SDL, no bgfx, no GPU (see ARCHITECTURE.md)");
 
     // --- Real world simulation (replacing the Phase 0 sleep-only placeholder) ---
+    // Registered in the exact same order as VoxelClient's own block
+    // registration (stone, then grass, then dirt) - BlockId assignment
+    // is sequential, and every wire message carrying a raw block_id
+    // (BlockAction/BlockChange/ChunkData) relies on both sides agreeing
+    // on what each id means, the same simplification already
+    // documented for item ids (see DECISIONS.md "server-side inventory
+    // (Phase 15)").
     lcu::voxel::BlockRegistry block_registry;
     lcu::voxel::BlockDefinition stone_def;
     stone_def.namespaced_id = "game:stone";
@@ -153,6 +160,20 @@ int main(int argc, char** argv) {
     stone_def.is_transparent = false;
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
+
+    lcu::voxel::BlockDefinition grass_def;
+    grass_def.namespaced_id = "game:grass";
+    grass_def.display_name = "Grass";
+    grass_def.is_transparent = false;
+    grass_def.has_collision = true;
+    const lcu::voxel::BlockId grass_id = block_registry.register_block(grass_def);
+
+    lcu::voxel::BlockDefinition dirt_def;
+    dirt_def.namespaced_id = "game:dirt";
+    dirt_def.display_name = "Dirt";
+    dirt_def.is_transparent = false;
+    dirt_def.has_collision = true;
+    const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
@@ -187,7 +208,7 @@ int main(int argc, char** argv) {
 #endif
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, stone_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id);
     });
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
     for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {

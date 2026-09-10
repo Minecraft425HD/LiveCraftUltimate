@@ -16,9 +16,10 @@ history below). The project is now past that original 12-phase queue
 and into open-ended continued development (brief: "the goal is a
 complete playable game, not a completed checklist") - **Phase 13 (block
 edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
-(server-side inventory)**, and **Phase 16 (per-movement chunk
-streaming)** are done; see "Reality Audit" and "Last Completed Task"
-below for what they cover and what's next.
+(server-side inventory)**, **Phase 16 (per-movement chunk streaming)**,
+and **Phase 17 (surface/subsurface terrain content)** are done; see
+"Reality Audit" and "Last Completed Task" below for what they cover and
+what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -409,6 +410,46 @@ and only usually agree, not literally synchronized - occasionally
 redundant but never incorrect, since either order converges to the
 same overwritten state.
 
+**Phase 17 (surface/subsurface terrain content)**: closed a
+long-flagged content gap - worldgen only ever placed one block type
+below the terrain height, with no registered "game:grass"/"game:dirt"
+anywhere real to place instead. `lcu::world::worldgen::
+generate_terrain_chunk`'s signature changed from a single `solid_block`
+parameter to `(surface_block, subsurface_block, stone_block)`: the
+topmost solid layer is now `surface_block`, the next `kSubsurfaceDepth`
+(3) layers are `subsurface_block`, everything deeper is `stone_block` -
+a real grass-over-dirt-over-stone column, not a stub. `VoxelClient` and
+`VoxelServer` both register `game:grass` and `game:dirt` block
+definitions (identical fields, identical registration order right after
+`game:stone` on both sides, so their `BlockId`s coincide by
+construction - the same simplification already carried for item ids,
+see DECISIONS.md) and pass them into `generate_terrain_chunk`.
+
+Both new blocks are fully real content, not placeholders: real
+`has_collision`/`is_transparent` definitions (so physics/collision and
+greedy-mesh face culling work automatically - both are entirely
+data-driven off `BlockRegistry`, never hardcoded by block id), real
+network replication (a `ChunkData` snapshot's compressed bytes are
+whatever block ids the chunk actually holds - no code path anywhere
+assumes "only stone exists"), real break/place mutation through the
+existing generic `BlockAction`/`BlockChange`/local-edit paths. The one
+explicitly-scoped gap: only `game:stone` has an item mapping (Phase 5),
+so breaking grass or dirt currently removes the block without granting
+an item - an honest, bounded limitation (see Known Limitations), not a
+hidden one.
+
+4 unit tests updated and 2 new ones added (`SurfaceLayerIsExactlyOneBlockThickAtTheHeight`,
+plus the renamed `ChunkFarBelowTerrainIsEntirelyStone`) for the new
+layering behavior. Verified via a real single-player run (36-chunk
+world generates and loads with no crash, `LCU_VERIFY_BREAK_PLACE`
+round-trips cleanly) and a real two-process networked run (`Sent 1
+chunk(s) (1 fragment(s))` / `Applied server ChunkData for chunk (0, 1,
+0)` for a chunk now containing the layered grass/dirt/stone content,
+zero warnings/errors) - confirming the new content flows through the
+*existing* generation/meshing/collision/replication pipeline
+unmodified, not a special case bolted on beside it. `ctest` 343/343
+(bgfx) / 340/340 (non-bgfx), up from 342/342 / 339/339.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -421,11 +462,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 342/342 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 343/343 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 339/339 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 340/340 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -485,11 +526,15 @@ None currently tracked.
   worlds want - still true, and still nothing calls it (see above), so
   there's still no real caller to validate a disc-shaped version
   against.
-- Worldgen only implements continental+terrain (brief section 21's first
-  two pipeline stages) - no climate/biome/caves/ores/structures/
-  vegetation/decoration, and no surface/subsurface block variation
-  (dirt/grass over stone) - single block type fills everything below
-  the height.
+- ~~Worldgen ... no surface/subsurface block variation (dirt/grass over
+  stone) - single block type fills everything below the height~~
+  **Fixed** (Phase 17, see "Last Completed Task" below and
+  TASK_QUEUE.md): `generate_terrain_chunk` now places a real
+  `game:grass` surface layer, `game:dirt` for the next few layers, and
+  `game:stone` deeper. Still no climate/biome/caves/ores/structures/
+  vegetation/decoration (brief section 21's later pipeline stages) -
+  every column still uses the same three block ids regardless of
+  position or depth beyond the fixed layering above.
 - Chunk save/load (`engine/serialization::chunk_serializer`) is
   unit-tested in isolation but still not wired to any actual trigger in
   `VoxelClient` or `VoxelServer` (no "save world" command, no server
@@ -748,23 +793,29 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Extend server-side inventory past `game:stone`**, closing Phase
+1. **Item mappings for `game:grass`/`game:dirt`**, closing Phase 17's
+   remaining honest gap: both blocks are fully real terrain content now
+   (collidable, meshed, replicated, breakable/placeable), but breaking
+   either currently grants no item, since Phase 5's break->item mapping
+   is still hardcoded to `game:stone` alone.
+2. **Extend server-side inventory past `game:stone`**, closing Phase
    15's remaining honest gap: there's still no general block-id-to-
    item-id mapping, so any other registered block (mod content
    especially) places without a server-side item check, and inventory
    has no persistence across a disconnect/reconnect.
-2. **Interest-scoped chunk unloading**, closing Phase 16's remaining
+3. **Interest-scoped chunk unloading**, closing Phase 16's remaining
    honest gap: the server's shared `World` only ever grows (see
    DECISIONS.md "server-side chunk streaming never unloads") - a real
    long-running server needs a way to drop chunks nothing currently
    connected still needs, without breaking a client that's still
    standing in one another client abandoned.
-3. Continue down brief section 10's list after that: content/gameplay
-   systems (more block/item types, a real crafting-UI caller for the
-   already-implemented `RecipeRegistry`), then modding depth (a second
-   real event beyond `block_broken`), then platform verification
-   (Android/iOS on an actual toolchain), then performance work informed
-   by `VoxelBenchmarks`' real numbers, then UI/audio polish.
+4. Continue down brief section 10's list after that: further
+   content/gameplay systems (a real crafting-UI caller for the
+   already-implemented `RecipeRegistry`, more block/item variety), then
+   modding depth (a second real event beyond `block_broken`), then
+   platform verification (Android/iOS on an actual toolchain), then
+   performance work informed by `VoxelBenchmarks`' real numbers, then
+   UI/audio polish.
 
 Update state docs and commit after each, same discipline as every phase
 before it - see "Resume Protocol" implicit throughout this file: read

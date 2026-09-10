@@ -1221,3 +1221,43 @@ loaded is a separate, smaller simplification (bounded memory growth
 over a very long session, not a correctness issue) that a future phase
 can address independently, once an actual long-session memory
 measurement gives a reason to.
+
+## 2026-09-10 — Surface/subsurface terrain content is a fixed 3-layer scheme, not biome-driven (Phase 17)
+
+**Context:** Worldgen only ever placed one block type below the
+terrain height, honestly flagged as a gap since Phase 3 - a real voxel
+game needs at least a surface/subsurface distinction (grass over dirt
+over stone) to look and feel like actual terrain rather than a solid
+block of one material. The bigger question this raised: how much of
+brief section 21's full pipeline (climate -> biome -> terrain ->
+caves -> ores -> structures -> vegetation -> decoration) to build in
+one pass.
+
+**Decision:** Build exactly the "terrain" stage's surface/subsurface
+layering - a fixed `kSubsurfaceDepth` (3) of `game:dirt` beneath a
+single `game:grass` cap, `game:stone` beneath that, identical for every
+column regardless of position. Not climate/biome-driven (no desert
+sand, no snow, no per-region variation) - there is still nothing
+downstream that consumes a biome concept (no biome registry, no biome-
+aware block selection, no climate noise layer), so building biome
+infrastructure now would be exactly the kind of speculative work brief
+section 76/98 rules out. The three-block scheme is deliberately the
+smallest real step that turns "one uniform material" into "recognizable
+terrain," each layer chosen to match what players of this genre already
+expect by convention rather than tuned against any in-project reference
+(there isn't one yet - no textures, no screenshots, no visual reference
+this sandbox can produce). A real biome system is real future work, not
+avoided out of difficulty - it's ordered behind whatever else the brief
+section 10 priority list surfaces as more valuable first.
+
+**Why item mapping for the two new blocks isn't part of this phase:**
+Phase 5's break->item logic is a hardcoded `if (broken_block ==
+stone_id)` check in both `VoxelClient` and `VoxelServer`, not a general
+block-to-item lookup table. Extending it to grass/dirt is a small,
+well-understood follow-up (two more items, two more hardcoded checks,
+mirroring the existing pattern exactly) deliberately left to its own
+pass rather than folded into this one, so each commit stays reviewable
+against a single, clearly-stated change (brief section 96's own
+practice, followed throughout this project's phase history) - not
+because it's hard, just because it's a distinct piece of work with its
+own honest "done" definition.

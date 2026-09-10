@@ -52,23 +52,32 @@ TEST(Worldgen, AdjacentColumnsAreSmoothNotRandom) {
 }
 
 TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
+    constexpr lcu::voxel::BlockId kGrass = 2;
+    constexpr lcu::voxel::BlockId kDirt = 4;
     constexpr lcu::voxel::BlockId kStone = 3;
+    constexpr lcu::i32 kSubsurfaceDepth = 3;  // matches worldgen.cpp's own kSubsurfaceDepth.
     const ChunkCoord coord{0, 0, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/99, kStone);
+    generate_terrain_chunk(chunk, coord, /*seed=*/99, kGrass, kDirt, kStone);
 
-    // Spot-check a handful of columns against terrain_height directly.
+    // Spot-check a handful of columns against terrain_height directly -
+    // grass at the surface, dirt for kSubsurfaceDepth layers beneath it,
+    // stone deeper, air above.
     for (lcu::u32 lx : {0u, 5u, 15u}) {
         for (lcu::u32 lz : {0u, 8u, 15u}) {
             const lcu::i32 height = terrain_height(99, static_cast<lcu::i32>(lx), static_cast<lcu::i32>(lz));
             for (lcu::u32 ly = 0; ly < Chunk::kEdgeLength; ++ly) {
-                const bool expect_solid = static_cast<lcu::i32>(ly) <= height;
+                const lcu::i32 world_y = static_cast<lcu::i32>(ly);
                 const auto block = chunk.block_at(lx, ly, lz);
-                if (expect_solid) {
-                    EXPECT_EQ(block, kStone) << "(" << lx << "," << ly << "," << lz << ")";
-                } else {
+                if (world_y > height) {
                     EXPECT_EQ(block, lcu::voxel::kAirBlockId) << "(" << lx << "," << ly << "," << lz << ")";
+                } else if (world_y == height) {
+                    EXPECT_EQ(block, kGrass) << "(" << lx << "," << ly << "," << lz << ")";
+                } else if (world_y > height - kSubsurfaceDepth) {
+                    EXPECT_EQ(block, kDirt) << "(" << lx << "," << ly << "," << lz << ")";
+                } else {
+                    EXPECT_EQ(block, kStone) << "(" << lx << "," << ly << "," << lz << ")";
                 }
             }
         }
@@ -76,26 +85,60 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
 }
 
 TEST(Worldgen, ChunkFarAboveTerrainIsEntirelyAir) {
+    constexpr lcu::voxel::BlockId kGrass = 2;
+    constexpr lcu::voxel::BlockId kDirt = 4;
     constexpr lcu::voxel::BlockId kStone = 3;
     // world_y range [1600, 1616) - far above any plausible terrain height.
     const ChunkCoord coord{0, 100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kStone);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kGrass, kDirt, kStone);
 
     EXPECT_TRUE(chunk.is_empty());
 }
 
-TEST(Worldgen, ChunkFarBelowTerrainIsEntirelySolid) {
+TEST(Worldgen, ChunkFarBelowTerrainIsEntirelyStone) {
+    constexpr lcu::voxel::BlockId kGrass = 2;
+    constexpr lcu::voxel::BlockId kDirt = 4;
     constexpr lcu::voxel::BlockId kStone = 3;
-    // world_y range [-1600, -1584) - far below any plausible terrain height.
+    // world_y range [-1600, -1584) - far below any plausible terrain
+    // height (and far below the surface/subsurface layers near it), so
+    // every block should be stone, never grass or dirt.
     const ChunkCoord coord{0, -100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kStone);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kGrass, kDirt, kStone);
 
     EXPECT_EQ(chunk.block_at(0, 0, 0), kStone);
     EXPECT_EQ(chunk.block_at(15, 15, 15), kStone);
     EXPECT_EQ(chunk.block_at(7, 3, 12), kStone);
     EXPECT_FALSE(chunk.is_empty());
+}
+
+TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
+    constexpr lcu::voxel::BlockId kGrass = 2;
+    constexpr lcu::voxel::BlockId kDirt = 4;
+    constexpr lcu::voxel::BlockId kStone = 3;
+    constexpr lcu::u32 kSeed = 5;
+
+    // Locate the actual chunk containing world (0, height, 0)'s surface
+    // - the terrain height isn't guaranteed to land inside chunk
+    // coordinate 0 (kBaseHeight=32 in worldgen.cpp rarely dips below one
+    // 16-block chunk near the origin), so generate whichever chunk
+    // really contains it instead of assuming a hardcoded coordinate does.
+    const lcu::i32 height = terrain_height(kSeed, 0, 0);
+    ASSERT_GT(height, 0) << "need a positive height so height-1 stays a valid local Y for this check";
+    const auto split =
+        lcu::voxel::world_to_chunk_and_local({0, height, 0}, Chunk::kEdgeLength);
+    const auto split_below =
+        lcu::voxel::world_to_chunk_and_local({0, height - 1, 0}, Chunk::kEdgeLength);
+    ASSERT_EQ(split.chunk, split_below.chunk) << "height and height-1 landed in different chunks - pick a "
+                                                  "different seed/column, or generate both chunks";
+
+    Chunk chunk;
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kGrass, kDirt, kStone);
+
+    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), kGrass);
+    EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z), kDirt)
+        << "block directly beneath the surface should be dirt, not grass or stone";
 }
