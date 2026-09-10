@@ -704,6 +704,33 @@ int main() {
                             }
                             break;
                         }
+                        case protocol::MessageType::InventoryUpdate: {
+                            if (const auto update = protocol::decode_inventory_update(message.payload)) {
+                                // Reconciles this client's own optimistic,
+                                // client-authoritative item guess (fired
+                                // at request-send time - see
+                                // DECISIONS.md) against the server's real
+                                // outcome, the same way PlayerCorrection
+                                // reconciles predicted movement: only
+                                // visibly changes anything when the
+                                // optimistic guess and the server's
+                                // authoritative count actually disagree
+                                // (a rejected BlockAction, or a race).
+                                const lcu::items::ItemId item_id = update->item_id;
+                                const lcu::u32 current = player_inventory.count_item(item_id);
+                                if (update->count > current) {
+                                    player_inventory.add_item(item_registry, {item_id, update->count - current});
+                                } else if (update->count < current) {
+                                    player_inventory.remove_item(item_id, current - update->count);
+                                }
+                                if (update->count != current) {
+                                    LCU_LOG_INFO(
+                                        "Reconciled inventory item {} to authoritative count {} (was {})", item_id,
+                                        update->count, current);
+                                }
+                            }
+                            break;
+                        }
                         case protocol::MessageType::Heartbeat:
                         case protocol::MessageType::PlayerInput:
                         case protocol::MessageType::BlockAction:

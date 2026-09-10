@@ -311,4 +311,24 @@ std::optional<std::vector<u8>> decode_chunk_data_fragment(const std::vector<u8>&
     return std::vector<u8>(payload.begin() + 1, payload.end());
 }
 
+std::vector<u8> encode_inventory_update(const InventoryUpdate& message) {
+    std::vector<u8> out;
+    out.reserve(7);
+    out.push_back(static_cast<u8>(MessageType::InventoryUpdate));
+    write_u16_be(out, message.item_id);
+    write_u32_be(out, message.count);
+    return out;
+}
+
+std::optional<InventoryUpdate> decode_inventory_update(const std::vector<u8>& payload) {
+    // type(1) + item_id(2) + count(4) = 7 bytes.
+    if (!has_type(payload, MessageType::InventoryUpdate) || payload.size() < 7) {
+        return std::nullopt;
+    }
+    InventoryUpdate message;
+    message.item_id = read_u16_be(payload.data() + 1);
+    message.count = read_u32_be(payload.data() + 3);
+    return message;
+}
+
 }  // namespace game::systems::protocol

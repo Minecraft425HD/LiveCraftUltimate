@@ -27,6 +27,8 @@ enum class MessageType : lcu::u8 {
                              // and reassembled before decode_chunk_data ever sees it.
     ChunkDataFragment = 8,  // server -> client, on connect: one fragment of a fragmented ChunkData message.
                              // ReliableOrdered.
+    InventoryUpdate = 9,    // server -> one client, after a BlockAction that affects inventory (accepted or
+                             // rejected): that client's authoritative count for one item. ReliableOrdered.
 };
 
 // Reads just the type byte, for a caller that needs to dispatch before
@@ -144,5 +146,23 @@ std::optional<ChunkData> decode_chunk_data(const std::vector<lcu::u8>& payload);
 // on the reassembled result.
 std::vector<lcu::u8> encode_chunk_data_fragment(const std::vector<lcu::u8>& fragment_bytes);
 std::optional<std::vector<lcu::u8>> decode_chunk_data_fragment(const std::vector<lcu::u8>& payload);
+
+// The server's authoritative count of one item in the requesting
+// client's server-side inventory (brief section 20 "never trust client
+// data" applied to item accounting, not just block edits) - sent after
+// every `BlockAction` that could have affected it, accepted or
+// rejected, so a client's own optimistic local guess (see
+// DECISIONS.md "item pickup/consumption stays client-authoritative")
+// gets corrected the moment it diverges from what the server actually
+// did, not just when it happens to agree. `item_id` is meaningful only
+// insofar as both sides register the same items in the same order (see
+// DECISIONS.md "server-side inventory (Phase 15)") - not a general
+// cross-process item-id sync mechanism.
+struct InventoryUpdate {
+    lcu::u16 item_id = 0;
+    lcu::u32 count = 0;
+};
+std::vector<lcu::u8> encode_inventory_update(const InventoryUpdate& message);
+std::optional<InventoryUpdate> decode_inventory_update(const std::vector<lcu::u8>& payload);
 
 }  // namespace game::systems::protocol

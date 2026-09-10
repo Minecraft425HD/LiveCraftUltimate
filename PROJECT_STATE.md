@@ -15,9 +15,9 @@ complete for what this headless sandbox can verify (see the per-phase
 history below). The project is now past that original 12-phase queue
 and into open-ended continued development (brief: "the goal is a
 complete playable game, not a completed checklist") - **Phase 13 (block
-edit replication)** and **Phase 14 (chunk network streaming)** are done;
-see "Reality Audit" and "Last Completed Task" below for what they cover
-and what's next.
+edit replication)**, **Phase 14 (chunk network streaming)**, and
+**Phase 15 (server-side inventory)** are done; see "Reality Audit" and
+"Last Completed Task" below for what they cover and what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -300,6 +300,53 @@ sync sent once on connect, not interest-managed by distance (unlike
 loaded-chunk set changes afterward - see NETWORKING.md "Chunk network
 streaming" for the exact edge and DECISIONS.md for the reasoning.
 
+**Phase 15 (server-side inventory)**: closed Phase 13's remaining
+honest gap - item pickup/placement-cost was entirely client-local and
+optimistic, with no server-side accounting and no refund on a rejected
+`BlockAction`. `VoxelServer` now keeps a real, authoritative
+`lcu::items::Inventory` per connected client (`ClientState::inventory`),
+registers the same `game:stone` item `VoxelClient` does (so their
+`ItemId`s coincide by construction), and does two new things inside
+`handle_block_action`: placing `game:stone` is now rejected unless the
+requester actually holds one server-side (a new validity condition
+alongside the existing ones), and a successful break/place of it
+adds/removes one from that client's server-side inventory. A new
+`InventoryUpdate` message (server->one client, `ReliableOrdered`) is
+sent after *every* `BlockAction` - accepted or rejected, at any
+rejection point - carrying that client's current authoritative count.
+
+`VoxelClient` keeps its existing optimistic pickup/consumption
+(unchanged from Phase 13 - fires at request-send time, still the right
+call for responsiveness, see DECISIONS.md), but now reconciles it
+against every `InventoryUpdate` the same way `PlayerCorrection` already
+reconciles predicted movement: compute the delta between the optimistic
+guess and the server's authoritative count, `add_item`/`remove_item` to
+close it, log only when they actually disagreed. This is the real fix
+for the "no rejection feedback, no refund" gap Phase 13 honestly
+flagged - a request the server ends up rejecting no longer leaves the
+client's displayed count silently wrong.
+
+Verified via a real two-process run (`LCU_VERIFY_BREAK_PLACE`): the
+client's log shows the full round trip in both directions - after the
+optimistic break-pickup (`Picked up 1 game:stone (inventory: 1)`) and
+place-consume (`Requesting place ... (inventory: 0)`), two `Reconciled
+inventory item 1 to authoritative count ...` lines appear (0 corrected
+to 1 for the accepted break, then 1 corrected to 0 for the accepted
+place), each immediately followed by the matching `Applied server
+BlockChange` - proving the server's authoritative count and the
+client's optimistic guess actually converged after each round trip, not
+just that a message decoded.
+
+6 new unit tests for `InventoryUpdate` encode/decode. `ctest` 342/342
+passing (bgfx build) / 339/339 (non-bgfx build).
+
+Honestly scoped: only `game:stone` is inventory-gated - there's no
+general block-id-to-item-id mapping, so any other registered block
+(mod content) still places without a server-side item check. No
+persistence either - a server-side inventory lives only for the
+connection's lifetime, lost on disconnect like every other per-client
+server state today.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -312,11 +359,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 337/337 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 342/342 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 334/334 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 339/339 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -328,7 +375,7 @@ AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
 UdpSocket, Address, LoopbackIntegration, FragmentPayload,
 FragmentReassembler, PositionInterpolator,
 PredictionBuffer, ReplicationProtocol (incl. BlockAction/BlockChange/
-ChunkData/ChunkDataFragment),
+ChunkData/ChunkDataFragment/InventoryUpdate),
 LuaState, EventBus,
 RegistryBindings, ModLoader, GenerateSineWave, ComputeStereoPan,
 DistanceAttenuation. JobSystem
@@ -342,9 +389,12 @@ sockets, one deliberately dropping the first real datagram sent) and,
 outside the automated suite, a real two-process `VoxelClient`<->
 `VoxelServer` movement/entity multiplayer run, a real *three*-process
 run (one server, two independent clients) proving block edit replication
-actually converges both clients' worlds, and real two-process chunk-
-streaming runs at both a 1-chunk and a 36-chunk scale (see
-BUILD_STATUS.md); save/load is still unit-tested only, not yet exercised
+actually converges both clients' worlds, real two-process chunk-
+streaming runs at both a 1-chunk and a 36-chunk scale, and a real
+two-process run proving server-side inventory reconciliation actually
+converges an optimistic client guess with the server's authoritative
+count (see BUILD_STATUS.md); save/load is still unit-tested only, not
+yet exercised
 through a full server-save/client-load cycle since there's no
 server-side world-save trigger yet, and `VoxelClient`/`VoxelServer`
 don't call it either - see Known Limitations.
@@ -437,10 +487,17 @@ None currently tracked.
   NETWORKING.md "Block edit replication") - server-authoritative,
   broadcast to every connected client *and* replayed in full to any
   client that connects later (`block_change_history`, so a late joiner
-  still catches up), both verified via real multi-process runs. What
-  neither phase covers: a server-side inventory (item pickup/cost is
-  still client-local and optimistic, unrefunded if the server rejects
-  the request), and the edit history itself is unbounded for the server
+  still catches up), both verified via real multi-process runs.
+  Server-side inventory (Phase 15, see NETWORKING.md "Server-side
+  inventory") now also exists for `game:stone` specifically - `VoxelServer`
+  keeps an authoritative per-client `Inventory`, gates placing
+  `game:stone` on actually holding one, and corrects a client's
+  optimistic guess via a new `InventoryUpdate` message after every
+  `BlockAction`, closing the "unrefunded on rejection" gap for that
+  item. What none of the three phases covers: any block/item besides
+  `game:stone` isn't inventory-gated (no general block-id-to-item-id
+  mapping), server-side inventory has no persistence across a
+  disconnect, and the edit history itself is unbounded for the server
   process's lifetime rather than compacted against persisted state (see
   NETWORKING.md).
 - `VoxelClient`'s networked mode logs the `Welcome` message's
@@ -621,16 +678,16 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Server-side inventory**, closing Phase 13's remaining honest gap
-   (item pickup/placement-cost is still client-local and optimistic,
-   unrefunded on a rejected `BlockAction`) - needed before multiplayer
-   item economy (crafting, drops, trading) can be real rather than
-   per-client fiction.
-2. **Per-movement chunk streaming**, closing Phase 14's remaining honest
+1. **Per-movement chunk streaming**, closing Phase 14's remaining honest
    gap: the initial connect-time `ChunkData` sync is real and verified,
    but a client's/server's loaded-chunk set can still change afterward
    (`World::update_streaming` as a player moves) with nothing re-syncing
    it - only the connect-time snapshot is covered today.
+2. **Extend server-side inventory past `game:stone`**, closing Phase
+   15's remaining honest gap: there's still no general block-id-to-
+   item-id mapping, so any other registered block (mod content
+   especially) places without a server-side item check, and inventory
+   has no persistence across a disconnect/reconnect.
 3. Continue down brief section 10's list after that: content/gameplay
    systems (more block/item types, a real crafting-UI caller for the
    already-implemented `RecipeRegistry`), then modding depth (a second

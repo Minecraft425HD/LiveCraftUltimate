@@ -210,3 +210,33 @@ TEST(ReplicationProtocol, ChunkDataFragmentRoundTrips) {
 TEST(ReplicationProtocol, ChunkDataFragmentRejectsWrongMessageType) {
     EXPECT_EQ(decode_chunk_data_fragment(encode_welcome({1, 1})), std::nullopt);
 }
+
+TEST(ReplicationProtocol, InventoryUpdateRoundTrips) {
+    const InventoryUpdate sent{1, 42};
+    const auto decoded = decode_inventory_update(encode_inventory_update(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->item_id, 1u);
+    EXPECT_EQ(decoded->count, 42u);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRoundTripsWithZeroCount) {
+    const InventoryUpdate sent{7, 0};
+    const auto decoded = decode_inventory_update(encode_inventory_update(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->item_id, 7u);
+    EXPECT_EQ(decoded->count, 0u);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRejectsTruncatedPayload) {
+    auto bytes = encode_inventory_update({1, 42});
+    bytes.resize(bytes.size() - 1);
+    EXPECT_EQ(decode_inventory_update(bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRejectsWrongMessageType) {
+    EXPECT_EQ(decode_inventory_update(encode_welcome({1, 1})), std::nullopt);
+}
+
+TEST(ReplicationProtocol, PeekTypeIdentifiesInventoryUpdate) {
+    EXPECT_EQ(peek_type(encode_inventory_update({1, 1})), MessageType::InventoryUpdate);
+}

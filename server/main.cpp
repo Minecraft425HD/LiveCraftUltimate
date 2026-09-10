@@ -17,6 +17,7 @@
 #include "lcu/core/quality_profile.h"
 #include "lcu/core/types.h"
 #include "lcu/ecs/registry.h"
+#include "lcu/items/inventory.h"
 #include "lcu/items/item_registry.h"
 #include "lcu/network/connection.h"
 #include "lcu/network/fragmentation.h"
@@ -124,6 +125,11 @@ struct ClientState {
     // ChunkData messages from each other (see lcu::network::fragment_payload).
     // A per-client counter is enough - see fragmentation.h.
     lcu::u16 next_chunk_message_id = 0;
+    // Server-authoritative item storage (brief section 20 / Phase 15) -
+    // 9 slots, matching VoxelClient's own `player_inventory`. Starts
+    // empty; populated only by validated `BlockAction`s (see
+    // handle_block_action below), never by the client directly.
+    lcu::items::Inventory inventory{9};
 };
 
 }  // namespace
@@ -143,15 +149,18 @@ int main(int argc, char** argv) {
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
-    // Not otherwise used by the server yet - there is no server-side
-    // inventory/item-drop system (block edits themselves are now
-    // replicated, see handle_block_action below and NETWORKING.md, but
-    // items stay entirely client-local for now). Exists here purely so
-    // mods share one namespaced id space across client and server (see
-    // the LCU_ENABLE_SCRIPTING block below) - a mod that calls
-    // register_item must not fail to load on the server just because
-    // nothing server-side reads the result yet.
+    // Mirrors VoxelClient's own registration exactly (brief section 20:
+    // server-side inventory, Phase 15) - both sides independently
+    // register the same one item in the same order, so their ItemIds
+    // coincide by construction, the same simplification block/item ids
+    // already carry for mod content (see DECISIONS.md "server-side
+    // inventory (Phase 15)").
     lcu::items::ItemRegistry item_registry;
+    lcu::items::ItemDefinition stone_item_def;
+    stone_item_def.namespaced_id = "game:stone";
+    stone_item_def.display_name = "Stone";
+    stone_item_def.max_stack_size = 64;
+    const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Mods run here too (Phase 9) so a mod's registered blocks/items exist
@@ -243,6 +252,17 @@ int main(int argc, char** argv) {
     // forever.
     std::vector<protocol::BlockChange> block_change_history;
 
+    // Sends `client`'s current authoritative game:stone count - called
+    // after every BlockAction that could have affected it, accepted or
+    // rejected, so the client's own optimistic local guess (see
+    // DECISIONS.md) gets corrected the instant it diverges from what
+    // the server actually did.
+    auto send_inventory_update = [&](ClientState& client) {
+        client.connection.send(
+            lcu::network::Channel::ReliableOrdered,
+            protocol::encode_inventory_update({stone_item_id, client.inventory.count_item(stone_item_id)}));
+    };
+
     // Server-authoritative block editing (brief section 8/19/20): validates
     // and applies a client's requested break/place against this server's
     // own World, then broadcasts the result to every connected client
@@ -250,9 +270,11 @@ int main(int argc, char** argv) {
     // speculatively for a block edit, see DECISIONS.md). Rejects a
     // request whose target chunk isn't loaded, whose target block isn't
     // actually breakable/placeable given its current state, whose
-    // requested block_id isn't a registered block, or whose target is too
-    // far from the requesting client's own known position - logged, no
-    // reply sent (the requester's world simply doesn't change).
+    // requested block_id isn't a registered block, whose target is too
+    // far from the requesting client's own known position, or (for a
+    // game:stone place specifically) whose requester doesn't actually
+    // hold one server-side - logged, no reply sent beyond the inventory
+    // correction above (the requester's world simply doesn't change).
     auto handle_block_action = [&](const lcu::network::Address& from, ClientState& client,
                                     const protocol::BlockAction& action) {
         const lcu::voxel::BlockWorldCoord target{action.x, action.y, action.z};
@@ -263,6 +285,7 @@ int main(int argc, char** argv) {
         if (distance > kMaxBlockActionRange) {
             LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) is {:.1f} blocks away (max {})",
                          from.to_string(), target.x, target.y, target.z, distance, kMaxBlockActionRange);
+            send_inventory_update(client);
             return;
         }
 
@@ -271,6 +294,7 @@ int main(int argc, char** argv) {
         if (chunk == nullptr) {
             LCU_LOG_WARN("Rejected BlockAction from {}: chunk ({},{},{}) isn't loaded", from.to_string(),
                          split.chunk.x, split.chunk.y, split.chunk.z);
+            send_inventory_update(client);
             return;
         }
 
@@ -281,12 +305,22 @@ int main(int argc, char** argv) {
             valid = current != lcu::voxel::kAirBlockId;
             new_id = lcu::voxel::kAirBlockId;
         } else {
-            valid = current == lcu::voxel::kAirBlockId && action.block_id < block_registry.count();
+            // Placing game:stone specifically requires the client to
+            // actually hold one, server-side (brief section 20 applied
+            // to item accounting, not just block edits - see
+            // DECISIONS.md "server-side inventory (Phase 15)"). Any
+            // other registered block_id (e.g. mod content) has no
+            // item-backing infrastructure yet, so it isn't gated here.
+            const bool has_required_item =
+                action.block_id != stone_id || client.inventory.count_item(stone_item_id) > 0;
+            valid = current == lcu::voxel::kAirBlockId && action.block_id < block_registry.count() &&
+                    has_required_item;
             new_id = action.block_id;
         }
         if (!valid) {
             LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) current_block={} requested_block={}",
                          from.to_string(), target.x, target.y, target.z, current, action.block_id);
+            send_inventory_update(client);
             return;
         }
 
@@ -298,6 +332,13 @@ int main(int argc, char** argv) {
             mod_event_bus.emit_block_broken(target.x, target.y, target.z, current);
         }
 #endif
+        if (action.action == protocol::BlockActionType::Break && current == stone_id) {
+            client.inventory.add_item(item_registry, {stone_item_id, 1});
+        } else if (action.action == protocol::BlockActionType::Place && new_id == stone_id) {
+            client.inventory.remove_item(stone_item_id, 1);
+        }
+        send_inventory_update(client);
+
         const protocol::BlockChange change{target.x, target.y, target.z, new_id};
         block_change_history.push_back(change);
         const auto change_bytes = protocol::encode_block_change(change);

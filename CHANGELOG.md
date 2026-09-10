@@ -2,7 +2,41 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15
+
+### Phase 15
+
+- `VoxelServer` now registers the same `game:stone` item `VoxelClient`
+  does and gives each connected client a real, authoritative 9-slot
+  `lcu::items::Inventory` (`ClientState::inventory`) - closes Phase
+  13's honestly-flagged gap: item pickup/placement-cost was entirely
+  client-local and optimistic, with no server-side accounting and no
+  refund on a rejected `BlockAction`.
+- `handle_block_action`: placing `game:stone` is now rejected unless
+  the requester actually holds one server-side (a new validity
+  condition alongside the existing chunk-loaded/target-state checks); a
+  successful break/place of it adds/removes one from that client's
+  server-side inventory.
+- Added `InventoryUpdate` (server->one client, `ReliableOrdered`) to
+  `game::systems::protocol` - sent after every `BlockAction`, accepted
+  or rejected, carrying that client's current authoritative
+  `game:stone` count. 6 new unit tests.
+- `VoxelClient` keeps its existing optimistic pickup/consumption
+  (fires at request-send time, unchanged from Phase 13) but now
+  reconciles it against every `InventoryUpdate`, the same pattern
+  `PlayerCorrection` already uses for predicted movement.
+- Verified via a real two-process run (`LCU_VERIFY_BREAK_PLACE`): the
+  client's log shows the optimistic guess and the server's
+  authoritative count actually disagree then converge in both
+  directions - `Reconciled inventory item 1 to authoritative count 1
+  (was 0)` right after the break, `... count 0 (was 1)` right after the
+  place, each immediately followed by the matching `Applied server
+  BlockChange` - not just that a message decoded.
+- `ctest` 342/342 passing (bgfx build) / 339/339 (non-bgfx build), up
+  from 337/337 / 334/334.
+- Honestly scoped: only `game:stone` is inventory-gated (no general
+  block-id-to-item-id mapping exists yet), and there's no persistence
+  across a disconnect/reconnect.
 
 ### Phase 14
 

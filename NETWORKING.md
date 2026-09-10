@@ -91,7 +91,7 @@ control yet".
 `engine/network` itself has no opinion on what a payload *means* - that
 framing lives in `game::systems::protocol` (`replication_protocol.h`/
 `.cpp`), shared by `VoxelClient` and `VoxelServer` so they can't
-independently drift out of sync. All nine messages are a one-byte type
+independently drift out of sync. All ten messages are a one-byte type
 tag followed by fixed big-endian fields (hand-rolled, not a generic
 serialization framework - see DECISIONS.md):
 
@@ -136,6 +136,10 @@ serialization framework - see DECISIONS.md):
   `ChunkData` message. The receiver's `FragmentReassembler` accumulates
   fragments by `message_id` and hands the reassembled bytes to
   `decode_chunk_data` once every piece has arrived.
+- **InventoryUpdate** (`type=9`, server->one client, sent
+  ReliableOrdered): `[item_id: u16][count: u32]`. That client's
+  authoritative count for one item, sent after every `BlockAction` that
+  could have affected it - see "Server-side inventory" below.
 
 ## Block edit replication (Phase 13)
 
@@ -165,14 +169,16 @@ for a block edit speculatively; it waits for its own `BlockChange` to
 come back over the wire, same as any other client would (see
 DECISIONS.md "block edits are not client-predicted").
 
-Item pickup/consumption stays entirely client-local and optimistic - a
-`VoxelClient` gives itself a `game:stone` item the moment it *sends* a
-break `BlockAction` (not when the `BlockChange` confirming it arrives,
-since every client receives every `BlockChange`, including edits other
-players made, and has no way to tell "was this my own edit" from the
-message alone), and consumes one the moment it sends a place
-`BlockAction`. There is no server-side inventory yet, so a request the
-server ends up rejecting is not refunded.
+Item pickup/consumption still fires client-side, optimistically, the
+moment `VoxelClient` *sends* a break/place `BlockAction` (not when the
+`BlockChange` confirming it arrives, since every client receives every
+`BlockChange`, including edits other players made, and has no way to
+tell "was this my own edit" from the message alone) - unchanged from
+when this was written. What changed in Phase 15: that optimistic guess
+is no longer the only bookkeeping - `VoxelServer` now keeps its own
+authoritative count per client and corrects the client's guess via
+`InventoryUpdate` whenever they disagree, including on a rejected
+request. See "Server-side inventory" below.
 
 Verified via a real three-process run (one `VoxelServer`, two
 `VoxelClient`s - one performing a synthetic break-then-place via
@@ -229,6 +235,68 @@ point. Both loaded worlds are small enough in this vertical slice
 (`radius_xz` ≤ 1) for the gap not to matter yet; a real persistent-world
 server would need per-chunk streaming keyed to the client's own
 `update_streaming` calls, not a single dump at connect time.
+
+## Server-side inventory (Phase 15)
+
+`VoxelServer` now holds a real, authoritative `lcu::items::Inventory`
+(9 slots, matching `VoxelClient`'s own) per connected client
+(`ClientState::inventory`), populated only by validated `BlockAction`s -
+never by anything the client sends directly. Registers the same
+`game:stone` item `VoxelClient` does (namespaced id, display name, max
+stack size all identical - both sides register it as their only item,
+so their `ItemId`s coincide by construction, the same simplification
+block/item ids already carry for mod content).
+
+`handle_block_action` now does two things with it:
+
+- **Placing `game:stone` specifically requires the client to actually
+  hold one, server-side** - a new validity condition alongside the
+  existing chunk-loaded/target-state checks: `action.block_id ==
+  stone_id` with `client.inventory.count_item(stone_item_id) == 0` is
+  rejected exactly like any other invalid request. Any other registered
+  `block_id` (mod content, say) isn't gated - there's no general
+  block->item mapping yet, just this one hardcoded case (see
+  DECISIONS.md).
+- **A successful break of `game:stone` adds one to the requester's
+  server-side inventory; a successful place of it removes one** - the
+  server's own bookkeeping, driven by what it actually just applied to
+  its `World`, not by anything the client claimed.
+
+After *every* `BlockAction` - accepted or rejected, at any of the four
+possible rejection points or after a successful apply - `VoxelServer`
+sends that one client an `InventoryUpdate` with its current
+authoritative `game:stone` count. `VoxelClient` still fires its own
+optimistic pickup/consumption at request-send time (unchanged from
+Phase 13 - see DECISIONS.md), but now reconciles it against every
+`InventoryUpdate` it receives, the same pattern `PlayerCorrection`
+already uses for movement: compute the delta between the optimistic
+local count and the server's authoritative one, `add_item`/`remove_item`
+to close it, and log only when they actually disagreed. This closes the
+Phase 13 "no rejection feedback, no refund" gap for `game:stone`
+specifically: a request the server rejects no longer silently leaves
+the client's displayed count wrong forever - the very next
+`InventoryUpdate` corrects it.
+
+Verified via a real two-process run (one `VoxelServer`, one
+`VoxelClient` via `LCU_VERIFY_BREAK_PLACE`): the client's log shows the
+full disagree-then-reconcile cycle in both directions - after the
+optimistic break-pickup (`Picked up 1 game:stone (inventory: 1)`) and
+the optimistic place-consume (`Requesting place ... (inventory: 0)`),
+two `Reconciled inventory item 1 to authoritative count ...` lines
+appear (`0` corrected to `1`, matching the accepted break; then `1`
+corrected to `0`, matching the accepted place) immediately followed
+by the corresponding `Applied server BlockChange` lines - proving the
+server's authoritative count and the client's optimistic guess actually
+converged after each round trip, not just that a message decoded.
+
+**Known simplification:** only `game:stone` is inventory-backed for
+placement; there's no general block-id-to-item-id mapping, so any other
+registered block (mod content) can still be placed without an item
+check. A malicious client also can't fabricate items it doesn't hold
+(the server never trusts a client-reported count for anything), but
+there's still no persistence - a server-side inventory is entirely
+in-memory for the connection's lifetime, lost on disconnect, same as
+every other per-client server state today.
 
 ## Client-side prediction + reconciliation (Phase 8)
 
@@ -315,8 +383,12 @@ against - not simulated, not mocked. A real *three*-process run (Phase
 independent clients' worlds, not just that a message decodes correctly -
 see "Block edit replication" above. Real two-process runs (Phase 14)
 confirm chunk network streaming end-to-end at both a 1-chunk and a
-36-chunk scale - see "Chunk network streaming" above (see BUILD_STATUS.md
-for the exact reproduce steps for all of the above).
+36-chunk scale - see "Chunk network streaming" above. A real two-process
+run (Phase 15) confirms server-side inventory reconciliation - the
+client's optimistic guess and the server's authoritative count actually
+converge after each round trip, not just that a message decoded - see
+"Server-side inventory" above (see BUILD_STATUS.md for the exact
+reproduce steps for all of the above).
 
 **Not verified**: behavior over a real (non-loopback) network with real
 latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
@@ -352,11 +424,17 @@ from earlier phases' single-client-only verification.
 - ~~Block edits aren't replicated at all~~ **Fixed**: `BlockAction`
   (client -> server, `ReliableOrdered`) / `BlockChange` (server -> all
   clients, `ReliableOrdered`) now make block edits server-authoritative -
-  see "Block edit replication" below. Still deferred: a server-side
-  inventory (item pickup/placement-cost is still client-authoritative,
-  optimistic, and unrefunded on server rejection) and a world-diff
-  catch-up for a client that connects *after* an edit already happened
-  (see below).
+  see "Block edit replication" below.
+- ~~No server-side inventory (item pickup/placement-cost is client-
+  authoritative, optimistic, and unrefunded on server rejection)~~
+  **Fixed** (Phase 15) for `game:stone` specifically: `VoxelServer` now
+  keeps a real, authoritative per-client `Inventory`, gates placing
+  `game:stone` on actually holding one server-side, and corrects the
+  client's optimistic guess via `InventoryUpdate` after every
+  `BlockAction` - see "Server-side inventory" below. Still deferred:
+  any other block/item isn't inventory-gated (no general block-id-to-
+  item-id mapping yet), and there's no persistence across a
+  disconnect/reconnect.
 - ~~No world-diff catch-up for a late-joining client~~ **Fixed**:
   `VoxelServer` now keeps every applied `BlockChange` in order
   (`block_change_history`) and replays the full history to a newly

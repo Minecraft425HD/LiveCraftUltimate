@@ -1135,3 +1135,45 @@ something real needs it). The static-loaded-area simplification this
 depends on is pre-existing and separately tracked (see
 PROJECT_STATE.md "Known Limitations"), not something this phase
 introduced.
+
+## 2026-09-10 — Server-side inventory (Phase 15): only game:stone is item-gated
+
+**Context:** Phase 13 honestly documented that item pickup/placement-
+cost was entirely client-local and optimistic - a `BlockAction` the
+server rejected was never refunded, since the server had no concept of
+"what does this client actually hold" at all. Building that meant
+deciding how much of a real item-economy system to add in one pass: a
+full block-id-to-item-id mapping table (so *any* registered block's
+placement could be gated by holding the corresponding item), or just
+enough to close the concrete gap that exists today (this vertical
+slice has exactly one item, `game:stone`, and exactly one 1:1 block-
+to-item relationship, already hardcoded identically on both
+`VoxelClient` and `VoxelServer`).
+
+**Decision:** Gate only `game:stone` placement on server-side inventory,
+via one hardcoded check (`action.block_id == stone_id`) rather than a
+general mapping table. A generic block->item mapping would be
+speculative infrastructure for content that doesn't exist yet - there
+is exactly one placeable, item-backed block in this codebase today, and
+mod-registered blocks (the only other source of block content) have no
+item-backing infrastructure or expectation of one yet either. This
+mirrors the same reasoning already applied to item drops themselves
+(DECISIONS.md/TASK_QUEUE.md's "item drops are a direct 1:1 block->item
+mapping, not a loot-table system") - extend that exact mapping to
+placement validation now, build a real table if/when a second
+item-backed block actually exists to justify one (brief section 76/98).
+
+**Why `InventoryUpdate` corrects rather than replaces the client's
+optimistic guess:** The natural alternative - stop predicting
+client-side at all, wait for the server's `InventoryUpdate` before ever
+changing the displayed count - would reintroduce exactly the
+round-trip-delay UX problem `DECISIONS.md`'s "block edits are not
+client-predicted" entry already accepted for block edits specifically
+(there, reverting a placed/broken block is visually jarring; here,
+predicting an item count that turns out wrong is a much smaller,
+easily-corrected discrepancy, not a full undo). Keeping the client's
+existing optimistic prediction and reconciling it against the server's
+authoritative count - exactly `PredictionBuffer`'s pattern for player
+movement, applied to a scalar instead of a physics state - gets both:
+instant local feedback, and eventual correctness the moment a rejection
+or race actually happens.

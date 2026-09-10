@@ -194,10 +194,47 @@ interest-managed by distance and not re-streamed as either side's
 loaded-chunk set changes afterward (see NETWORKING.md "Chunk network
 streaming").
 
+## Phase 15 — Server-side inventory (post-original-queue; closes Phase 13's remaining honest gap)
+
+Item pickup/placement-cost was entirely client-local and optimistic
+with no server-side accounting at all - a `BlockAction` the server
+rejected was never refunded, honestly flagged as a known gap in Phase
+13's own writeup.
+
+- [x] `VoxelServer` registers the same `game:stone` item `VoxelClient`
+  does (identical namespaced id/display name/max stack size, so their
+  `ItemId`s coincide by construction) and gives each `ClientState` a
+  real 9-slot `lcu::items::Inventory`.
+- [x] `handle_block_action`: placing `game:stone` is now rejected
+  unless the requester actually holds one server-side (a new validity
+  condition); a successful break/place of it adds/removes one from that
+  client's server-side inventory.
+- [x] `InventoryUpdate` (server->one client, `ReliableOrdered`) added
+  to `game::systems::protocol` - sent after every `BlockAction`,
+  accepted or rejected, carrying that client's current authoritative
+  `game:stone` count. 6 new unit tests.
+- [x] `VoxelClient` keeps its existing optimistic pickup/consumption
+  (unchanged - still fires at request-send time) but now reconciles it
+  against every `InventoryUpdate`, the same pattern `PlayerCorrection`
+  already uses for movement.
+- [x] Verified via a real two-process run (`LCU_VERIFY_BREAK_PLACE`):
+  the client's log shows the optimistic guess and the server's
+  authoritative count actually disagree then converge in both
+  directions (`Reconciled inventory item 1 to authoritative count 1
+  (was 0)` right after the break, `... count 0 (was 1)` right after the
+  place), each immediately followed by the matching `Applied server
+  BlockChange` - not just that a message decoded. `ctest` 342/342
+  (bgfx) / 339/339 (non-bgfx), up from 337/337 / 334/334.
+
+Honestly scoped: only `game:stone` is inventory-gated - no general
+block-id-to-item-id mapping exists, so any other registered block (mod
+content) still places without a server-side item check. No persistence
+across a disconnect either.
+
 Next per brief section 10's priority order (multiplayer fundamentals
 before content/polish) - see PROJECT_STATE.md "Next Task" for the full
-reasoning: a server-side inventory to close Phase 13's remaining honest
-gap, then per-movement chunk streaming to close Phase 14's.
+reasoning: per-movement chunk streaming to close Phase 14's remaining
+gap, then extending server-side inventory past `game:stone`.
 
 ---
 
@@ -370,20 +407,33 @@ UDP datagram - closed via a generic `fragment_payload`/
 messages; `VoxelServer` now sends every newly-connecting client a full,
 fragmented snapshot of its currently-loaded world, and `VoxelClient`
 reassembles, applies, relights, and remeshes it. Verified via two real
-two-process runs (1-chunk and 36-chunk scale). See PROJECT_STATE.md
-"Reality Audit" and "Next Task" for the full picture and what's next (a
-server-side inventory, then per-movement chunk streaming).
+two-process runs (1-chunk and 36-chunk scale).
+
+Phase 15 (server-side inventory, post-queue) closes Phase 13's
+remaining honest gap: `VoxelServer` now keeps a real, authoritative
+per-client `Inventory`, gates placing `game:stone` on actually holding
+one server-side, and corrects a client's optimistic local guess via a
+new `InventoryUpdate` message after every `BlockAction` - accepted or
+rejected. Verified via a real two-process run showing the optimistic
+guess and the server's authoritative count actually disagree then
+converge in both directions, not just that a message decoded. See
+PROJECT_STATE.md "Reality Audit" and "Next Task" for the full picture
+and what's next (per-movement chunk streaming, then extending
+server-side inventory past `game:stone`).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
 crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
-a loot-table system; lighting is single-chunk scoped (no cross-chunk
+a loot-table system (now server-enforced for `game:stone` specifically,
+see Phase 15 - still no general mapping for anything else); lighting is
+single-chunk scoped (no cross-chunk
 bleed); `World::update_streaming` still isn't called by either
 `VoxelClient` or `VoxelServer` (a static area is loaded once at
 startup, now synced once more via Phase 14's connect-time `ChunkData`
 snapshot - neither side re-streams as a player moves); `engine/network`'s
 reliable channel has no RTT estimation/congestion control, and its
-server connection model has no authentication; `EventBus` has only one real event (`block_broken`);
+server connection model has no authentication; server-side inventory
+has no persistence across a disconnect/reconnect; `EventBus` has only one real event (`block_broken`);
 `ModLoader` has no manifest/dependency/version format; mod-registered
 ids aren't synced over the network (both hosts must load the same mods
 independently and agree by construction); positional audio is pan +
