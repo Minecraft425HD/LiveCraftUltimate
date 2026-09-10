@@ -949,15 +949,14 @@ int main() {
             server_connection.send(lcu::network::Channel::ReliableOrdered,
                                     protocol::encode_block_action({protocol::BlockActionType::Break, hit->world.x,
                                                                     hit->world.y, hit->world.z, 0}));
-            // Item pickup is client-authoritative for grass/dirt (no
-            // server-side inventory tracks them yet - see DECISIONS.md
-            // "Phase 17") and only reconciled against the server for
-            // game:stone specifically (Phase 15's InventoryUpdate). It
-            // happens here, optimistically, at request time - not in
-            // the BlockChange handler, which runs for every connected
-            // client on every edit (including edits other players made)
-            // and has no way to tell "was this my own break" from
-            // "someone else's".
+            // Item pickup is client-authoritative and optimistic - it
+            // happens here, at request time, not in the BlockChange
+            // handler (which runs for every connected client on every
+            // edit, including other players' edits, with no way to
+            // tell "was this my own break"). The server independently
+            // tracks the same three items (Phase 19) and reconciles
+            // this optimistic guess via InventoryUpdate once its own
+            // outcome is known - see DECISIONS.md.
             grant_item_for_broken_block(hit->block);
         } else if (interact_pressed && hit) {
             LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);

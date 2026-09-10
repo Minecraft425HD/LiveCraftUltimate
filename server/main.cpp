@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -188,23 +189,21 @@ int main(int argc, char** argv) {
     stone_item_def.max_stack_size = 64;
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
-    // Registered (in the same order as VoxelClient) purely to keep the
-    // two sides' ItemId spaces aligned, same as game:stone's own
-    // comment above - the server doesn't track either in a per-client
-    // Inventory yet (Phase 17's grass/dirt item pickup is entirely
-    // client-authoritative/optimistic for now, see DECISIONS.md), so
-    // neither id is bound to a variable here.
+    // Registered in the same order as VoxelClient, same as game:stone's
+    // own comment above - both sides' ItemIds coincide by construction.
+    // Now tracked server-side too (Phase 19: extends Phase 15's
+    // server-side inventory past game:stone alone - see DECISIONS.md).
     lcu::items::ItemDefinition grass_item_def;
     grass_item_def.namespaced_id = "game:grass";
     grass_item_def.display_name = "Grass";
     grass_item_def.max_stack_size = 64;
-    item_registry.register_item(grass_item_def);
+    const lcu::items::ItemId grass_item_id = item_registry.register_item(grass_item_def);
 
     lcu::items::ItemDefinition dirt_item_def;
     dirt_item_def.namespaced_id = "game:dirt";
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
-    item_registry.register_item(dirt_item_def);
+    const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Mods run here too (Phase 9) so a mod's registered blocks/items exist
@@ -307,15 +306,43 @@ int main(int argc, char** argv) {
     // forever.
     std::vector<protocol::BlockChange> block_change_history;
 
-    // Sends `client`'s current authoritative game:stone count - called
-    // after every BlockAction that could have affected it, accepted or
-    // rejected, so the client's own optimistic local guess (see
-    // DECISIONS.md) gets corrected the instant it diverges from what
-    // the server actually did.
-    auto send_inventory_update = [&](ClientState& client) {
-        client.connection.send(
-            lcu::network::Channel::ReliableOrdered,
-            protocol::encode_inventory_update({stone_item_id, client.inventory.count_item(stone_item_id)}));
+    // Direct 1:1 block->item mapping (brief section 76/98 - no general
+    // data-driven table exists, same simplification VoxelClient's own
+    // grant_item_for_broken_block carries, see DECISIONS.md "Phase
+    // 17"/"Phase 19"). Returns kNoItemId for anything else (mod content
+    // included) - not every block has to be item-backed.
+    const auto item_for_block = [&](lcu::voxel::BlockId block_id) {
+        if (block_id == stone_id) {
+            return stone_item_id;
+        }
+        if (block_id == grass_id) {
+            return grass_item_id;
+        }
+        if (block_id == dirt_id) {
+            return dirt_item_id;
+        }
+        return lcu::items::kNoItemId;
+    };
+
+    // Every item this server tracks a per-client authoritative count
+    // for - used to correct a client's optimistic guess after every
+    // BlockAction, not just the one item (if any) that request actually
+    // touched, so a stale guess for an *unrelated* tracked item (e.g.
+    // from an earlier request that arrived out of order) also gets
+    // corrected eventually.
+    const std::array<lcu::items::ItemId, 3> tracked_items{stone_item_id, grass_item_id, dirt_item_id};
+
+    // Sends `client`'s current authoritative count for every tracked
+    // item - called after every BlockAction that could have affected
+    // one, accepted or rejected, so the client's own optimistic local
+    // guess (see DECISIONS.md) gets corrected the instant it diverges
+    // from what the server actually did.
+    auto send_inventory_updates = [&](ClientState& client) {
+        for (lcu::items::ItemId item_id : tracked_items) {
+            client.connection.send(
+                lcu::network::Channel::ReliableOrdered,
+                protocol::encode_inventory_update({item_id, client.inventory.count_item(item_id)}));
+        }
     };
 
     // Server-authoritative block editing (brief section 8/19/20): validates
@@ -327,9 +354,10 @@ int main(int argc, char** argv) {
     // actually breakable/placeable given its current state, whose
     // requested block_id isn't a registered block, whose target is too
     // far from the requesting client's own known position, or (for a
-    // game:stone place specifically) whose requester doesn't actually
-    // hold one server-side - logged, no reply sent beyond the inventory
-    // correction above (the requester's world simply doesn't change).
+    // place whose requested block_id has an item mapping) whose
+    // requester doesn't actually hold one server-side - logged, no reply
+    // sent beyond the inventory correction above (the requester's world
+    // simply doesn't change).
     auto handle_block_action = [&](const lcu::network::Address& from, ClientState& client,
                                     const protocol::BlockAction& action) {
         const lcu::voxel::BlockWorldCoord target{action.x, action.y, action.z};
@@ -340,7 +368,7 @@ int main(int argc, char** argv) {
         if (distance > kMaxBlockActionRange) {
             LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) is {:.1f} blocks away (max {})",
                          from.to_string(), target.x, target.y, target.z, distance, kMaxBlockActionRange);
-            send_inventory_update(client);
+            send_inventory_updates(client);
             return;
         }
 
@@ -349,7 +377,7 @@ int main(int argc, char** argv) {
         if (chunk == nullptr) {
             LCU_LOG_WARN("Rejected BlockAction from {}: chunk ({},{},{}) isn't loaded", from.to_string(),
                          split.chunk.x, split.chunk.y, split.chunk.z);
-            send_inventory_update(client);
+            send_inventory_updates(client);
             return;
         }
 
@@ -360,14 +388,14 @@ int main(int argc, char** argv) {
             valid = current != lcu::voxel::kAirBlockId;
             new_id = lcu::voxel::kAirBlockId;
         } else {
-            // Placing game:stone specifically requires the client to
+            // Placing an item-backed block requires the client to
             // actually hold one, server-side (brief section 20 applied
             // to item accounting, not just block edits - see
-            // DECISIONS.md "server-side inventory (Phase 15)"). Any
-            // other registered block_id (e.g. mod content) has no
-            // item-backing infrastructure yet, so it isn't gated here.
+            // DECISIONS.md "server-side inventory"). A block with no
+            // item mapping (e.g. mod content) isn't gated here.
+            const lcu::items::ItemId required_item = item_for_block(action.block_id);
             const bool has_required_item =
-                action.block_id != stone_id || client.inventory.count_item(stone_item_id) > 0;
+                required_item == lcu::items::kNoItemId || client.inventory.count_item(required_item) > 0;
             valid = current == lcu::voxel::kAirBlockId && action.block_id < block_registry.count() &&
                     has_required_item;
             new_id = action.block_id;
@@ -375,7 +403,7 @@ int main(int argc, char** argv) {
         if (!valid) {
             LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) current_block={} requested_block={}",
                          from.to_string(), target.x, target.y, target.z, current, action.block_id);
-            send_inventory_update(client);
+            send_inventory_updates(client);
             return;
         }
 
@@ -387,12 +415,18 @@ int main(int argc, char** argv) {
             mod_event_bus.emit_block_broken(target.x, target.y, target.z, current);
         }
 #endif
-        if (action.action == protocol::BlockActionType::Break && current == stone_id) {
-            client.inventory.add_item(item_registry, {stone_item_id, 1});
-        } else if (action.action == protocol::BlockActionType::Place && new_id == stone_id) {
-            client.inventory.remove_item(stone_item_id, 1);
+        if (action.action == protocol::BlockActionType::Break) {
+            const lcu::items::ItemId dropped_item = item_for_block(current);
+            if (dropped_item != lcu::items::kNoItemId) {
+                client.inventory.add_item(item_registry, {dropped_item, 1});
+            }
+        } else {
+            const lcu::items::ItemId consumed_item = item_for_block(new_id);
+            if (consumed_item != lcu::items::kNoItemId) {
+                client.inventory.remove_item(consumed_item, 1);
+            }
         }
-        send_inventory_update(client);
+        send_inventory_updates(client);
 
         const protocol::BlockChange change{target.x, target.y, target.z, new_id};
         block_change_history.push_back(change);

@@ -17,8 +17,9 @@ and into open-ended continued development (brief: "the goal is a
 complete playable game, not a completed checklist") - **Phase 13 (block
 edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
 (server-side inventory)**, **Phase 16 (per-movement chunk streaming)**,
-**Phase 17 (surface/subsurface terrain content)**, and **Phase 18 (item
-mappings for grass/dirt)** are done; see "Reality Audit" and "Last
+**Phase 17 (surface/subsurface terrain content)**, **Phase 18 (item
+mappings for grass/dirt)**, and **Phase 19 (server-side inventory
+extended past game:stone)** are done; see "Reality Audit" and "Last
 Completed Task" below for what they cover and what's next.
 
 ## Reality Audit (2026-09-10)
@@ -488,6 +489,53 @@ No new unit tests - pure orchestration logic reusing already-tested
 `ItemRegistry`/`Inventory` primitives, verified via the real runs
 above. `ctest` unchanged at 343/343 (bgfx) / 340/340 (non-bgfx).
 
+**Phase 19 (server-side inventory extended past `game:stone`)**:
+closed Phase 15's remaining honest gap - the server's authoritative
+per-client `Inventory` only ever tracked `game:stone`, so Phase 18's
+new grass/dirt pickup was entirely client-optimistic with nothing to
+correct it. `VoxelServer` now registers `game:grass`/`game:dirt` items
+(capturing their `ItemId`s, previously discarded) and generalizes the
+break/place bookkeeping through a new `item_for_block` lookup (the same
+direct 1:1 mapping `VoxelClient`'s own `grant_item_for_broken_block`
+already used) instead of a single hardcoded `stone_id` check - covers
+all three tracked items identically now. `send_inventory_update` became
+`send_inventory_updates`: after every `BlockAction`, the server sends
+one `InventoryUpdate` per tracked item (`tracked_items = {stone, grass,
+dirt}`), not just whichever the request happened to touch, so a stale
+guess for an *unrelated* tracked item also eventually corrects. The
+place-validity check generalized the same way: any item-backed
+`block_id`, not just `stone_id` specifically, is gated on the requester
+actually holding one.
+
+`VoxelClient` needed **no changes** - its `InventoryUpdate` handler was
+already generic (keyed by whatever `item_id` arrives), so it started
+correctly reconciling grass/dirt the moment the server started sending
+those updates.
+
+Verified via a real two-process run (`LCU_VERIFY_BREAK_PLACE`): the
+player spawns standing on a grass block (Phase 17's layering), and the
+full round trip converges cleanly - server logs `Applied BlockAction
+...: (0,28,-1) 2 -> 0`, client logs `Requesting break`, `Picked up 1
+game:grass (inventory: 1)`, `Applied server BlockChange ...
+block_id=0`, zero warnings/errors - confirming `item_for_block`'s
+grass mapping, the server's `add_item` call, and the new 3-item
+`send_inventory_updates` broadcast all execute correctly end to end.
+The disagree-then-correct path itself (an explicit `Reconciled
+inventory item ...` log line) was already proven for this identical,
+now-generalized mechanism in Phase 15's stone-specific test - not
+re-demonstrated here since nothing about *how* reconciliation works
+changed, only *which* items it covers.
+
+No new unit tests - pure generalization of already-tested
+`ItemRegistry`/`Inventory` orchestration, verified via the real run
+above. `ctest` unchanged at 343/343 (bgfx) / 340/340 (non-bgfx).
+
+Honestly scoped: still only stone/grass/dirt are inventory-backed (no
+general, data-driven block-id-to-item-id mapping - three explicit `if`
+checks in `item_for_block`, not configuration); no persistence across a
+disconnect/reconnect; placing still only ever places `game:stone` (no
+hotbar/item-selection UI exists to place anything else).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -644,19 +692,21 @@ None currently tracked.
   broadcast to every connected client *and* replayed in full to any
   client that connects later (`block_change_history`, so a late joiner
   still catches up), both verified via real multi-process runs.
-  Server-side inventory (Phase 15, see NETWORKING.md "Server-side
-  inventory") now also exists for `game:stone` specifically - `VoxelServer`
-  keeps an authoritative per-client `Inventory`, gates placing
-  `game:stone` on actually holding one, and corrects a client's
-  optimistic guess via a new `InventoryUpdate` message after every
-  `BlockAction`, closing the "unrefunded on rejection" gap for that
-  item. What none of these phases covers: any block/item besides
-  `game:stone` isn't inventory-gated (no general block-id-to-item-id
-  mapping), server-side inventory has no persistence across a
-  disconnect, the shared `World`'s loaded-chunk set never shrinks back
-  down (Phase 16 - see above), and the edit history itself is unbounded
-  for the server process's lifetime rather than compacted against
-  persisted state (see NETWORKING.md).
+  Server-side inventory (Phase 15, extended Phase 19, see NETWORKING.md
+  "Server-side inventory") now covers all three real block/item pairs -
+  `VoxelServer` keeps an authoritative per-client `Inventory`, gates
+  placing an item-backed block on actually holding one, and corrects a
+  client's optimistic guess via `InventoryUpdate` messages (one per
+  tracked item) after every `BlockAction`, closing the "unrefunded on
+  rejection" gap for `game:stone`/`game:grass`/`game:dirt` alike. What
+  none of these phases covers: any block/item beyond those three isn't
+  inventory-gated (no general, data-driven block-id-to-item-id mapping
+  - `item_for_block` is three explicit `if` checks, not configuration),
+  server-side inventory has no persistence across a disconnect, the
+  shared `World`'s loaded-chunk set never shrinks back down (Phase 16 -
+  see above), and the edit history itself is unbounded for the server
+  process's lifetime rather than compacted against persisted state (see
+  NETWORKING.md).
 - `VoxelClient`'s networked mode logs the `Welcome` message's
   `world_seed` but doesn't actually use it for world generation - it
   still calls its own compile-time `kWorldSeed`, which by construction
@@ -835,23 +885,22 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Extend server-side inventory past `game:stone`**, closing Phase
-   15's remaining honest gap (and now Phase 18's too - `game:grass`/
-   `game:dirt` pickup is client-authoritative/optimistic only, same as
-   `game:stone` was before Phase 15): there's still no general
-   block-id-to-item-id mapping server-side, so no block besides
-   `game:stone` is gated/tracked authoritatively, and inventory has no
-   persistence across a disconnect/reconnect.
-2. **Interest-scoped chunk unloading**, closing Phase 16's remaining
+1. **Interest-scoped chunk unloading**, closing Phase 16's remaining
    honest gap: the server's shared `World` only ever grows (see
    DECISIONS.md "server-side chunk streaming never unloads") - a real
    long-running server needs a way to drop chunks nothing currently
    connected still needs, without breaking a client that's still
    standing in one another client abandoned.
-3. **Placing grass/dirt**, closing Phase 18's other remaining gap:
+2. **Placing grass/dirt**, closing Phase 18/19's remaining gap:
    `PlaceBlock` still only ever places `game:stone` - there's no
    hotbar/item-selection UI yet to choose what to place from a multi-
-   item inventory.
+   item inventory (the server-side validity/tracking machinery already
+   generalizes to any item-backed block, per Phase 19 - only the
+   client's own place-request logic is still stone-only).
+3. **A general, data-driven block-id-to-item-id mapping**, closing
+   Phase 19's remaining honest gap: `item_for_block` on both client and
+   server is still three explicit `if` checks, not configuration -
+   fine for three blocks, won't scale past a handful more.
 4. Continue down brief section 10's list after that: further
    content/gameplay systems (a real crafting-UI caller for the
    already-implemented `RecipeRegistry`, more block/item variety), then

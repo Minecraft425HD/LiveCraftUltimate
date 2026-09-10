@@ -2,7 +2,40 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19
+
+### Phase 19
+
+- `VoxelServer` registers `game:grass`/`game:dirt` items (capturing
+  their `ItemId`s, previously discarded in Phase 18) - closes Phase
+  15's remaining honest gap: server-side inventory only ever tracked
+  `game:stone`, so Phase 18's new grass/dirt pickup was entirely
+  client-optimistic with nothing server-side to correct it.
+- New `item_for_block` lookup (the same direct 1:1 mapping
+  `VoxelClient`'s `grant_item_for_broken_block` already used) replaces
+  the single hardcoded `stone_id` check in `handle_block_action`'s
+  break/place bookkeeping and place-validity gate - covers all three
+  tracked items identically, not a stone-only special case.
+- `send_inventory_update` renamed `send_inventory_updates`: sends one
+  `InventoryUpdate` per tracked item (`{stone, grass, dirt}`) after
+  every `BlockAction`, not just whichever the request happened to
+  touch, so a stale guess for an unrelated tracked item also eventually
+  corrects.
+- `VoxelClient` needed no changes - its `InventoryUpdate` handler was
+  already generic (keyed by whatever `item_id` arrives).
+- Verified via a real two-process run (`LCU_VERIFY_BREAK_PLACE`): the
+  player spawns on a grass block (Phase 17's layering), and the round
+  trip converges cleanly - server logs "Applied BlockAction ...:
+  (0,28,-1) 2 -> 0", client logs "Requesting break", "Picked up 1
+  game:grass (inventory: 1)", "Applied server BlockChange ...
+  block_id=0", zero warnings/errors.
+- No new unit tests - pure generalization of already-tested
+  `ItemRegistry`/`Inventory` orchestration. `ctest` unchanged at
+  343/343 (bgfx) / 340/340 (non-bgfx).
+- Honestly scoped: still only stone/grass/dirt are inventory-backed (no
+  general, data-driven block-id-to-item-id mapping); no persistence
+  across a disconnect/reconnect; placing still only ever places
+  `game:stone`.
 
 ### Phase 18
 

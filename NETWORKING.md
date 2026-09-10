@@ -306,65 +306,78 @@ broadcast for it arrives, resolved by whichever happens second simply
 overwriting (idempotent, not a race that corrupts anything, just
 occasionally-redundant work).
 
-## Server-side inventory (Phase 15)
+## Server-side inventory (Phase 15, extended Phase 19)
 
 `VoxelServer` now holds a real, authoritative `lcu::items::Inventory`
 (9 slots, matching `VoxelClient`'s own) per connected client
 (`ClientState::inventory`), populated only by validated `BlockAction`s -
-never by anything the client sends directly. Registers the same
-`game:stone` item `VoxelClient` does (namespaced id, display name, max
-stack size all identical - both sides register it as their only item,
-so their `ItemId`s coincide by construction, the same simplification
-block/item ids already carry for mod content).
+never by anything the client sends directly. Registers the same three
+items `VoxelClient` does - `game:stone`, `game:grass`, `game:dirt`
+(namespaced id, display name, max stack size all identical, same
+registration order on both sides) - so their `ItemId`s coincide by
+construction, the same simplification block/item ids already carry for
+mod content. `item_for_block` is the direct 1:1 block->item lookup both
+`handle_block_action` and the validity check below share (returns
+`kNoItemId` for anything else, mod content included).
 
-`handle_block_action` now does two things with it:
+`handle_block_action` does two things with it:
 
-- **Placing `game:stone` specifically requires the client to actually
-  hold one, server-side** - a new validity condition alongside the
-  existing chunk-loaded/target-state checks: `action.block_id ==
-  stone_id` with `client.inventory.count_item(stone_item_id) == 0` is
-  rejected exactly like any other invalid request. Any other registered
-  `block_id` (mod content, say) isn't gated - there's no general
-  block->item mapping yet, just this one hardcoded case (see
-  DECISIONS.md).
-- **A successful break of `game:stone` adds one to the requester's
-  server-side inventory; a successful place of it removes one** - the
-  server's own bookkeeping, driven by what it actually just applied to
-  its `World`, not by anything the client claimed.
+- **Placing an item-backed block requires the client to actually hold
+  one, server-side** - a new validity condition alongside the existing
+  chunk-loaded/target-state checks: `item_for_block(action.block_id)`
+  resolving to a real item the client's inventory count is zero for is
+  rejected exactly like any other invalid request. A block with no item
+  mapping (mod content, say) isn't gated - there's still no general
+  block->item mapping infrastructure, just this one direct lookup (see
+  DECISIONS.md). In practice only `game:stone` is ever placed today (no
+  hotbar/item-selection UI exists to place anything else), but the
+  check itself is general.
+- **A successful break of an item-backed block adds one to the
+  requester's server-side inventory; a successful place of one removes
+  one** - the server's own bookkeeping, driven by what it actually just
+  applied to its `World`, not by anything the client claimed. Covers
+  all three tracked items identically (stone/grass/dirt), not a
+  stone-only special case anymore (Phase 19).
 
 After *every* `BlockAction` - accepted or rejected, at any of the four
 possible rejection points or after a successful apply - `VoxelServer`
-sends that one client an `InventoryUpdate` with its current
-authoritative `game:stone` count. `VoxelClient` still fires its own
-optimistic pickup/consumption at request-send time (unchanged from
-Phase 13 - see DECISIONS.md), but now reconciles it against every
-`InventoryUpdate` it receives, the same pattern `PlayerCorrection`
-already uses for movement: compute the delta between the optimistic
-local count and the server's authoritative one, `add_item`/`remove_item`
-to close it, and log only when they actually disagreed. This closes the
-Phase 13 "no rejection feedback, no refund" gap for `game:stone`
-specifically: a request the server rejects no longer silently leaves
-the client's displayed count wrong forever - the very next
-`InventoryUpdate` corrects it.
+sends that one client an `InventoryUpdate` for **every** tracked item
+(`tracked_items = {stone_item_id, grass_item_id, dirt_item_id}`), not
+just whichever one the request happened to touch - so a stale
+optimistic guess for an unrelated tracked item (e.g. from an
+out-of-order earlier request) also eventually gets corrected.
+`VoxelClient` still fires its own optimistic pickup/consumption at
+request-send time (unchanged since Phase 13/18 - see DECISIONS.md), but
+reconciles it against every `InventoryUpdate` it receives (already a
+generic `item_id`-keyed handler, needed no changes for this extension),
+the same pattern `PlayerCorrection` already uses for movement: compute
+the delta between the optimistic local count and the server's
+authoritative one, `add_item`/`remove_item` to close it, and log only
+when they actually disagreed. This closes the Phase 13 "no rejection
+feedback, no refund" gap for all three tracked items now, not just
+`game:stone`.
 
 Verified via a real two-process run (one `VoxelServer`, one
-`VoxelClient` via `LCU_VERIFY_BREAK_PLACE`): the client's log shows the
-full disagree-then-reconcile cycle in both directions - after the
-optimistic break-pickup (`Picked up 1 game:stone (inventory: 1)`) and
-the optimistic place-consume (`Requesting place ... (inventory: 0)`),
-two `Reconciled inventory item 1 to authoritative count ...` lines
-appear (`0` corrected to `1`, matching the accepted break; then `1`
-corrected to `0`, matching the accepted place) immediately followed
-by the corresponding `Applied server BlockChange` lines - proving the
-server's authoritative count and the client's optimistic guess actually
-converged after each round trip, not just that a message decoded.
+`VoxelClient` via `LCU_VERIFY_BREAK_PLACE`): the client spawns standing
+on a grass surface block (Phase 17's layering), and the full round trip
+converges correctly - server logs `Applied BlockAction ...: (0,28,-1) 2
+-> 0` (block id 2 = `game:grass`), client logs `Requesting break`,
+`Picked up 1 game:grass (inventory: 1)`, then `Applied server
+BlockChange ... block_id=0`, zero warnings/errors - confirming
+`item_for_block`'s grass mapping, the server's `add_item` call, and the
+3-item `send_inventory_updates` broadcast all execute correctly end to
+end (no visible `Reconciled` line here specifically means the
+optimistic guess and the server's outcome already agreed - the earlier
+Phase 15 run already proved the disagree-then-correct path fires
+correctly for the identical, now-generalized mechanism).
 
-**Known simplification:** only `game:stone` is inventory-backed for
-placement; there's no general block-id-to-item-id mapping, so any other
-registered block (mod content) can still be placed without an item
-check. A malicious client also can't fabricate items it doesn't hold
-(the server never trusts a client-reported count for anything), but
-there's still no persistence - a server-side inventory is entirely
+**Known simplification:** only stone/grass/dirt are inventory-backed;
+there's still no general, data-driven block-id-to-item-id mapping (three
+explicit `if` checks in `item_for_block`, not configuration), so any
+other registered block (mod content) can still be placed without an
+item check. A malicious client also can't fabricate items it doesn't
+hold (the server never trusts a client-reported count for anything),
+but there's still no persistence - a server-side inventory is entirely
 in-memory for the connection's lifetime, lost on disconnect, same as
 every other per-client server state today.
 
@@ -462,8 +475,11 @@ converge after each round trip, not just that a message decoded - see
 server-simulated position crosses a chunk boundary triggers a genuinely
 new chunk being streamed to it, and a second, entirely stationary
 client independently receives the same broadcast - see "Per-movement
-chunk streaming" above (see BUILD_STATUS.md for the exact reproduce
-steps for all of the above).
+chunk streaming" above. A real two-process run (Phase 19) confirms the
+same server-side inventory mechanism now covers `game:grass`/
+`game:dirt`, not just `game:stone` - see "Server-side inventory" above
+(see BUILD_STATUS.md for the exact reproduce steps for all of the
+above).
 
 **Not verified**: behavior over a real (non-loopback) network with real
 latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
