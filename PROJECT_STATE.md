@@ -29,13 +29,15 @@ unloading, real chunk persistence, disconnect detection)**, **Phase 21
 per-face colors + procedural shader noise)**, **Phase 27 (skybox +
 sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**,
 **Phase 29 (WorldLight data structure)**, **Phase 30 (sky-light
-cross-chunk propagation)**, and **Phase 31 (block-light cross-chunk
-propagation)** are done; see "Reality Audit" and "Last Completed Task"
-below for what they cover and what's next. A large, user-directed
-program (Phases 26-42: visible terrain colors, skybox, cross-chunk
-global lighting with real performance constraints, procedural terrain
-with sea level at y=0, water, biomes, caves/ores, vegetation) is now in
-progress - see TASK_QUEUE.md for per-phase detail as each lands.
+cross-chunk propagation)**, **Phase 31 (block-light cross-chunk
+propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
+and **Phase 33 (VoxelClient integration + smooth lighting)** are done;
+see "Reality Audit" and "Last Completed Task" below for what they cover
+and what's next. A large, user-directed program (Phases 26-42: visible
+terrain colors, skybox, cross-chunk global lighting with real
+performance constraints, procedural terrain with sea level at y=0,
+water, biomes, caves/ores, vegetation) is now in progress - see
+TASK_QUEUE.md for per-phase detail as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -1045,6 +1047,56 @@ LIMITATION**; a chunk that loads after a nearby source's BFS already
 finished doesn't yet retroactively receive that light (Phase 32/35's
 job).
 
+**Phase 32 (boundary buffer) skipped**: explicitly optional in the
+brief, and its purpose (deferring a cross-chunk light write into a
+buffer so concurrent threads don't contend for the same neighbor
+chunk) has no real problem to solve yet - every lighting call in this
+codebase runs synchronously on the main thread against one shared
+`WorldLight`, nothing is dispatched across multiple threads. See
+DECISIONS.md for the full reasoning and what would make this worth
+revisiting.
+
+**Phase 33 (VoxelClient integration + smooth lighting)**: two real
+fixes, not just wiring. First, a genuine remesh gap: `neighbors_
+sharing_boundary` only names a neighbor when an edit lands exactly at
+a chunk's own boundary local coordinate, but Phase 31's cross-chunk
+block-light BFS can reach a neighbor from edits well inside a chunk
+too (any edit within light-emission range of a boundary) - that
+neighbor's newly-changed light could go un-remeshed. The cross-chunk
+propagate/unpropagate functions gained an optional `touched_chunks`
+output set (every chunk, besides the edited one, that actually got a
+light write); `update_lighting_for_edit` now returns it, and a new
+`remesh_edit_neighbors` helper remeshes the union of that real set
+with the existing geometric neighbor set.
+
+Second, real smooth lighting: `mesh_chunk_greedy`'s merged quads are
+now lit per-vertex - each of a quad's 4 corners independently averages
+the packed light of its up-to-4 diagonally-adjacent mask cells
+(`detail::smooth_corner_light`), the classic vertex-light-averaging
+technique (without ambient occlusion, deliberately out of scope - see
+DECISIONS.md). `MaskCell::merges_with` no longer requires equal light
+to merge (Phase 28's flat-shading-only restriction is superseded now
+that corners are individually sampled), so merging is purely
+geometric/material again - the same or more merging than before, with
+smoother output instead of a trade-off between the two. A genuinely
+satisfying payoff: **no shader changes were needed at all** - the
+existing `v_color1` varying (Phase 28) was already a plain, non-`flat`
+float that bgfx/GLSL linearly interpolates across a triangle by
+default, so once vertices started carrying different values, the
+fragment shader's existing nibble-unpacking arithmetic started
+receiving genuinely smooth, GPU-interpolated fractional values per
+pixel automatically.
+
+6 new unit tests. Verified via a real two-process networked run and
+real `LCU_BUILD_SHADER_TOOLS=ON` + `LCU_VERIFY_BREAK_PLACE` runs (bgfx
+and non-bgfx), zero regressions, byte-identical output to Phase 31.
+`ctest` 385/385 (bgfx, up from 379) / 382/382 (non-bgfx, up from 376).
+
+Honestly scoped: **what smooth lighting actually looks like on a real
+GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; a chunk
+loading after a nearby source's BFS already finished still isn't
+retroactively relit or remeshed (Phase 35's job).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1526,15 +1578,18 @@ before content/polish):
    scan, not a BFS; client/main.cpp's load loops restructured for
    top-down ordering)~~, ~~Phase 31 (block-light cross-chunk
    propagation - a genuine BFS crossing chunk boundaries via
-   WorldLight, duck-typed ChunkProviderT)~~ - see PROJECT_STATE.md
-   "Phase 25" through "Phase 31" above and TASK_QUEUE.md for full
-   per-phase detail. Next: Phase 32 (boundary buffer, optional), then
-   Phase 33 (VoxelClient integration + smooth lighting), Phase 34
-   (torch block + lighting benchmarks), Phase 35 (unload marks
-   neighbors dirty - also closes Phase 30/31's networked-ChunkData/
-   late-loading ordering gaps), entity rendering/debug overlay (36),
-   then the worldgen phases (37-41: sea level, water, continents,
-   biomes, caves/ores, vegetation), then docs (42).
+   WorldLight, duck-typed ChunkProviderT)~~, ~~Phase 32 (boundary
+   buffer - skipped, optional, no concurrency to buffer against yet)~~,
+   ~~Phase 33 (VoxelClient integration - real touched_chunks remesh
+   tracking - + smooth per-vertex lighting, no shader changes
+   needed)~~ - see PROJECT_STATE.md "Phase 25" through "Phase 33"
+   above and TASK_QUEUE.md for full per-phase detail. Next: Phase 34
+   (torch block + lighting benchmarks - explicit numeric performance
+   budgets), Phase 35 (unload marks neighbors dirty - also closes
+   Phase 30/31's networked-ChunkData/late-loading ordering gaps),
+   entity rendering/debug overlay (36), then the worldgen phases
+   (37-41: sea level, water, continents, biomes, caves/ores,
+   vegetation), then docs (42).
 7. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
    finding (a suspected `UnreliableSequenced` sequence-wraparound issue
    in `Connection`/`sequence_greater_than` under extreme sustained

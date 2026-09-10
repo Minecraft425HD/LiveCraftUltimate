@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <queue>
+#include <unordered_set>
 #include <utility>
 
 #include "lcu/lighting/light_storage.h"
@@ -243,9 +244,19 @@ WorldVoxelPos step_cross_chunk(const WorldVoxelPos& pos, const i32 offset[3]) {
 // only runs over the radius actually affected by a change" without a
 // separate hard cap, since the level-decrements-to-zero termination
 // already bounds it.
+//
+// `touched_chunks` (Phase 33), when non-null, collects every distinct
+// chunk coordinate this call actually wrote a light value into (never
+// the seed's own chunk, unless the BFS wraps back into it) - the real
+// answer to "which chunks besides the one I edited need remeshing",
+// replacing a guess at a fixed neighbor radius with the BFS's own
+// ground truth. Optional and defaulted so every caller that doesn't
+// care (most unit tests, the single-chunk-equivalent call sites) isn't
+// forced to pass one.
 template <u32 EdgeLength, typename ChunkProviderT>
 void flood_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::BlockRegistry& registry,
-                                    WorldLight<EdgeLength>& world_light, std::queue<WorldVoxelPos> queue) {
+                                    WorldLight<EdgeLength>& world_light, std::queue<WorldVoxelPos> queue,
+                                    std::unordered_set<voxel::ChunkCoord>* touched_chunks = nullptr) {
     while (!queue.empty()) {
         const WorldVoxelPos pos = queue.front();
         queue.pop();
@@ -274,6 +285,9 @@ void flood_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::Bl
             if (next_level > neighbor_light.block_light(next.x, next.y, next.z)) {
                 neighbor_light.set_block_light(next.x, next.y, next.z, next_level);
                 queue.push(next);
+                if (touched_chunks && !(next.chunk == pos.chunk)) {
+                    touched_chunks->insert(next.chunk);
+                }
             }
         }
     }
@@ -285,15 +299,17 @@ void flood_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::Bl
 // the caller must already have called
 // world_light.chunk_light(coord).set_block_light(x, y, z, <emission>)
 // - this only floods it outward, potentially into neighboring chunks.
-// See flood_block_light_cross_chunk's doc comment for `ChunkProviderT`
-// and the "chunk not loaded" honesty guarantee.
+// See flood_block_light_cross_chunk's doc comment for `ChunkProviderT`,
+// the "chunk not loaded" honesty guarantee, and `touched_chunks`
+// (Phase 33).
 template <u32 EdgeLength, typename ChunkProviderT>
 void propagate_added_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::BlockRegistry& registry,
                                               WorldLight<EdgeLength>& world_light, voxel::ChunkCoord coord, u32 x,
-                                              u32 y, u32 z) {
+                                              u32 y, u32 z,
+                                              std::unordered_set<voxel::ChunkCoord>* touched_chunks = nullptr) {
     std::queue<detail::WorldVoxelPos> queue;
     queue.push({coord, x, y, z});
-    detail::flood_block_light_cross_chunk(chunks, registry, world_light, std::move(queue));
+    detail::flood_block_light_cross_chunk(chunks, registry, world_light, std::move(queue), touched_chunks);
 }
 
 // Cross-chunk counterpart to unpropagate_block_light (Phase 31): same
@@ -304,11 +320,14 @@ void propagate_added_block_light_cross_chunk(const ChunkProviderT& chunks, const
 // loaded is simply not visited by either phase - it never received
 // this source's light in the first place (propagation into it would
 // have hit the same "not loaded" wall), so there's nothing there to
-// darken or refill.
+// darken or refill. `touched_chunks` (Phase 33) collects every chunk
+// (besides `coord`) either phase actually wrote a light value into -
+// see flood_block_light_cross_chunk's doc comment.
 template <u32 EdgeLength, typename ChunkProviderT>
 void unpropagate_block_light_cross_chunk(const ChunkProviderT& chunks, const voxel::BlockRegistry& registry,
                                           WorldLight<EdgeLength>& world_light, voxel::ChunkCoord coord, u32 x, u32 y,
-                                          u32 z, u8 old_level) {
+                                          u32 z, u8 old_level,
+                                          std::unordered_set<voxel::ChunkCoord>* touched_chunks = nullptr) {
     struct RemovalNode {
         detail::WorldVoxelPos pos;
         u8 level;
@@ -342,13 +361,16 @@ void unpropagate_block_light_cross_chunk(const ChunkProviderT& chunks, const vox
             if (neighbor_level < node.level) {
                 neighbor_light.set_block_light(next.x, next.y, next.z, 0);
                 removal_queue.push({next, neighbor_level});
+                if (touched_chunks && !(next.chunk == coord)) {
+                    touched_chunks->insert(next.chunk);
+                }
             } else {
                 refill_queue.push(next);
             }
         }
     }
 
-    detail::flood_block_light_cross_chunk(chunks, registry, world_light, std::move(refill_queue));
+    detail::flood_block_light_cross_chunk(chunks, registry, world_light, std::move(refill_queue), touched_chunks);
 }
 
 // Fills sky light straight down one column (x,z) of `chunk`: full

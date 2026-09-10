@@ -2,7 +2,54 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33
+
+### Phase 33
+
+- **VoxelClient integration**: closed a real remesh gap - a block edit
+  whose cross-chunk block-light BFS (Phase 31) actually reaches a
+  neighbor chunk wasn't necessarily one of the geometric
+  `neighbors_sharing_boundary` (only exactly-at-the-edge edits counted),
+  so that neighbor's newly-changed light could go un-remeshed. The
+  cross-chunk propagate/unpropagate functions gained an optional
+  `touched_chunks` output set (which chunk, if any besides the edited
+  one, actually got a light write); `update_lighting_for_edit` now
+  returns it, and a new `remesh_edit_neighbors` helper remeshes the
+  union of that set with the existing geometric neighbor set.
+- **Smooth lighting**: `mesh_chunk_greedy`'s merged quads are now lit
+  per-vertex instead of one flat value per quad - each of a quad's 4
+  corners independently averages the packed light of its up-to-4
+  diagonally-adjacent mask cells (`detail::smooth_corner_light`), the
+  classic vertex-light-averaging technique (without ambient occlusion).
+  `ChunkMeshLayer::add_quad` now takes 4 separate per-vertex light
+  bytes instead of one. Merging (`MaskCell::merges_with`) no longer
+  requires equal light between cells - Phase 28's flat-shading-only
+  merge restriction is superseded, since a merged quad's corners are
+  now independently sampled; two differently-lit adjacent faces merge
+  into one quad again and blend smoothly across it. `v_color1`'s
+  existing bgfx varying (Phase 28) already linearly interpolates a
+  non-`flat` float across a triangle by default, so real GPU-side
+  smooth shading falls out of this change with **no shader changes
+  needed** - the fragment shader was already unpacking sky/block
+  nibbles from whatever value the rasterizer hands it per pixel.
+- 6 new unit tests: 3 for `smooth_corner_light` directly (full 4-cell
+  average, edge case with fewer in-range cells, degenerate empty-mask
+  fallback), plus 2 existing Phase 28 tests rewritten for the new
+  semantics (a single isolated quad's uniform-by-symmetry averaged
+  value; two differently-lit adjacent faces now merging and showing a
+  real per-corner gradient instead of staying separate).
+- Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP) and real `LCU_BUILD_SHADER_TOOLS=ON` +
+  `LCU_VERIFY_BREAK_PLACE` runs (bgfx and non-bgfx) - zero
+  regressions, byte-identical log output to Phase 31.
+- `ctest` 385/385 (bgfx, up from 379) / 382/382 (non-bgfx, up from
+  376).
+- Honestly scoped: **what smooth lighting actually looks like on a
+  real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  no ambient occlusion (a related but separate darkening-by-solid-
+  neighbor-count effect); a chunk loading after a nearby light
+  source's BFS already finished still doesn't retroactively receive
+  that light or get remeshed (Phase 35's job).
 
 ### Phase 32 (skipped, optional)
 

@@ -1093,6 +1093,56 @@ would be optimizing against a problem that doesn't exist yet - see
 DECISIONS.md for the full reasoning and what would make this worth
 revisiting.
 
+## Phase 33 — VoxelClient-Integration + smooth lighting
+
+Two real fixes: closing an actual remesh gap the cross-chunk work
+(Phase 30/31) left open, and real per-vertex smooth lighting.
+
+- [x] **VoxelClient integration**: `flood_block_light_cross_chunk`/
+  `propagate_added_block_light_cross_chunk`/`unpropagate_block_light_
+  cross_chunk` gained an optional `touched_chunks` output set - every
+  chunk (besides the edited one) that actually got a light write.
+  `client/main.cpp`'s `update_lighting_for_edit` now returns it, and a
+  new `remesh_edit_neighbors` helper remeshes the union of that real
+  set with the existing geometric `neighbors_sharing_boundary` - closes
+  a real gap where an edit not exactly at a chunk's boundary local
+  coordinate could still cross-chunk-light a neighbor (any edit within
+  light-emission range of a boundary) that never got remeshed.
+- [x] **Smooth lighting**: `mesh_chunk_greedy`'s merged quads are now
+  lit per-vertex, not one flat value per quad - each of a quad's 4
+  corners independently averages the packed light of its up-to-4
+  diagonally-adjacent mask cells (`detail::smooth_corner_light`), the
+  classic vertex-light-averaging technique (no ambient occlusion,
+  deliberately out of scope - see DECISIONS.md).
+  `ChunkMeshLayer::add_quad` takes 4 separate per-vertex light bytes.
+- [x] `MaskCell::merges_with` no longer compares light (Phase 28's
+  flat-shading-only restriction is superseded - shading is per-corner
+  now) - merging is purely geometric/material again, a superset of
+  Phase 28's more-restrictive merge set.
+- [x] Real payoff found while wiring this up: **no shader changes were
+  needed**. `v_color1`'s existing varying (Phase 28) was already
+  non-`flat`, so bgfx/GLSL already linearly interpolates it across a
+  triangle by default - different per-vertex values now produce real
+  GPU-interpolated smooth shading automatically, no `.sc` file
+  touched.
+- [x] 6 new unit tests: 3 for `smooth_corner_light` directly (full
+  4-cell average, mask-edge fewer-cells case, degenerate empty-mask
+  fallback), 2 Phase-28 tests rewritten for the new semantics (a single
+  isolated quad's by-symmetry-uniform averaged value; two differently-
+  lit adjacent faces now merging into one quad with a real per-corner
+  gradient instead of staying separate).
+- [x] Verified via a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP) and real `LCU_BUILD_SHADER_TOOLS=ON` +
+  `LCU_VERIFY_BREAK_PLACE` runs (bgfx and non-bgfx): zero regressions,
+  byte-identical output to Phase 31.
+
+`ctest` 385/385 (bgfx) / 382/382 (non-bgfx), up from 379/376.
+
+Honestly scoped: **what smooth lighting actually looks like on a real
+GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+ambient occlusion; a chunk loading after a nearby source's BFS already
+finished still isn't retroactively relit or remeshed (Phase 35's job).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

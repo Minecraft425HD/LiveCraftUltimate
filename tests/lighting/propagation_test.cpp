@@ -1,6 +1,7 @@
 #include "lcu/lighting/propagation.h"
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
 
@@ -317,6 +318,89 @@ TEST(UnpropagateBlockLightCrossChunk, RemovingOneOfTwoCrossChunkSourcesRefillsFr
     // should be refilled to emission-1 by the neighbor's own light
     // flowing back across the boundary - not left dark.
     EXPECT_EQ(world_light.chunk_light({0, 0, 0}).block_light(Chunk::kEdgeLength - 1, 8, 8), emission - 1);
+}
+
+TEST(PropagateAddedBlockLightCrossChunk, TouchedChunksReportsTheRealNeighborLightActuallyReached) {
+    // Phase 33: the real answer to "which chunks besides the edited one
+    // need remeshing" - not a guessed fixed radius.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8, &touched);
+
+    EXPECT_EQ(touched.size(), 1u);
+    EXPECT_TRUE(touched.count({1, 0, 0}));
+    // The origin chunk's own extent (where most of the flood actually
+    // happens) must not appear - the caller already knows to remesh
+    // the chunk it just edited, this is purely the "what ELSE" answer.
+    EXPECT_FALSE(touched.count({0, 0, 0}));
+}
+
+TEST(PropagateAddedBlockLightCrossChunk, TouchedChunksStaysEmptyWhenLightNeverReachesAnyNeighbor) {
+    // A dim source (emission 2, unlike "torch"'s 14) placed dead center
+    // of a 16-wide chunk: 8 steps from the nearest face in any
+    // direction, far more than its 2-step reach - genuinely can't cross
+    // a boundary.
+    BlockRegistry registry;
+    BlockDefinition dim_light;
+    dim_light.namespaced_id = "test:glowstone_dim";
+    dim_light.is_transparent = true;
+    dim_light.light_emission = 2;
+    const auto dim = registry.register_block(dim_light);
+    const lcu::u8 emission = registry.definition_of(dim).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(8, 8, 8, dim);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(8, 8, 8, emission);
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0}, 8, 8, 8,
+                                                            &touched);
+
+    EXPECT_TRUE(touched.empty());
+}
+
+TEST(UnpropagateBlockLightCrossChunk, TouchedChunksReportsNeighborsDarkenedOrRefilled) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+
+    provider.add_chunk({0, 0, 0}, Chunk{});
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::unpropagate_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                        Chunk::kEdgeLength - 1, 8, 8, emission, &touched);
+
+    EXPECT_EQ(touched.size(), 1u);
+    EXPECT_TRUE(touched.count({1, 0, 0}));
+    EXPECT_FALSE(touched.count({0, 0, 0}));
 }
 
 TEST(ComputeSkyLight, OpenColumnIsFullyLitTopToBottom) {

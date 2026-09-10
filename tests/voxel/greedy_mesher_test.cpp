@@ -269,12 +269,16 @@ TEST(GreedyMesher, NoLightArgumentOverloadProducesFullBrightVertices) {
     }
 }
 
-TEST(GreedyMesher, FacePicksUpLightFromTheExposedAirCellNotTheSolidBlock) {
-    // Phase 28: a face's light comes from the air cell it's actually
+TEST(GreedyMesher, FacePicksUpSmoothedLightFromTheExposedAirCellNotTheSolidBlock) {
+    // Phase 28/33: a face's light comes from the air cell it's actually
     // exposed to (where lcu::lighting propagation actually stores real
     // values - solid cells are never targeted by flood_block_light/
-    // compute_sky_light_column), packed the same way LightStorage packs
-    // it internally (low nibble sky, high nibble block).
+    // compute_sky_light_column). For an isolated 1x1 quad, every one of
+    // its 4 corners' diagonal 2x2 neighborhood contains exactly this
+    // one real cell plus 3 default-full-bright (sky=15, block=15)
+    // cells, so smooth_corner_light averages them identically at all 4
+    // corners here: sky = (15*3+9)/4 = 13, block = (15*3+3)/4 = 12
+    // (integer division), packed as (12<<4)|13.
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");
     Chunk chunk;
@@ -290,19 +294,18 @@ TEST(GreedyMesher, FacePicksUpLightFromTheExposedAirCellNotTheSolidBlock) {
     for (const auto& vertex : mesh.opaque.vertices) {
         if (lcu::math::dot(vertex.normal, lcu::math::Vec3{1.0f, 0.0f, 0.0f}) > 0.99f) {
             found_positive_x_face = true;
-            EXPECT_EQ(vertex.light, static_cast<lcu::u8>((3 << 4) | 9));
+            EXPECT_EQ(vertex.light, static_cast<lcu::u8>((12 << 4) | 13));
         }
     }
     EXPECT_TRUE(found_positive_x_face);
 }
 
-TEST(GreedyMesher, DifferentlyLitCoplanarFacesDoNotMerge) {
-    // Same block type, same plane, same facing - would merge under
-    // Phase 26's rules - but different light at each face's exposed air
-    // cell. Merging them would flatten a real per-voxel brightness
-    // difference into one arbitrary value, so merges_with must treat
-    // differing light as a hard merge boundary, same as a differing
-    // block id.
+TEST(GreedyMesher, DifferentlyLitCoplanarFacesMergeAndBlendSmoothly) {
+    // Phase 33 supersedes Phase 28's merge rule: same block type, same
+    // plane, same facing merges regardless of light difference (merging
+    // is purely geometric/material again), and the resulting quad's
+    // corners are smoothly, independently light-sampled instead of
+    // needing one uniform per-quad value.
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");
     Chunk chunk;
@@ -315,16 +318,33 @@ TEST(GreedyMesher, DifferentlyLitCoplanarFacesDoNotMerge) {
 
     const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry, light);
 
+    std::vector<lcu::u8> top_face_lights;
     int top_face_quads = 0;
     for (std::size_t i = 0; i + 3 < mesh.opaque.vertices.size(); i += 4) {
         if (lcu::math::dot(mesh.opaque.vertices[i].normal, lcu::math::Vec3{0.0f, 1.0f, 0.0f}) > 0.99f) {
             ++top_face_quads;
+            for (std::size_t k = 0; k < 4; ++k) {
+                top_face_lights.push_back(mesh.opaque.vertices[i + k].light);
+            }
         }
     }
-    // Would be 1 merged 2x1 quad if light were ignored (see
-    // AdjacentSameTypeBlocksMergeCoplanarFaces) - differing light keeps
-    // them as 2 separate 1x1 quads instead.
-    EXPECT_EQ(top_face_quads, 2);
+    // One merged 2x1 quad, not two separate 1x1 quads (see
+    // AdjacentSameTypeBlocksMergeCoplanarFaces - merging is unconditional
+    // on block id/facing again as of Phase 33).
+    ASSERT_EQ(top_face_quads, 1);
+    ASSERT_EQ(top_face_lights.size(), 4u);
+
+    // Every corner picked up some real (non-default-full-bright) light -
+    // proves both sources actually influenced the shared quad, not just
+    // one winning arbitrarily.
+    for (lcu::u8 packed : top_face_lights) {
+        EXPECT_LT(packed, 0xFFu);
+    }
+    // Diagonally opposite corners (index 0 and 2, regardless of winding
+    // direction) sit nearest different sources and must differ from
+    // each other - proves this is a real per-corner gradient, not one
+    // uniform (merged/averaged-away) value across the whole quad.
+    EXPECT_NE(top_face_lights[0], top_face_lights[2]);
 }
 
 TEST(GreedyMesher, BoundaryFaceWithNoNeighborChunkLightDefaultsToFullBright) {
@@ -357,4 +377,42 @@ TEST(GreedyMesher, BoundaryFaceWithNoNeighborChunkLightDefaultsToFullBright) {
         }
     }
     EXPECT_TRUE(found_negative_x_face);
+}
+
+TEST(SmoothCornerLight, AveragesAllFourDiagonalCellsWhenAllInBounds) {
+    // A corner fully surrounded by 4 in-range cells averages all 4,
+    // each channel independently.
+    constexpr lcu::i32 kN = 4;
+    std::vector<lcu::voxel::detail::MaskCell> mask(static_cast<std::size_t>(kN * kN));
+    const auto set_light = [&](lcu::i32 u, lcu::i32 v, lcu::u8 sky, lcu::u8 block) {
+        mask[static_cast<std::size_t>(u) + static_cast<std::size_t>(v) * static_cast<std::size_t>(kN)].light =
+            static_cast<lcu::u8>((block << 4) | sky);
+    };
+    set_light(0, 0, 4, 0);
+    set_light(1, 0, 8, 4);
+    set_light(0, 1, 12, 8);
+    set_light(1, 1, 0, 12);
+
+    const lcu::u8 result = lcu::voxel::detail::smooth_corner_light(mask, kN, 1, 1);
+    EXPECT_EQ(result, static_cast<lcu::u8>((((0 + 4 + 8 + 12) / 4) << 4) | ((4 + 8 + 12 + 0) / 4)));
+}
+
+TEST(SmoothCornerLight, AveragesOnlyTheInBoundsCellsAtAMaskEdge) {
+    // Corner (0,0) is the mask's own origin corner - only cell (0,0)
+    // itself is in range (the other 3 diagonal candidates would be at
+    // negative indices), so the "average" is just that one cell.
+    constexpr lcu::i32 kN = 4;
+    std::vector<lcu::voxel::detail::MaskCell> mask(static_cast<std::size_t>(kN * kN));
+    mask[0].light = static_cast<lcu::u8>((7 << 4) | 3);
+
+    const lcu::u8 result = lcu::voxel::detail::smooth_corner_light(mask, kN, 0, 0);
+    EXPECT_EQ(result, static_cast<lcu::u8>((7 << 4) | 3));
+}
+
+TEST(SmoothCornerLight, DefaultsToFullBrightWhenNoCellIsInBoundsAtAll) {
+    // An N=0 mask (degenerate, never happens in real meshing, but the
+    // function must not divide by zero) has no in-range cell for any
+    // corner - the documented full-bright fallback applies.
+    const std::vector<lcu::voxel::detail::MaskCell> empty_mask;
+    EXPECT_EQ(lcu::voxel::detail::smooth_corner_light(empty_mask, 0, 0, 0), 0xFFu);
 }

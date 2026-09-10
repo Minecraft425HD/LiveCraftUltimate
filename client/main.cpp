@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <algorithm>
@@ -525,12 +526,22 @@ int main() {
     // existing (brief section 24 "local updates, not full recompute"):
     // this never re-floods the whole chunk, only the region the edit
     // actually affects.
+    // Returns every OTHER chunk (never `coord` itself - the caller
+    // already knows to remesh that one) whose light this edit actually
+    // wrote to (Phase 33) - the real answer to "what needs remeshing
+    // besides the edited chunk", replacing a guess at a fixed neighbor
+    // radius with the cross-chunk BFS's own ground truth. Still unioned
+    // with neighbors_sharing_boundary at each call site below, since a
+    // block's opacity change can uncover/hide a neighbor's face purely
+    // geometrically even when no light value changed at all.
     const auto update_lighting_for_edit = [&](lcu::voxel::ChunkCoord coord, lcu::voxel::LocalBlockCoord local,
-                                               lcu::voxel::BlockId old_id, lcu::voxel::BlockId new_id) {
+                                               lcu::voxel::BlockId old_id,
+                                               lcu::voxel::BlockId new_id) -> std::unordered_set<lcu::voxel::ChunkCoord> {
+        std::unordered_set<lcu::voxel::ChunkCoord> touched_chunks;
         const lcu::voxel::Chunk* chunk = world.chunk_at(coord);
         lcu::lighting::Light* light_ptr = world_light.find_chunk_light_mutable(coord);
         if (!chunk || !light_ptr) {
-            return;
+            return touched_chunks;
         }
         lcu::lighting::Light& light = *light_ptr;
 
@@ -541,20 +552,21 @@ int main() {
         if (old_emission > 0) {
             const lcu::u8 old_level = light.block_light(local.x, local.y, local.z);
             lcu::lighting::unpropagate_block_light_cross_chunk(world, block_registry, world_light, coord, local.x,
-                                                                local.y, local.z, old_level);
+                                                                local.y, local.z, old_level, &touched_chunks);
         }
 
         if (new_emission > 0) {
             light.set_block_light(local.x, local.y, local.z, new_emission);
             lcu::lighting::propagate_added_block_light_cross_chunk(world, block_registry, world_light, coord,
-                                                                    local.x, local.y, local.z);
+                                                                    local.x, local.y, local.z, &touched_chunks);
         } else if (new_is_opaque) {
             // The new block blocks light - retract whatever was there
             // before (a no-op if it was already dark).
             const lcu::u8 stale_level = light.block_light(local.x, local.y, local.z);
             if (stale_level > 0) {
                 lcu::lighting::unpropagate_block_light_cross_chunk(world, block_registry, world_light, coord,
-                                                                    local.x, local.y, local.z, stale_level);
+                                                                    local.x, local.y, local.z, stale_level,
+                                                                    &touched_chunks);
             }
         } else {
             // The cell is now open (air, or another transparent block)
@@ -578,16 +590,21 @@ int main() {
             if (best_neighbor_level > 1) {
                 light.set_block_light(local.x, local.y, local.z, static_cast<lcu::u8>(best_neighbor_level - 1));
                 lcu::lighting::propagate_added_block_light_cross_chunk(world, block_registry, world_light, coord,
-                                                                        local.x, local.y, local.z);
+                                                                        local.x, local.y, local.z, &touched_chunks);
             }
         }
 
         // Sky light: genuinely local to its own (x,z) column, but
         // cross-chunk-aware vertically as of Phase 30 (the chunk
         // directly above, if loaded and lit, seeds this column's
-        // sky_open_above).
+        // sky_open_above). No cross-chunk write happens from this call
+        // (it only ever writes into `coord`'s own light), so nothing to
+        // add to touched_chunks here - see DECISIONS.md for the
+        // honestly-scoped gap this leaves (a chunk below doesn't get
+        // retroactively relit by an edit in the chunk above it).
         lcu::lighting::compute_sky_light_column_cross_chunk(*chunk, block_registry, world_light, coord, local.x,
                                                              local.z);
+        return touched_chunks;
     };
 
     // Meshes (and, under bgfx, uploads) one loaded chunk's current block
@@ -630,6 +647,26 @@ int main() {
 #else
         (void)mesh;
 #endif
+    };
+
+    // Remeshes every chunk a single-block edit might have visibly
+    // changed, besides the edited chunk itself (already remeshed
+    // separately by every call site below): the union of
+    // neighbors_sharing_boundary (a face uncovered/hidden purely by the
+    // opacity change, regardless of light) and `light_touched_chunks`
+    // (Phase 33 - the cross-chunk BFS's own real answer for which
+    // OTHER chunks' light values actually changed, replacing a guessed
+    // fixed radius). A std::unordered_set dedupes the case where both
+    // sources name the same chunk.
+    const auto remesh_edit_neighbors = [&](lcu::voxel::ChunkCoord coord, lcu::voxel::LocalBlockCoord local,
+                                            const std::unordered_set<lcu::voxel::ChunkCoord>& light_touched_chunks) {
+        std::unordered_set<lcu::voxel::ChunkCoord> to_remesh = light_touched_chunks;
+        for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(coord, local)) {
+            to_remesh.insert(neighbor);
+        }
+        for (const lcu::voxel::ChunkCoord& neighbor : to_remesh) {
+            remesh_and_upload(neighbor);
+        }
     };
 
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
@@ -964,12 +1001,10 @@ int main() {
                                     const lcu::voxel::BlockId new_id = change->block_id;
                                     if (old_id != new_id) {
                                         target->set_block(split.local.x, split.local.y, split.local.z, new_id);
-                                        update_lighting_for_edit(split.chunk, split.local, old_id, new_id);
+                                        const auto light_touched =
+                                            update_lighting_for_edit(split.chunk, split.local, old_id, new_id);
                                         remesh_and_upload(split.chunk);
-                                        for (const lcu::voxel::ChunkCoord& neighbor :
-                                             neighbors_sharing_boundary(split.chunk, split.local)) {
-                                            remesh_and_upload(neighbor);
-                                        }
+                                        remesh_edit_neighbors(split.chunk, split.local, light_touched);
 #if defined(LCU_ENABLE_SCRIPTING)
                                         if (new_id == lcu::voxel::kAirBlockId) {
                                             mod_event_bus.emit_block_broken(change->x, change->y, change->z, old_id);
@@ -1245,11 +1280,10 @@ int main() {
             if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                 const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
                 target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
-                update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
+                const auto light_touched =
+                    update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
                 remesh_and_upload(split.chunk);
-                for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
-                    remesh_and_upload(neighbor);
-                }
+                remesh_edit_neighbors(split.chunk, split.local, light_touched);
 #if defined(LCU_ENABLE_SCRIPTING)
                 mod_event_bus.emit_block_broken(hit->world.x, hit->world.y, hit->world.z, old_id);
 #endif
@@ -1304,12 +1338,10 @@ int main() {
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                     const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
                     target->set_block(split.local.x, split.local.y, split.local.z, selected_placeable.block_id);
-                    update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
+                    const auto light_touched =
+                        update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
                     remesh_and_upload(split.chunk);
-                    for (const lcu::voxel::ChunkCoord& neighbor :
-                         neighbors_sharing_boundary(split.chunk, split.local)) {
-                        remesh_and_upload(neighbor);
-                    }
+                    remesh_edit_neighbors(split.chunk, split.local, light_touched);
                     {
                         const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
                                                              static_cast<lcu::f32>(place_pos.y) + 0.5f,

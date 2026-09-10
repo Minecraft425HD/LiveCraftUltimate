@@ -2069,3 +2069,60 @@ trying to write into the same shared boundary chunk's `LightStorage`),
 and a boundary buffer (or an equivalent synchronization mechanism)
 would have a real problem to solve. Nothing in Phases 33-42's own scope
 as given currently requires that.
+
+## 2026-09-10 — Smooth lighting supersedes Phase 28's light-based merge restriction; no shader changes needed (Phase 33)
+
+**Context:** Phase 28 made `MaskCell::merges_with` also compare packed
+light, specifically so a merged quad never needed more than one
+uniform light value - two adjacent same-block faces with different
+light stayed as separate quads rather than flattening into one
+arbitrary brightness. That was the correct trade *given flat-per-quad
+shading*, but it fights directly against greedy meshing's whole
+purpose (fewer, larger quads) whenever lighting varies smoothly across
+a surface, which real per-voxel/cross-chunk light (Phases 28-31) makes
+common, not rare.
+
+**Decision:** Phase 33 samples light *per vertex* instead of per quad:
+each of a merged quad's 4 geometric corners independently averages the
+packed light of its up to 4 diagonally-adjacent mask cells
+(`detail::smooth_corner_light`), reusing exactly the per-cell `light`
+values `mesh_chunk_greedy` already computed for Phase 28 (no new light
+sampling was needed, only a new way to consume the existing samples).
+With shading now genuinely per-corner, `MaskCell::merges_with` no
+longer needs to compare light at all - reverted to comparing only
+`block_id`/`positive_facing`, Phase 26's original rule. Net effect: the
+same or more merging than Phase 26 ever achieved (strictly a superset
+of Phase 28's more-restrictive merge set), *and* smoothly-shaded
+output, rather than trading one for the other.
+
+**A real, satisfying payoff found while wiring this up: no shader
+change was needed at all.** `client/shaders/varying.def.sc` already
+declared `float v_color1 : COLOR1;` as an ordinary (non-`flat`)
+varying back in Phase 28 - bgfx/GLSL linearly interpolates ordinary
+varyings across a triangle by default, so as soon as `mesh_chunk_
+greedy` started writing *different* light values to a quad's 4
+vertices instead of the same value four times, the existing fragment
+shader's `mod(v_color1, 16.0)`/`floor(v_color1 / 16.0)` unpacking
+started receiving genuinely smoothly-interpolated (fractional, not
+just integer) values per pixel, automatically - GPU rasterizer-level
+smooth lighting, for free, from a meshing-only change. This is worth
+recording because it easily could have gone the other way (if Phase 28
+had marked that varying `flat` for some now-obsolete reason, this
+phase would have needed a shader edit too) - the absence of shader
+changes here is a direct consequence of Phase 28's specific choice, not
+an accident.
+
+**Deliberately not full ambient occlusion:** classic "smooth lighting"
+in Minecraft-likes is often paired with AO (darkening a corner based on
+how many of its 4 diagonal neighbor cells are solid, independent of
+their light level). This phase implements only the light-averaging
+half - AO is a related but separate effect with its own visual
+trade-offs (it needs opacity, not light, at each diagonal neighbor,
+and a different blending formula) that the brief's "smooth lighting"
+line item doesn't explicitly demand. Not built speculatively; a
+natural, well-scoped future addition if wanted.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether smooth lighting actually looks smooth (not blocky, not broken)
+on a real GPU/display - none of that is knowable from a code read or a
+headless Noop-backend run.
