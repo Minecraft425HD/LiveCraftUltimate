@@ -20,6 +20,8 @@ enum class MessageType : lcu::u8 {
     EntityState = 2,       // server -> client, every tick: AI entity positions. UnreliableSequenced.
     PlayerInput = 3,       // client -> server, every tick: local player's movement input. UnreliableSequenced.
     PlayerCorrection = 4,  // server -> client, periodically: authoritative player position. UnreliableSequenced.
+    BlockAction = 5,       // client -> server, on break/place: a requested block edit. ReliableOrdered.
+    BlockChange = 6,       // server -> client, broadcast to all: an applied, authoritative block edit. ReliableOrdered.
 };
 
 // Reads just the type byte, for a caller that needs to dispatch before
@@ -68,5 +70,45 @@ struct PlayerCorrection {
 };
 std::vector<lcu::u8> encode_player_correction(const PlayerCorrection& message);
 std::optional<PlayerCorrection> decode_player_correction(const std::vector<lcu::u8>& payload);
+
+// Which edit a BlockAction is requesting - matches the client's existing
+// Interact (break)/PlaceBlock actions (see client/main.cpp).
+enum class BlockActionType : lcu::u8 {
+    Break = 0,
+    Place = 1,
+};
+
+// Client's requested edit - a request, not a fact: the server validates it
+// (target chunk loaded, break targets a non-air block, place targets an
+// air block, block_id is registered, and the position is within
+// kMaxBlockActionRange of that client's own server-known player position -
+// see server/main.cpp) before ever touching its own World. A rejected
+// request produces no BlockChange and is otherwise silently dropped - the
+// requester's world simply doesn't change, same outcome as any other
+// no-op edit attempt.
+struct BlockAction {
+    BlockActionType action = BlockActionType::Break;
+    lcu::i64 x = 0;
+    lcu::i64 y = 0;
+    lcu::i64 z = 0;
+    lcu::u16 block_id = 0;  // meaningful for Place only; ignored (but still sent) for Break.
+};
+std::vector<lcu::u8> encode_block_action(const BlockAction& message);
+std::optional<BlockAction> decode_block_action(const std::vector<lcu::u8>& payload);
+
+// Server's authoritative result of an applied edit, broadcast to every
+// connected client (including whichever one requested it - this client
+// never mutates its own World speculatively, see DECISIONS.md "block
+// edits are not client-predicted"). `block_id` is the resulting block at
+// (x, y, z) - kAirBlockId for a successful break, the placed id for a
+// successful place.
+struct BlockChange {
+    lcu::i64 x = 0;
+    lcu::i64 y = 0;
+    lcu::i64 z = 0;
+    lcu::u16 block_id = 0;
+};
+std::vector<lcu::u8> encode_block_change(const BlockChange& message);
+std::optional<BlockChange> decode_block_change(const std::vector<lcu::u8>& payload);
 
 }  // namespace game::systems::protocol

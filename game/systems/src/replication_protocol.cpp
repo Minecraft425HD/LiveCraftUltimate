@@ -7,8 +7,10 @@ namespace game::systems::protocol {
 namespace {
 
 using lcu::f32;
+using lcu::i64;
 using lcu::u16;
 using lcu::u32;
+using lcu::u64;
 using lcu::u8;
 using lcu::usize;
 
@@ -17,6 +19,24 @@ void write_u32_be(std::vector<u8>& out, u32 value) {
     out.push_back(static_cast<u8>((value >> 16) & 0xFF));
     out.push_back(static_cast<u8>((value >> 8) & 0xFF));
     out.push_back(static_cast<u8>(value & 0xFF));
+}
+
+void write_i64_be(std::vector<u8>& out, i64 value) {
+    u64 bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<u8>((bits >> shift) & 0xFF));
+    }
+}
+
+i64 read_i64_be(const u8* data) {
+    u64 bits = 0;
+    for (int i = 0; i < 8; ++i) {
+        bits = (bits << 8) | data[i];
+    }
+    i64 value = 0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 void write_u16_be(std::vector<u8>& out, u16 value) {
@@ -175,6 +195,58 @@ std::optional<PlayerCorrection> decode_player_correction(const std::vector<u8>& 
     PlayerCorrection message;
     message.acknowledged_sequence = read_u32_be(payload.data() + 1);
     message.position = read_vec3(payload.data() + 5);
+    return message;
+}
+
+std::vector<u8> encode_block_action(const BlockAction& message) {
+    std::vector<u8> out;
+    out.push_back(static_cast<u8>(MessageType::BlockAction));
+    out.push_back(static_cast<u8>(message.action));
+    write_i64_be(out, message.x);
+    write_i64_be(out, message.y);
+    write_i64_be(out, message.z);
+    write_u16_be(out, message.block_id);
+    return out;
+}
+
+std::optional<BlockAction> decode_block_action(const std::vector<u8>& payload) {
+    // type(1) + action(1) + x,y,z(8 each) + block_id(2) = 28 bytes.
+    if (!has_type(payload, MessageType::BlockAction) || payload.size() < 28) {
+        return std::nullopt;
+    }
+    if (payload[1] != static_cast<u8>(BlockActionType::Break) &&
+        payload[1] != static_cast<u8>(BlockActionType::Place)) {
+        return std::nullopt;
+    }
+    BlockAction message;
+    message.action = static_cast<BlockActionType>(payload[1]);
+    message.x = read_i64_be(payload.data() + 2);
+    message.y = read_i64_be(payload.data() + 10);
+    message.z = read_i64_be(payload.data() + 18);
+    message.block_id = read_u16_be(payload.data() + 26);
+    return message;
+}
+
+std::vector<u8> encode_block_change(const BlockChange& message) {
+    std::vector<u8> out;
+    out.push_back(static_cast<u8>(MessageType::BlockChange));
+    write_i64_be(out, message.x);
+    write_i64_be(out, message.y);
+    write_i64_be(out, message.z);
+    write_u16_be(out, message.block_id);
+    return out;
+}
+
+std::optional<BlockChange> decode_block_change(const std::vector<u8>& payload) {
+    // type(1) + x,y,z(8 each) + block_id(2) = 27 bytes.
+    if (!has_type(payload, MessageType::BlockChange) || payload.size() < 27) {
+        return std::nullopt;
+    }
+    BlockChange message;
+    message.x = read_i64_be(payload.data() + 1);
+    message.y = read_i64_be(payload.data() + 9);
+    message.z = read_i64_be(payload.data() + 17);
+    message.block_id = read_u16_be(payload.data() + 25);
     return message;
 }
 
