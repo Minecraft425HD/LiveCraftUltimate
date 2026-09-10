@@ -18,9 +18,11 @@ complete playable game, not a completed checklist") - **Phase 13 (block
 edit replication)**, **Phase 14 (chunk network streaming)**, **Phase 15
 (server-side inventory)**, **Phase 16 (per-movement chunk streaming)**,
 **Phase 17 (surface/subsurface terrain content)**, **Phase 18 (item
-mappings for grass/dirt)**, and **Phase 19 (server-side inventory
-extended past game:stone)** are done; see "Reality Audit" and "Last
-Completed Task" below for what they cover and what's next.
+mappings for grass/dirt)**, **Phase 19 (server-side inventory
+extended past game:stone)**, and **Phase 20 (interest-scoped chunk
+unloading, real chunk persistence, disconnect detection)** are done;
+see "Reality Audit" and "Last Completed Task" below for what they
+cover and what's next.
 
 ## Reality Audit (2026-09-10)
 
@@ -536,6 +538,74 @@ checks in `item_for_block`, not configuration); no persistence across a
 disconnect/reconnect; placing still only ever places `game:stone` (no
 hotbar/item-selection UI exists to place anything else).
 
+**Phase 20 (interest-scoped chunk unloading, real chunk persistence,
+disconnect detection)**: closed Phase 16's remaining honest gap - the
+server's shared `World` could stream new chunks in per-movement but
+could never unload anything, and UDP's connectionless nature meant a
+departed client's `ClientState` lived forever, permanently inflating
+the union of "chunks someone might need". Three tightly-coupled pieces,
+closed together because the first genuinely required the second and
+both benefited from the third being real too:
+
+1. **Real disconnect detection**: every `ClientState` now tracks
+   `last_packet_time`, updated on every received packet; a per-tick
+   sweep erases (and logs) any client idle past a new
+   `kClientTimeoutSeconds = 5.0f` constant.
+2. **Interest-scoped unloading**: a new `compute_interest_set` lambda
+   gives each client a real `interest_set` (every chunk coord within
+   load radius of its last streamed center); after any tick where a
+   client moved, connected, or was pruned, the server unions every
+   remaining client's interest set and unloads whatever currently-
+   loaded chunk nobody needs.
+3. **Real chunk persistence wired to its first real trigger**: before
+   unloading, the chunk is saved via the already-existing, already-
+   tested `lcu::serialization::save_chunk_to_file` (Phase 3's
+   primitive, never previously called from a real code path); if a
+   client's interest later returns to that coord, `load_chunk_from_file`
+   is tried before falling back to regenerating it - regenerating an
+   edited-then-evicted chunk would silently revert the edit, a genuine
+   correctness bug, not just a missed optimization.
+
+A design-time bug was caught before ever building: pre-setting a
+freshly-connected client's `last_streamed_center` to its own spawn
+center made the movement-triggered streaming loop treat "just
+connected" as "no change since last tick, skip" - which would silently
+skip the real load-or-reload path for a client's own spawn-adjacent
+chunks whenever a previous client's departure had evicted them. Fixed
+by making the field `std::optional<ChunkCoord>` (default unset,
+compares unequal to any real coord) instead of pre-populating it.
+
+Verified via real multi-process runs, not mocks: a disconnect-timeout
+run (`"Client 127.0.0.1:42566 timed out after 5.0s of silence,
+disconnecting"` at essentially exactly 5s); an isolated unload run
+(`"Saved chunk (x,y,1) to disk before unloading"` x12, then `"Unloaded
+12 chunk(s) no connected client still needs (total 36 loaded)"`); and a
+chained run where a second, freshly-connecting client receives
+`ChunkData` for the exact same 12 coordinates the first run evicted -
+direct proof those chunks were reloaded from disk, not silently
+regenerated or lost. One real, if narrow, networking behavior surfaced
+while stress-testing (a suspected `UnreliableSequenced` `u16` sequence-
+wraparound under extreme sustained packet volume) and is documented,
+not fixed, in NETWORKING.md - root cause unconfirmed, out of this
+phase's scope.
+
+No new unit tests - this phase composes already-tested primitives
+(`World`, `lcu::serialization::{save,load}_chunk_to_file`) under new
+server-side orchestration, exercised by the real runs above. `ctest`
+unchanged at 343/343 (bgfx) / 340/340 (non-bgfx).
+
+Honestly scoped: persistence is session-scoped (chunks save under
+`<world>/chunks/`, so a fresh server process on the same world
+directory would pick them up, but full cross-restart persistence as a
+verified *product feature* hasn't been separately demonstrated);
+`kClientTimeoutSeconds` is a placeholder value, not tuned against real
+latency/jitter data; the client's own `World` still never unloads
+(only the server's shared one does - the client only ever tracks one
+player's interest, so this hasn't been a correctness problem); the
+sequence-wraparound finding above remains unconfirmed and unfixed. See
+NETWORKING.md "Interest-scoped chunk unloading, real chunk persistence,
+and disconnect detection" for the full writeup.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -600,13 +670,23 @@ None currently tracked.
   both now load newly-in-range chunks as the player's own chunk column
   changes - see NETWORKING.md "Per-movement chunk streaming". Not via
   `World::update_streaming` itself, though: that method also *unloads*
-  chunks outside range, which is the wrong shape for the server's
-  single `World` instance shared across every connected client (see
-  DECISIONS.md "server-side chunk streaming never unloads") - Phase 16
-  instead hand-rolls the load-only half of the same radius logic
-  directly in `server/main.cpp`/`client/main.cpp`. `World::update_streaming`
-  itself, unload behavior included, is still real and still unit-tested,
-  just not the function either executable's own streaming trigger calls.
+  chunks outside range, which was the wrong shape for the server's
+  single `World` instance shared across every connected client back
+  when only one client's range was tracked - Phase 16 instead
+  hand-rolled the load-only half of the same radius logic directly in
+  `server/main.cpp`/`client/main.cpp`. ~~The server's shared `World`
+  never unloads anything~~ **Fixed** (Phase 20): the server now tracks
+  every connected client's real interest set and unloads (saving to
+  disk first) any chunk none of them still need - see NETWORKING.md
+  "Interest-scoped chunk unloading, real chunk persistence, and
+  disconnect detection". `World::update_streaming`
+  itself is still real and still unit-tested, just still not the
+  function either executable's own streaming trigger calls (Phase 20's
+  unload logic is hand-rolled in `server/main.cpp` too, mirroring how
+  Phase 16's load half was, since it needs the multi-client interest
+  union `update_streaming` doesn't know about). The client's own
+  `World` still never unloads - it only ever tracks one player's
+  interest, so this hasn't surfaced as a correctness problem there.
 - `World::update_streaming` itself still streams a 3D cube by Chebyshev
   distance, not the horizontal-disc-plus-bounded-vertical shape real
   worlds want - still true, and still nothing calls it (see above), so
@@ -621,13 +701,17 @@ None currently tracked.
   vegetation/decoration (brief section 21's later pipeline stages) -
   every column still uses the same three block ids regardless of
   position or depth beyond the fixed layering above.
-- Chunk save/load (`engine/serialization::chunk_serializer`) is
+- ~~Chunk save/load (`engine/serialization::chunk_serializer`) is
   unit-tested in isolation but still not wired to any actual trigger in
-  `VoxelClient` or `VoxelServer` (no "save world" command, no server
-  persistence loop yet - Phase 7+). Brief section 80's slice 1 is closed
-  in the sense that the save/load primitive exists and break/place
-  mutates real in-memory chunk data; persisting those edits to disk from
-  a live client/server session is still open.
+  `VoxelClient` or `VoxelServer`~~ **Fixed** (Phase 20, server-side):
+  `VoxelServer` now calls `save_chunk_to_file` for real before unloading
+  any chunk no connected client's interest set still covers, and
+  `load_chunk_from_file` when a client's interest returns to that coord
+  - a real trigger, not just a tested-in-isolation primitive. Scoped to
+  the current server process's own session directory (`<world>/chunks/`)
+  - not separately verified as surviving a deliberate server restart as
+  a product feature, and `VoxelClient` still has no save/load trigger of
+  its own (no "save world" command in single-player). See NETWORKING.md.
 - Look input is arrow keys, not mouse-look - SDL relative-mouse-mode
   plumbing doesn't exist yet (see `engine/platform/include/lcu/platform/
   input.h` and DECISIONS.md). A real, usable interim control scheme, not
@@ -684,9 +768,13 @@ None currently tracked.
   client as any of them wanders into unloaded territory, verified via
   real two- and three-process runs including a stationary client
   independently receiving another client's movement-triggered chunk.
-  Still not interest-managed by distance in the sense of ever
-  *unloading* anything - the server's shared `World` only ever grows
-  (see DECISIONS.md). Block *edits*
+  ~~Still not interest-managed by distance in the sense of ever
+  *unloading* anything - the server's shared `World` only ever grows~~
+  **Fixed** (Phase 20): the server now unloads (saving to disk first)
+  any chunk no connected client's real interest set still covers, and
+  reloads from disk rather than regenerating if interest returns - see
+  NETWORKING.md "Interest-scoped chunk unloading, real chunk
+  persistence, and disconnect detection". Block *edits*
   (breaking/placing) **are** also replicated (Phase 13, see
   NETWORKING.md "Block edit replication") - server-authoritative,
   broadcast to every connected client *and* replayed in full to any
@@ -702,11 +790,13 @@ None currently tracked.
   none of these phases covers: any block/item beyond those three isn't
   inventory-gated (no general, data-driven block-id-to-item-id mapping
   - `item_for_block` is three explicit `if` checks, not configuration),
-  server-side inventory has no persistence across a disconnect, the
-  shared `World`'s loaded-chunk set never shrinks back down (Phase 16 -
-  see above), and the edit history itself is unbounded for the server
-  process's lifetime rather than compacted against persisted state (see
-  NETWORKING.md).
+  server-side inventory has no persistence across a disconnect, and the
+  edit history itself is unbounded for the server process's lifetime
+  rather than compacted against persisted state (see NETWORKING.md).
+  The shared `World`'s loaded-chunk set does now shrink back down
+  (Phase 20 - see above), but the *edit history* used for late-joiner
+  catch-up is separate from chunk persistence and still isn't compacted
+  when a chunk it references gets unloaded/saved.
 - `VoxelClient`'s networked mode logs the `Welcome` message's
   `world_seed` but doesn't actually use it for world generation - it
   still calls its own compile-time `kWorldSeed`, which by construction
@@ -729,6 +819,26 @@ None currently tracked.
   wraparound the way `sequence_greater_than` does - only matters past
   65536 messages on a single channel of one connection, far beyond this
   vertical slice's traffic volume. See NETWORKING.md.
+- Discovered but unconfirmed/unfixed (Phase 20 stress-testing): under
+  extreme sustained packet volume (tens of real seconds of an
+  unthrottled test client sending `PlayerInput` every frame), server-
+  simulated player movement appeared to stall after crossing roughly
+  one chunk boundary and never progress further, even given 200+
+  additional real seconds of client runtime. Suspected but not
+  confirmed root cause: `PlayerInput`'s `UnreliableSequenced` channel's
+  `u16` sequence-wraparound comparison (`sequence_greater_than`)
+  misjudging "newer vs. older" once the counter has wrapped multiple
+  times between processed packets, causing the server to start
+  discarding all further updates as stale. Not fixed - would need
+  reading/testing `Connection`/`sequence_greater_than` specifically,
+  out of Phase 20's scope; verification instead used a reliable
+  ~15-second single-crossing movement window instead of one continuous
+  long-distance run. See NETWORKING.md.
+- `kClientTimeoutSeconds` (Phase 20's disconnect-detection idle
+  threshold, `5.0f`) is a placeholder value chosen for fast, reliable
+  test iteration, not tuned against any real-world latency/jitter/
+  packet-loss data - a real deployment over an actual internet
+  connection (rather than loopback) would likely need this higher.
 - Interest management (`VoxelServer`'s per-client `EntityState`
   distance filter) is real logic but never actually exercised excluding
   an entity in any verification run so far - this vertical slice's
@@ -885,12 +995,13 @@ completed checklist - work continues past the original 12-phase queue.
 Next up, in priority order (brief section 10 - multiplayer fundamentals
 before content/polish):
 
-1. **Interest-scoped chunk unloading**, closing Phase 16's remaining
-   honest gap: the server's shared `World` only ever grows (see
-   DECISIONS.md "server-side chunk streaming never unloads") - a real
-   long-running server needs a way to drop chunks nothing currently
-   connected still needs, without breaking a client that's still
-   standing in one another client abandoned.
+1. ~~Interest-scoped chunk unloading~~ **Done (Phase 20)**: the
+   server's shared `World` now unloads (saving to disk first) any
+   chunk no connected client's real interest set still covers, and
+   reloads from disk rather than regenerating if interest returns -
+   see NETWORKING.md. A disconnect-detection timeout and the
+   `std::optional` sentinel fix that made it safe were both closed in
+   the same phase.
 2. **Placing grass/dirt**, closing Phase 18/19's remaining gap:
    `PlaceBlock` still only ever places `game:stone` - there's no
    hotbar/item-selection UI yet to choose what to place from a multi-
@@ -908,6 +1019,12 @@ before content/polish):
    platform verification (Android/iOS on an actual toolchain), then
    performance work informed by `VoxelBenchmarks`' real numbers, then
    UI/audio polish.
+5. Lower priority, opportunistic: confirm/fix the Phase 20 stress-test
+   finding (a suspected `UnreliableSequenced` sequence-wraparound issue
+   in `Connection`/`sequence_greater_than` under extreme sustained
+   packet volume) - deferred since it needs dedicated networking-code
+   investigation, not a quick fix, and hasn't affected any real
+   verification run at this vertical slice's normal traffic volume.
 
 Update state docs and commit after each, same discipline as every phase
 before it - see "Resume Protocol" implicit throughout this file: read

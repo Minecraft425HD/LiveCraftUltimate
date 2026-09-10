@@ -3,11 +3,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "game/components/ai_wander.h"
@@ -118,6 +120,18 @@ constexpr lcu::f32 kInterestRadius = 24.0f;
 // tuned any tighter without real-world ping data to justify it.
 constexpr lcu::f32 kMaxBlockActionRange = 10.0f;
 
+// Real disconnect detection (Phase 20): a client that hasn't sent a
+// single packet in this many real seconds is presumed gone and pruned
+// from `clients` - UDP has no notion of a "connection" to signal this
+// any other way (brief section 19/20). Deliberately short for this
+// vertical slice's own real-run verification turnaround, not tuned
+// against real-network jitter/packet-loss data (a live client sends
+// PlayerInput every single frame while networked, unthrottled - see
+// BUILD_STATUS.md - so a genuinely-connected client's last packet is
+// always a small fraction of a second old; this only ever fires for a
+// peer that's actually gone).
+constexpr lcu::f32 kClientTimeoutSeconds = 5.0f;
+
 struct ClientState {
     lcu::network::Connection connection;
     lcu::physics::PlayerPhysicsState player;
@@ -132,10 +146,32 @@ struct ClientState {
     // handle_block_action below), never by the client directly.
     lcu::items::Inventory inventory{9};
     // Per-movement chunk streaming (Phase 16): the chunk column this
-    // client's loaded-chunk range was last computed around - set at
-    // connect time to the spawn column, re-checked every tick against
-    // the client's current position.
-    lcu::voxel::ChunkCoord last_streamed_center{};
+    // client's loaded-chunk range was last computed around, re-checked
+    // every tick against the client's current position. `nullopt` means
+    // "never computed yet" - deliberately not pre-set to the spawn
+    // column at connect time (Phase 20 fix): a client's own spawn-area
+    // chunks might have been unloaded again by the time they connect
+    // (interest-scoped unloading, see below), so the very first
+    // movement-loop pass after insertion must always run the real
+    // load-or-reload-from-disk logic for this client's own area, not be
+    // skipped as "no change" just because the coincidental center value
+    // matched.
+    std::optional<lcu::voxel::ChunkCoord> last_streamed_center;
+    // Interest-scoped chunk unloading (Phase 20): every chunk currently
+    // within this client's own load radius, recomputed in full
+    // whenever `last_streamed_center` changes. The union of every
+    // connected client's `interest_set` is what a chunk needs to be
+    // absent from before the server unloads it - see DECISIONS.md
+    // "interest-scoped chunk unloading".
+    std::unordered_set<lcu::voxel::ChunkCoord> interest_set;
+    // Real disconnect detection (Phase 20): when a UDP peer stops
+    // sending anything at all, this is how the server ever notices -
+    // updated on every packet received from this address, checked each
+    // tick against `kClientTimeoutSeconds`. Without this, `clients`
+    // (and every chunk a departed player's `interest_set` was holding
+    // open) would grow and never shrink for the server process's
+    // entire lifetime.
+    std::chrono::steady_clock::time_point last_packet_time;
 };
 
 }  // namespace
@@ -227,6 +263,26 @@ int main(int argc, char** argv) {
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id);
     });
+
+    // Real chunk persistence trigger (Phase 20) - `engine/serialization::
+    // chunk_serializer` existed since Phase 3 but nothing ever actually
+    // called it from a live session (see PROJECT_STATE.md "Known
+    // Limitations"). Interest-scoped unloading (below) is that real
+    // trigger: without saving an edited chunk before it's evicted and
+    // loading it back instead of regenerating pristine terrain, a chunk
+    // a player edited then wandered away from would silently revert the
+    // moment they (or anyone) wandered back - a real correctness bug,
+    // not just a missed optimization. Scoped to this one server
+    // process's own session (not full restart persistence - a save
+    // directory from a previous run is never consulted for the initial
+    // static area below, only for unload/reload within this run) - see
+    // DECISIONS.md "interest-scoped chunk unloading".
+    const std::filesystem::path chunk_save_dir = std::filesystem::path(config.world) / "chunks";
+    std::filesystem::create_directories(chunk_save_dir);
+    const auto chunk_file_path = [&](lcu::voxel::ChunkCoord coord) {
+        return (chunk_save_dir / fmt::format("{}_{}_{}.chunk", coord.x, coord.y, coord.z)).string();
+    };
+
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
     for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
         for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
@@ -250,6 +306,23 @@ int main(int argc, char** argv) {
                                                  static_cast<lcu::i64>(std::floor(pos.y)),
                                                  static_cast<lcu::i64>(std::floor(pos.z))};
         return lcu::voxel::world_to_chunk_and_local(block, lcu::voxel::Chunk::kEdgeLength).chunk;
+    };
+
+    // Interest-scoped chunk unloading (Phase 20, see DECISIONS.md):
+    // every chunk coordinate within `load_settings`' radius of `center`
+    // - the exact same shape the per-movement streaming loop already
+    // walks to decide what to *load*, reused here to decide what a
+    // client still needs kept loaded at all.
+    const auto compute_interest_set = [&](lcu::voxel::ChunkCoord center) {
+        std::unordered_set<lcu::voxel::ChunkCoord> interest;
+        for (lcu::i32 cx = center.x - load_settings.radius_xz; cx <= center.x + load_settings.radius_xz; ++cx) {
+            for (lcu::i32 cz = center.z - load_settings.radius_xz; cz <= center.z + load_settings.radius_xz; ++cz) {
+                for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                    interest.insert({cx, cy, cz});
+                }
+            }
+        }
+        return interest;
     };
 
     auto make_spawn_aabb = [&](lcu::math::Vec3 feet) {
@@ -449,9 +522,16 @@ int main(int argc, char** argv) {
         while (auto packet = socket.try_receive(from)) {
             auto [it, inserted] = clients.try_emplace(from);
             ClientState& client = it->second;
+            client.last_packet_time = std::chrono::steady_clock::now();
             if (inserted) {
                 client.player.aabb = make_spawn_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
-                client.last_streamed_center = chunk_coord_of_position(client.player.aabb.center());
+                // last_streamed_center/interest_set deliberately left
+                // unset here - see their own declarations above. The
+                // per-movement streaming loop below always treats a
+                // newly-inserted client as "changed" this same tick,
+                // which both computes its real interest_set and
+                // loads/reloads-from-disk whatever in it isn't already
+                // loaded.
                 LCU_LOG_INFO("New client connection from {}", from.to_string());
             }
 
@@ -537,17 +617,37 @@ int main(int argc, char** argv) {
 
         game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, kTickDt);
 
+        // Real disconnect detection (Phase 20, see DECISIONS.md): a UDP
+        // peer that has gone silent for kClientTimeoutSeconds is pruned
+        // from `clients` before anything below reasons about who's
+        // still connected - a client's `interest_set` (below) must stop
+        // holding chunks open the instant it's actually gone, not on
+        // whatever later tick happens to touch that coordinate again.
+        bool any_client_changed = false;
+        {
+            const auto now = std::chrono::steady_clock::now();
+            for (auto it = clients.begin(); it != clients.end();) {
+                const lcu::f32 idle_seconds = std::chrono::duration<lcu::f32>(now - it->second.last_packet_time).count();
+                if (idle_seconds > kClientTimeoutSeconds) {
+                    LCU_LOG_INFO("Client {} timed out after {:.1f}s of silence, disconnecting", it->first.to_string(),
+                                 idle_seconds);
+                    it = clients.erase(it);
+                    any_client_changed = true;
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         // Per-movement chunk streaming (brief section 19/22, Phase 16 -
         // closes Phase 14's "connect-time-only" gap, see DECISIONS.md):
-        // grow - never shrink, this `World` is shared across every
-        // connected client, so unloading anything a *different* client
-        // still needs would break that client; see DECISIONS.md
-        // "server-side chunk streaming never unloads" - the server's
-        // loaded-chunk set to follow any client that has crossed into a
-        // new chunk column since last checked, then broadcast every
-        // newly-loaded chunk to every connected client (not just the one
-        // that triggered it - anyone already connected is equally
-        // missing a chunk that didn't exist yet a moment ago).
+        // the server's loaded-chunk set follows any client that has
+        // crossed into a new chunk column since last checked, then
+        // broadcasts every newly-loaded chunk to every connected client
+        // (not just the one that triggered it - anyone already
+        // connected is equally missing a chunk that didn't exist yet a
+        // moment ago). Also recomputes that client's `interest_set` in
+        // full (Phase 20), consumed by the unload sweep below.
         std::vector<lcu::voxel::ChunkCoord> newly_loaded_chunks;
         for (auto& [addr, client] : clients) {
             const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(client.player.aabb.center());
@@ -555,21 +655,73 @@ int main(int argc, char** argv) {
                 continue;
             }
             client.last_streamed_center = current_center;
-            for (lcu::i32 cx = current_center.x - load_settings.radius_xz; cx <= current_center.x + load_settings.radius_xz;
-                 ++cx) {
-                for (lcu::i32 cz = current_center.z - load_settings.radius_xz;
-                     cz <= current_center.z + load_settings.radius_xz; ++cz) {
-                    for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
-                        const lcu::voxel::ChunkCoord coord{cx, cy, cz};
-                        if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
-                            continue;
-                        }
-                        world.load_chunk(coord);
-                        newly_loaded_chunks.push_back(coord);
-                    }
+            client.interest_set = compute_interest_set(current_center);
+            any_client_changed = true;
+            for (const lcu::voxel::ChunkCoord& coord : client.interest_set) {
+                if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
+                    continue;
                 }
+                world.load_chunk(coord);  // placeholder slot - about to be overwritten below if a save exists.
+                lcu::voxel::Chunk loaded_from_disk;
+                const auto load_result = lcu::serialization::load_chunk_from_file(chunk_file_path(coord), loaded_from_disk);
+                if (load_result == lcu::serialization::ChunkLoadResult::Ok) {
+                    *world.chunk_at_mutable(coord) = loaded_from_disk;
+                    LCU_LOG_INFO("Reloaded chunk ({},{},{}) from disk (not regenerated)", coord.x, coord.y, coord.z);
+                } else if (load_result != lcu::serialization::ChunkLoadResult::FileNotFound) {
+                    // FileNotFound is the ordinary case (nothing was ever
+                    // saved here - freshly generated instead). Anything
+                    // else means a real, unexpected corruption/version
+                    // problem with a save this exact process wrote -
+                    // worth knowing about even though the freshly
+                    // regenerated pristine chunk (from world.load_chunk
+                    // above) is still a safe fallback.
+                    LCU_LOG_WARN("Chunk ({},{},{}) has a save file that failed to load, using regenerated terrain instead",
+                                 coord.x, coord.y, coord.z);
+                }
+                newly_loaded_chunks.push_back(coord);
             }
         }
+
+        // Interest-scoped chunk unloading (Phase 20, see DECISIONS.md):
+        // once nobody connected still has a loaded chunk in their own
+        // `interest_set`, it's safe to drop - only run this O(loaded
+        // chunks) sweep on a tick where something actually could have
+        // changed who needs what (a client moved, connected, or just
+        // got pruned above), not unconditionally every tick.
+        if (any_client_changed) {
+            std::unordered_set<lcu::voxel::ChunkCoord> still_needed;
+            for (const auto& [addr, client] : clients) {
+                still_needed.insert(client.interest_set.begin(), client.interest_set.end());
+            }
+            std::vector<lcu::voxel::ChunkCoord> to_unload;
+            for (const lcu::voxel::ChunkCoord& coord : world.loaded_chunk_coords()) {
+                if (still_needed.find(coord) == still_needed.end()) {
+                    to_unload.push_back(coord);
+                }
+            }
+            for (const lcu::voxel::ChunkCoord& coord : to_unload) {
+                if (const lcu::voxel::Chunk* chunk_to_save = world.chunk_at(coord)) {
+                    // Persist first (Phase 20's real save/load trigger -
+                    // see comment by chunk_save_dir above): without
+                    // this, any block edit in this chunk would silently
+                    // revert to pristine worldgen the moment someone
+                    // wandered back into range.
+                    if (lcu::serialization::save_chunk_to_file(*chunk_to_save, chunk_file_path(coord))) {
+                        LCU_LOG_INFO("Saved chunk ({},{},{}) to disk before unloading", coord.x, coord.y, coord.z);
+                    } else {
+                        LCU_LOG_WARN("Failed to save chunk ({},{},{}) before unloading - any edits in it will be "
+                                     "lost if it's ever reloaded",
+                                     coord.x, coord.y, coord.z);
+                    }
+                }
+                world.unload_chunk(coord);
+            }
+            if (!to_unload.empty()) {
+                LCU_LOG_INFO("Unloaded {} chunk(s) no connected client still needs (total {} loaded)",
+                             to_unload.size(), world.loaded_chunk_count());
+            }
+        }
+
         if (!newly_loaded_chunks.empty()) {
             LCU_LOG_INFO("Streamed {} newly-loaded chunk(s) into range (total {} loaded)", newly_loaded_chunks.size(),
                          world.loaded_chunk_count());

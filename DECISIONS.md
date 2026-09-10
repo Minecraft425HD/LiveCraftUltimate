@@ -1261,3 +1261,91 @@ against a single, clearly-stated change (brief section 96's own
 practice, followed throughout this project's phase history) - not
 because it's hard, just because it's a distinct piece of work with its
 own honest "done" definition.
+
+## 2026-09-10 — Interest-scoped unloading supersedes "server-side chunk streaming never unloads" (Phase 20)
+
+**Context:** Phase 16's decision above ("Server-side chunk streaming
+never unloads") deliberately deferred unloading because unloading by a
+single client's range, against the server's one shared `World`, was a
+correctness bug waiting to happen - client B could lose ground out from
+under them if client A's departure drove the unload. That entry named
+two real fixes: a per-client "still needed by *someone*" reference
+count, or per-client `World` instances. This phase builds the first of
+those two, once real disconnect detection existed to make it safe to
+evict a chunk `A` needed after `A` actually leaves rather than just
+going quiet.
+
+**Decision:** Each `ClientState` now computes and stores its own real
+`interest_set` (every chunk coord within load radius of where it last
+streamed from). The server's unload sweep unions every *currently
+connected* client's interest set and only evicts a chunk absent from
+that union - the reference-count design from the Phase 16 entry,
+implemented directly rather than via a separate counter structure
+(the union recomputation is O(clients x chunks-per-client) per
+triggering tick, cheap at this project's tested scale, and avoids a
+second data structure that could drift out of sync with the interest
+sets themselves). Per-client `World` instances (the other option named
+in Phase 16) remain unbuilt - still the bigger structural change with
+real memory-duplication cost for a shared, read-mostly world, and the
+reference-count approach is sufficient for every scale this project has
+actually tested.
+
+**Why disconnect detection had to come first:** without it, a client
+that quietly stopped responding (crashed, lost connectivity, force-
+quit) would keep its stale `ClientState`, and therefore its stale
+`interest_set`, in the union forever - the exact same "chunk never
+frees" problem this phase exists to fix, just relocated from "no one
+ever prunes clients" instead of "no one ever unloads chunks." A
+`last_packet_time` timeout sweep (`kClientTimeoutSeconds = 5.0f`,
+deliberately untuned - see PROJECT_STATE.md Known Limitations) closes
+that gap first, in the same phase, since the second feature is
+meaningless without it.
+
+**Why persistence had to come with it too:** unloading a chunk that has
+an unsaved edit and later regenerating it via the deterministic
+worldgen generator would silently *revert* that edit the moment a
+client's interest returned - not a missed optimization, a genuine
+correctness bug indistinguishable from data loss to a player. The fix
+was to call the already-existing, already-unit-tested (Phase 3)
+`lcu::serialization::save_chunk_to_file`/`load_chunk_from_file`
+functions as unloading's real trigger, closing a separate, long-
+standing Known Limitation ("chunk save/load never wired to a real
+trigger") as a necessary side effect rather than because this phase set
+out to close it independently.
+
+**Scope explicitly not taken further:** persistence here is scoped to
+the current server process's own session directory (`<world>/chunks/`)
+- a fresh server process pointed at the same world directory would
+genuinely pick up those files, but full cross-restart persistence as a
+verified *product feature* (e.g. surviving a deliberate server restart
+mid-deployment) was not separately exercised, so it isn't claimed as
+done. `kClientTimeoutSeconds` is a placeholder chosen for fast, reliable
+test iteration on loopback, not tuned against real-world latency/
+jitter/packet-loss data.
+
+## 2026-09-10 — `std::optional<ChunkCoord>` sentinel for a client's last-streamed center, not a pre-set value (Phase 20)
+
+**Context:** While implementing Phase 20's interest-scoped unloading, a
+design-time bug was caught before ever building or running anything:
+`ClientState::last_streamed_center` had, since Phase 16, been pre-set
+to the client's own spawn chunk coordinate at connect time. The
+per-movement streaming loop's trigger condition is "has this client's
+current chunk center changed since last checked" - and a freshly-
+connected client's current center *is* its spawn center, so the very
+first pass of the loop would see "no change" and skip entirely. This
+was harmless under Phase 16 (nothing was ever unloaded, so a freshly-
+connecting client's own spawn-adjacent chunks were always already
+loaded from the initial full-world load). It stops being harmless the
+moment unloading is real: a second client connecting near a first
+client's now-vacated, now-unloaded territory would skip the real
+load-or-reload-from-disk path for its own spawn chunks on its first
+tick.
+
+**Decision:** Change the field's type to `std::optional<lcu::voxel::
+ChunkCoord>` (default `std::nullopt`), and stop pre-setting it at
+client-insertion time - leave it unset so the movement loop's first
+pass this same tick is guaranteed to see "changed" (an `optional`
+compares unequal to any real `ChunkCoord` when empty) and do the real
+work. This is a minimal, targeted fix to the exact bug (a sentinel
+value that cannot alias a real coordinate) rather than a broader
+refactor of the streaming trigger's shape.

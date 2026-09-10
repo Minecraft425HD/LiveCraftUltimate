@@ -2,7 +2,55 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20
+
+### Phase 20
+
+- Real disconnect detection: every `ClientState` now tracks
+  `last_packet_time` (updated on every received packet); a new
+  per-tick sweep erases (and logs) any client idle past a new
+  `kClientTimeoutSeconds = 5.0f` constant, since UDP has no connection
+  concept to detect a departure from otherwise.
+- Interest-scoped chunk unloading: a new `compute_interest_set` lambda
+  gives each `ClientState` a real `interest_set` (every chunk coord
+  within load radius of its last streamed center); after any tick where
+  a client moved, connected, or was pruned, the server unions every
+  remaining client's interest set and unloads any currently-loaded
+  chunk nobody needs - closes Phase 16's "the shared `World` only ever
+  grows" gap.
+- Real chunk persistence wired to a real trigger for the first time:
+  before unloading, the chunk is saved via the already-existing,
+  already-tested `lcu::serialization::save_chunk_to_file`; if a
+  client's interest later returns to that coord, `load_chunk_from_file`
+  is tried before falling back to regenerating it - regenerating an
+  edited-then-evicted chunk would have silently reverted the edit.
+- Fixed a design-time bug caught before building: `ClientState::
+  last_streamed_center` changed from a plain `ChunkCoord` pre-set to
+  the client's own spawn center, to `std::optional<ChunkCoord>`
+  (default unset) - the old pre-set made the movement-triggered
+  streaming loop treat a freshly-connected client as "no change since
+  last tick, skip", silently skipping the real load-or-reload path for
+  that client's own spawn-adjacent chunks whenever a previous client's
+  departure had evicted them.
+- Verified via real multi-process runs: a disconnect-timeout run
+  ("Client 127.0.0.1:42566 timed out after 5.0s of silence,
+  disconnecting" at ~5s); an isolated unload run ("Saved chunk
+  (x,y,1) to disk before unloading" x12, "Unloaded 12 chunk(s) no
+  connected client still needs (total 36 loaded)"); a chained run where
+  a second, freshly-connecting client receives `ChunkData` for the
+  exact same 12 coordinates the first run evicted, proving reload-from-
+  disk rather than silent data loss.
+- No new unit tests - composes already-tested primitives (`World`,
+  `lcu::serialization::{save,load}_chunk_to_file`) under new
+  server-side orchestration, exercised by the real runs above. `ctest`
+  unchanged at 343/343 (bgfx) / 340/340 (non-bgfx).
+- Honestly scoped: persistence is session-scoped (`<world>/chunks/`,
+  not separately verified as surviving a deliberate server restart as
+  a product feature); `kClientTimeoutSeconds` is an untuned placeholder;
+  discovered but not fixed while stress-testing - a suspected
+  `UnreliableSequenced` `u16` sequence-wraparound issue under extreme
+  sustained packet volume, documented in NETWORKING.md/PROJECT_STATE.md
+  rather than guessed at a fix.
 
 ### Phase 19
 
