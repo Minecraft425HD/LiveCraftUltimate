@@ -11,21 +11,43 @@ commands).
 ## Current Phase
 
 All 12 phases from the original queue are complete/functionally
-complete for what this headless sandbox can verify. Phase 12 (UI +
-audio + content + polish), the last one, added `engine/audio`
-(SDL3-backed `AudioEngine`, procedural tone synthesis, positional
-pan/attenuation) and `engine/ui` (a real on-screen bgfx debug-text HUD:
-live FPS + the mobile touch-control legend), both wired into
-`VoxelClient` and verified via real runs.
+complete for what this headless sandbox can verify (see the per-phase
+history below). The project is now past that original 12-phase queue
+and into open-ended continued development (brief: "the goal is a
+complete playable game, not a completed checklist") - **Phase 13 (block
+edit replication)** is done; see "Reality Audit" and "Last Completed
+Task" below for what it covers and what's next.
 
-## Current Task
+## Reality Audit (2026-09-10)
 
-None in flight. The 12-phase queue this session started with is done.
-See "Known Limitations" below and `TASK_QUEUE.md`'s per-phase notes for
-everything genuinely still open (mobile/Windows/macOS builds untested
-here, no real GPU/display verification, several deliberately-deferred
-systems) - none of it blocks calling the queue complete, all of it is
-honestly documented rather than silently skipped.
+Per-session discipline: never trust this file's own prior claims
+without re-verifying against actual code/build/test/runtime behavior.
+This audit was performed by rebuilding both configs from a clean
+incremental build, running the full `ctest` suite (313/313 non-bgfx,
+316/316 bgfx - both green), and reading the actual networking/
+replication code rather than trusting NETWORKING.md's prior text. One
+real, confirmed gap was found and closed this session (see below); the
+audit did not surface any other documentation/reality mismatch beyond
+what was already honestly flagged as PARTIAL/MISSING/UNVERIFIED in this
+file's own prior "Known Limitations" section.
+
+| Area | Documented (before this audit) | Actual (verified) |
+|---|---|---|
+| Player movement replication | COMPLETE | COMPLETE - real two-process test, prediction+reconciliation |
+| Entity (AI) replication | COMPLETE | COMPLETE - real interpolation, interest-managed |
+| **Block edit replication** | **MISSING** (honestly flagged) | **Was MISSING, now COMPLETE** - see Phase 13 below, real 3-process test |
+| Chunk streaming/fragmentation | MISSING (honestly flagged) | Confirmed still MISSING - `Connection` has no fragmentation/reassembly, verified by reading `engine/network` directly |
+| Texture/content pipeline | MISSING (honestly flagged) | Confirmed still MISSING - no texture atlas, no asset loader anywhere in the tree |
+| Mod loading | PARTIAL (honestly flagged) | Confirmed PARTIAL - real Lua VM + registry bindings + event bus all work (verified via real run), but only one event (`block_broken`) exists and there's no manifest/dependency format |
+| Android/iOS build | UNVERIFIED (honestly flagged) | Confirmed UNVERIFIED - `cmake --preset android-arm64` reaches real NDK detection and fails only there (no NDK installed); no Gradle/Xcode project exists |
+| Test suite | "305/305 (nobgfx) / 308/308 (bgfx)" | Was accurate at time of writing; now 313/313 / 316/316 after Phase 13's 10 new protocol tests |
+
+Conclusion: this repository's documentation was **not** found to be
+overstating completion anywhere audited - every PARTIAL/MISSING/
+UNVERIFIED claim already in this file checked out against the real
+code. The one real gap worth closing immediately, given the master
+brief's explicit emphasis on multiplayer fundamentals, was block edit
+replication - closed this session (Phase 13).
 
 ## Last Completed Task
 
@@ -155,6 +177,73 @@ with `draw_debug_overlay` executing every frame, no assert/crash.
 `DistanceAttenuation` - all pure logic, no real audio device needed).
 `ctest` 308/308 passing (bgfx build) / 305/305 (non-bgfx build).
 
+**Phase 13 (block edit replication)**: closed the single most
+consequential gap the Reality Audit above confirmed - block edits were
+entirely unreplicated (each connected client mutated only its own local
+`World`; a second client, or the server itself, never saw the change).
+Added `BlockAction` (client->server request) and `BlockChange`
+(server->all-clients broadcast) to `game::systems::protocol`, both
+`ReliableOrdered`. `VoxelServer` validates every request (target chunk
+loaded, break targets non-air, place targets air with a registered
+`block_id`, target within `kMaxBlockActionRange` of the requester's own
+server-known position - brief section 20's "never trust client data")
+before applying it to its own `World` and broadcasting the result to
+every connected client, itself included - no client mutates its own
+`World` speculatively for a block edit (see DECISIONS.md). Item
+pickup/consumption stays client-local and optimistic (fires at request-
+send time, not at `BlockChange`-received time, since every client gets
+every broadcast and can't tell whose edit it was from the message
+alone) - a real, honestly-scoped simplification, not silently swept
+under the rug (see NETWORKING.md "What's deferred" for the exact
+edges: no refund on server rejection, no world-diff catch-up for a
+client that joins after an edit already happened).
+
+Found and fixed two real bugs while verifying this, not just adding new
+code: (1) an initial implementation used `continue` inside the
+place-block branch to skip re-duplicating logic, which would have
+skipped the rest of that frame's loop body entirely (rendering, network
+flush, frame counting) - caught by actually running it, not by
+inspection, and fixed by restructuring to a proper if/else instead. (2)
+Networked-mode breaking initially gave the player no item at all (the
+pickup logic only existed in single-player's code path) - meaning a
+networked player could break blocks forever but never place one, since
+placing requires an item. Both were real, playtested bugs, not
+hypothetical - exactly what brief section 29 ("regression rule") and
+section 30 ("debugging": reproduce, find root cause, fix, add test/
+verify, don't guess) call for.
+
+Verified via a real three-process run (one `VoxelServer`, two
+independent `VoxelClient`s - one acting via `LCU_VERIFY_BREAK_PLACE`,
+one purely observing, given a large `LCU_MAX_FRAMES` budget since the
+client loop is unthrottled and a passive observer otherwise exits
+before a full server tick cycle elapses - a real methodology detail
+worth recording for whoever reruns this): server logs `Applied
+BlockAction from <addr>: (0,28,-1) 1 -> 0` then `(0,29,-1) 0 -> 1`; the
+acting client logs the item pickup, the item consumption on place, and
+`Applied server BlockChange` for both edits; the independent observer -
+which never touched either block itself - logs the identical `Applied
+server BlockChange` lines for both, confirming its `World` genuinely
+converged with the other two processes rather than merely proving a
+message decoded. Single-player mode re-verified byte-for-byte
+unchanged via the same `LCU_VERIFY_BREAK_PLACE` hook.
+
+10 new unit tests (`BlockActionBreakRoundTrips`,
+`BlockActionPlaceRoundTripsWithBlockId`, and 8 more covering rejection/
+truncation/wrong-type cases for both new messages). `ctest` 316/316
+passing (bgfx build) / 313/313 (non-bgfx build).
+
+The three-process test above also exposed a second real gap the same
+session: a client connecting *after* an edit already happened never
+learned about it (a one-shot broadcast only reaches whoever is already
+connected). Fixed immediately, same pass: `VoxelServer` now keeps every
+applied edit in order (`block_change_history`) and replays it in full
+to a newly connecting client right after its `Welcome`. Verified via a
+real run: a client breaks then places a block and disconnects: a
+second client that connects *only after* both edits happened still
+logs `Applied server BlockChange` for both, and the server logs
+`Replayed 2 historical block change(s) to <addr>` - proving actual
+catch-up, not just that the feature compiles.
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -167,11 +256,11 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 308/308 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 316/316 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 305/305 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 313/313 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
@@ -181,7 +270,8 @@ PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
 Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
 AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
 UdpSocket, Address, LoopbackIntegration, PositionInterpolator,
-PredictionBuffer, ReplicationProtocol, LuaState, EventBus,
+PredictionBuffer, ReplicationProtocol (incl. BlockAction/BlockChange),
+LuaState, EventBus,
 RegistryBindings, ModLoader, GenerateSineWave, ComputeStereoPan,
 DistanceAttenuation. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
@@ -192,8 +282,10 @@ vertex counts. Real integration tests exist for networking
 (`LoopbackIntegration.*`: two `Connection`s over real loopback UDP
 sockets, one deliberately dropping the first real datagram sent) and,
 outside the automated suite, a real two-process `VoxelClient`<->
-`VoxelServer` multiplayer run (see BUILD_STATUS.md); save/load is still
-unit-tested only, not yet exercised through a full server-save/
+`VoxelServer` movement/entity multiplayer run plus a real *three*-process
+run (one server, two independent clients) proving block edit replication
+actually converges both clients' worlds (see BUILD_STATUS.md); save/load
+is still unit-tested only, not yet exercised through a full server-save/
 client-load cycle since there's no server-side world-save trigger yet,
 and `VoxelClient`/`VoxelServer` don't call it either - see Known
 Limitations.
@@ -272,13 +364,21 @@ None currently tracked.
   `127.0.0.1` - there is no hostname/IP-string parser anywhere yet, and
   no in-game "connect to a server" UI. A real "join by address" flow is
   later work.
-- Chunk data and block edits aren't replicated over the network at all.
-  Both a connected client and the server generate their own independent
-  copy of the world from the same hardcoded seed; break/place still only
-  mutates the client's own local `World`, invisible to the server or any
-  other client. Chunk streaming specifically needs message
-  fragmentation `engine/network::Connection` doesn't implement yet (a
-  compressed chunk doesn't fit in one UDP datagram) - see NETWORKING.md.
+- Chunk *data* still isn't replicated over the network - a connected
+  client and the server each independently generate their own copy of
+  the world from the same hardcoded seed; chunk streaming specifically
+  needs message fragmentation `engine/network::Connection` doesn't
+  implement yet (a compressed chunk doesn't fit in one UDP datagram) -
+  see NETWORKING.md. Block *edits* (breaking/placing) **are** now
+  replicated (Phase 13, see NETWORKING.md "Block edit replication") -
+  server-authoritative, broadcast to every connected client *and*
+  replayed in full to any client that connects later (`block_change_
+  history`, so a late joiner still catches up), both verified via real
+  multi-process runs. What Phase 13 doesn't cover: a server-side
+  inventory (item pickup/cost is still client-local and optimistic,
+  unrefunded if the server rejects the request), and the edit history
+  itself is unbounded for the server process's lifetime rather than
+  compacted against persisted state (see NETWORKING.md).
 - `VoxelClient`'s networked mode logs the `Welcome` message's
   `world_seed` but doesn't actually use it for world generation - it
   still calls its own compile-time `kWorldSeed`, which by construction
@@ -372,8 +472,9 @@ None currently tracked.
   `VoxelClient` and `VoxelServer` each load `mods/` independently and
   must agree by construction (same mods directory, same registration
   order) for ids to match; nothing detects or reports a mismatch. Same
-  underlying gap as the pre-existing "block edits aren't replicated"
-  limitation above.
+  underlying gap as the "chunk data still isn't replicated" limitation
+  above - both are "client/server must agree by construction, nothing
+  syncs it" gaps.
 - Lua sandboxing is standard-library-only (no `io`/`os`/`package`) — a
   mod script still runs with no CPU/memory/time limits (a mod with an
   infinite loop hangs the host process); resource-limiting a Lua VM is
@@ -451,17 +552,38 @@ None currently tracked.
 
 ## Next Task
 
-None queued from the original brief - all 12 phases (0 through 12) are
-functionally complete for what this headless sandbox can verify. Real,
-concrete follow-on work that exists but wasn't part of this queue:
-visual/audio verification on a machine with a real display and
-speakers (nothing in this sandbox can confirm what any of it actually
-looks/sounds like); building and testing the Windows/macOS/Android/iOS
-presets on their native toolchains; and any of the many items listed
-under "Known Limitations" above, each already scoped and reasoned
-about, waiting on an actual need before being built further. Update
-state docs and commit for any of the above, same discipline as every
-phase before it.
+Per the master brief: the goal is a complete playable game, not a
+completed checklist - work continues past the original 12-phase queue.
+Next up, in priority order (brief section 10 - multiplayer fundamentals
+before content/polish):
+
+1. **Chunk network streaming** (the other half of the gap Phase 13
+   didn't touch): `engine/network::Connection` still has no message
+   fragmentation, so a compressed chunk (a few KB) can't be sent as one
+   UDP datagram. A connecting client still generates its own world
+   locally from the shared hardcoded seed rather than receiving it - this
+   works today only because both sides happen to agree on that seed by
+   construction, which breaks the moment server-side world configuration
+   (a different seed, a loaded/edited save) needs to actually reach a
+   client. Needs: a fragmentation/reassembly scheme in `Connection`
+   (sequenced parts of one logical message, reassembled once complete),
+   then wiring it to actually send generated/loaded chunks.
+2. **Server-side inventory**, closing Phase 13's remaining honest gap
+   (item pickup/placement-cost is still client-local and optimistic,
+   unrefunded on a rejected `BlockAction`) - needed before multiplayer
+   item economy (crafting, drops, trading) can be real rather than
+   per-client fiction.
+3. Continue down brief section 10's list after that: content/gameplay
+   systems (more block/item types, a real crafting-UI caller for the
+   already-implemented `RecipeRegistry`), then modding depth (a second
+   real event beyond `block_broken`), then platform verification
+   (Android/iOS on an actual toolchain), then performance work informed
+   by `VoxelBenchmarks`' real numbers, then UI/audio polish.
+
+Update state docs and commit after each, same discipline as every phase
+before it - see "Resume Protocol" implicit throughout this file: read
+this file, `TASK_QUEUE.md`, `BUILD_STATUS.md` first, then rebuild and
+re-run the full test suite before trusting any of it, then continue.
 
 ## Current Architecture
 

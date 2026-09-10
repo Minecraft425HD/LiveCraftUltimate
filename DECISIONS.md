@@ -1007,3 +1007,76 @@ string as the format argument directly - text can come from data this
 codebase doesn't fully control (e.g. a future mod-registered label), and
 printf-family functions treat their format argument as executable-ish
 (a stray `%s`/`%n` embedded in it would misbehave or crash).
+
+## 2026-09-10 — Block edits are not client-predicted
+
+**Context:** Phase 13 needed to decide how `VoxelClient` should behave
+the instant a player breaks/places a block while networked: mutate the
+local `World` immediately (client-side prediction, the same pattern
+already used for player movement via `PredictionBuffer`) and reconcile
+later if the server disagrees, or wait for the server's authoritative
+`BlockChange` before touching the `World` at all.
+
+**Decision:** Wait for `BlockChange`. Player movement predicts because
+it happens continuously, every frame, and a visible correction
+mid-stride reads as normal (real games do this); a block edit is a
+single discrete event that either happened or didn't - predicting it
+locally then *reverting* a block back to solid because the server
+rejected the request would be a jarring, confusing "the block came
+back" moment, and reverting also has to undo everything downstream of
+the edit (lighting, remeshing, any fired mod event) that already ran.
+Waiting for the round trip means every one of those side effects
+(lighting update, remesh, `emit_block_broken`, sound) only ever runs
+once, for the outcome that actually happened - simpler and more
+correct, and on loopback (this sandbox's only tested case) the
+round-trip delay is imperceptible anyway. Revisit only if real-network
+latency testing shows the wait is actually felt by a player, which
+needs hardware/network conditions this sandbox can't produce.
+
+## 2026-09-10 — Item pickup/consumption stays client-authoritative (Phase 13)
+
+**Context:** With block edits now server-authoritative, item pickup
+(breaking gives an item) and item cost (placing consumes one) needed a
+home too. The natural-seeming choice - give/consume the item inside the
+`BlockChange` handler, the same place the `World` mutation happens - is
+actually wrong: `BlockChange` is a broadcast every connected client
+receives for *every* player's edits, not just its own, and the message
+carries no "who did this" field. Applying inventory changes there would
+hand every player an item for every break anyone made, anywhere.
+
+**Decision:** Item pickup/consumption fires at the moment a client
+*sends* its own `BlockAction` request - optimistic and client-local, no
+server-side inventory involved at all (none exists yet). This is a
+real, deliberate simplification, not an oversight: it was chosen over
+adding a "this edit was mine" flag to `BlockChange` (which would need a
+per-client player-id concept that doesn't exist anywhere else in the
+protocol yet) or a full server-side inventory (a much larger feature -
+authoritative stacks, slots, persistence - with no other consumer to
+justify it yet). The real cost, honestly documented rather than hidden:
+a `BlockAction` the server rejects (rare - only a genuine race or a
+malicious client normally triggers one) currently isn't refunded. See
+NETWORKING.md "What's deferred".
+
+## 2026-09-10 — Server keeps an unbounded block-change history for late joiners
+
+**Context:** The first real multiplayer verification of block edit
+replication (a three-process run) surfaced a second gap beyond the
+original one: a client connecting *after* an edit already happened
+never learned about it - `BlockChange` was a one-shot broadcast to
+whoever happened to be connected at the moment a request was validated.
+Confirmed by an actual test run, not assumed.
+
+**Decision:** `VoxelServer` now keeps every applied edit, in order, in
+`block_change_history` (a plain `std::vector`, unbounded for the
+process's lifetime) and replays the entire thing to a newly connecting
+client right after its `Welcome`. This is the smallest real fix that
+actually closes the gap - re-verified via a real run where a second
+client connecting only after two edits had already happened still
+caught up on both. The unboundedness is a known, accepted simplification
+for this vertical slice's session lengths (a dev/test server run
+measured in minutes, not days): a real production server would need to
+compact this history against actually-persisted chunk state once chunk
+save/load has a real server-side trigger (still missing - see
+PROJECT_STATE.md "Known Limitations"), replaying only what a given
+client hasn't already received via a loaded save, not the entire
+session's edit log forever.

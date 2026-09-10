@@ -2,7 +2,58 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13
+
+### Phase 13
+
+- Added `BlockAction` (client->server, `ReliableOrdered`) and
+  `BlockChange` (server->all-clients broadcast, `ReliableOrdered`) to
+  `game::systems::protocol` - block edits are now replicated and
+  server-authoritative, closing the single most consequential gap a
+  Reality Audit of the existing codebase found (block edits previously
+  only ever mutated a client's own local `World`, invisible to the
+  server or any other client).
+- `VoxelServer::handle_block_action` validates every request (target
+  chunk loaded; break targets a non-air block; place targets an air
+  block with a registered `block_id`; target within
+  `kMaxBlockActionRange` of the requester's own server-known position -
+  brief section 20's "never trust client data") before applying it to
+  the server's `World` and broadcasting the result to every connected
+  client, including the requester itself - no client mutates its own
+  `World` speculatively for a block edit (see DECISIONS.md).
+- `VoxelServer` now keeps every applied edit in order
+  (`block_change_history`) and replays it in full to a newly connecting
+  client right after its `Welcome`, so a late joiner catches up on
+  edits that happened before it connected instead of silently
+  disagreeing with everyone else's world forever.
+- `VoxelClient`'s item pickup/consumption stays client-local and
+  optimistic (fires at request-send time, not at `BlockChange`-received
+  time - every client receives every broadcast and can't tell whose
+  edit it was from the message alone) - a real, honestly-scoped
+  simplification: no server-side inventory yet, so a rejected request
+  currently isn't refunded (see NETWORKING.md "What's deferred").
+- Found and fixed two real bugs while verifying this feature by
+  actually running it, not just by inspection: an initial
+  implementation used `continue` inside the place-block branch that
+  would have skipped the rest of that frame's loop body (rendering,
+  network flush, frame counting); and networked-mode breaking initially
+  gave the player no item at all (the pickup logic only existed in
+  single-player's code path), which would have made placing impossible
+  in multiplayer since it requires an item.
+- Verified via a real three-process run (one `VoxelServer`, two
+  independent `VoxelClient`s): the server logs `Applied BlockAction`
+  for both a break and a place; the acting client logs the item pickup/
+  consumption and `Applied server BlockChange` for both edits; a
+  second, purely observing client - which never touched either block
+  itself - independently logs the identical `Applied server
+  BlockChange` lines, confirming its `World` genuinely converged with
+  the other two processes. A separate run confirms the late-joiner
+  catch-up: a client connecting only after both edits already happened
+  still receives and applies both via the replayed history.
+- 10 new unit tests for `BlockAction`/`BlockChange` encode/decode
+  (round-trip, rejection of truncated/wrong-type/invalid-enum
+  payloads). `ctest` 316/316 passing (bgfx build) / 313/313 (non-bgfx
+  build), up from 308/308 / 305/305.
 
 ### Phase 12
 

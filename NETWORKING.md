@@ -91,7 +91,7 @@ control yet".
 `engine/network` itself has no opinion on what a payload *means* - that
 framing lives in `game::systems::protocol` (`replication_protocol.h`/
 `.cpp`), shared by `VoxelClient` and `VoxelServer` so they can't
-independently drift out of sync. All five messages are a one-byte type
+independently drift out of sync. All seven messages are a one-byte type
 tag followed by fixed big-endian fields (hand-rolled, not a generic
 serialization framework - see DECISIONS.md):
 
@@ -114,6 +114,64 @@ serialization framework - see DECISIONS.md):
   The server's authoritative position for that client's player as of the
   last `PlayerInput` it actually applied - sent every
   `kCorrectionIntervalTicks` (4) ticks, not every tick.
+- **BlockAction** (`type=5`, client->server, sent ReliableOrdered):
+  `[action: u8][x, y, z: 3×i64][block_id: u16]`. A requested break
+  (`action=0`) or place (`action=1`) - a request, not a fact; see "Block
+  edit replication" below for how the server validates it. `block_id` is
+  only meaningful for a place request.
+- **BlockChange** (`type=6`, server->client, broadcast to every
+  connected client, sent ReliableOrdered): `[x, y, z: 3×i64][block_id:
+  u16]`. The server's authoritative result of an *applied* edit -
+  `block_id` is `kAirBlockId` (0) for a break, the placed id for a
+  place. Never sent for a rejected request.
+
+## Block edit replication (Phase 13)
+
+Server-authoritative, following the same principle as player movement
+(brief section 8): a client's break/place is a *request*
+(`BlockAction`), not an immediate local mutation. The server validates
+it against its own `World` and `BlockRegistry`:
+
+- the target's chunk must be loaded on the server;
+- a break must target a non-air block; a place must target an air block
+  and name a `block_id` that's actually registered (`< BlockRegistry::
+  count()`);
+- the target must be within `kMaxBlockActionRange` (10 blocks) of that
+  client's own server-known player position (`ClientState::player`) -
+  brief section 20's "never blindly trust client data": without this, a
+  malicious client could edit any loaded coordinate regardless of where
+  its player actually is.
+
+A rejected request is logged (`LCU_LOG_WARN`) and otherwise silently
+dropped - no rejection message is sent back, so the requester's own
+`World` simply never changes for that request (see "What's deferred"
+below for what this doesn't cover). A validated request is applied to
+the server's `World` immediately and broadcast as `BlockChange` to
+*every* connected client, including the requester itself - unlike
+`PlayerInput`/`PlayerCorrection`, a client never mutates its own `World`
+for a block edit speculatively; it waits for its own `BlockChange` to
+come back over the wire, same as any other client would (see
+DECISIONS.md "block edits are not client-predicted").
+
+Item pickup/consumption stays entirely client-local and optimistic - a
+`VoxelClient` gives itself a `game:stone` item the moment it *sends* a
+break `BlockAction` (not when the `BlockChange` confirming it arrives,
+since every client receives every `BlockChange`, including edits other
+players made, and has no way to tell "was this my own edit" from the
+message alone), and consumes one the moment it sends a place
+`BlockAction`. There is no server-side inventory yet, so a request the
+server ends up rejecting is not refunded.
+
+Verified via a real three-process run (one `VoxelServer`, two
+`VoxelClient`s - one performing a synthetic break-then-place via
+`LCU_VERIFY_BREAK_PLACE`, the other purely observing): the server logs
+`Applied BlockAction from <addr>: (0,28,-1) 1 -> 0` then `... (0,29,-1)
+0 -> 1`; the acting client logs the item pickup/consumption and `Applied
+server BlockChange` for both edits; the *observing* client - which
+never touched either block itself - independently logs the identical
+`Applied server BlockChange` lines, confirming its `World` actually
+converged to match the other two processes', not just that a message
+arrived (see BUILD_STATUS.md for the exact reproduce steps).
 
 ## Client-side prediction + reconciliation (Phase 8)
 
@@ -195,13 +253,17 @@ and a real two-process run connects an actual `VoxelClient` to an actual
 `VoxelServer` over real loopback UDP and confirms the full loop - Welcome
 received, `EntityState` positions rendered through real interpolation,
 `PlayerInput` sent and a `PlayerCorrection` received and reconciled
-against - not simulated, not mocked (see BUILD_STATUS.md for the exact
-reproduce steps).
+against - not simulated, not mocked. A real *three*-process run (Phase
+13) additionally confirms block edit replication actually converges two
+independent clients' worlds, not just that a message decodes correctly -
+see "Block edit replication" above (see BUILD_STATUS.md for the exact
+reproduce steps for both).
 
 **Not verified**: behavior over a real (non-loopback) network with real
-latency/jitter/loss patterns, NAT traversal, IPv6, more than one
-simultaneous client, or any load beyond a handful of connections and
-messages.
+latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
+handful of connections and messages. Two simultaneous clients *are* now
+verified (the block-replication three-process run above), a step up
+from earlier phases' single-client-only verification.
 
 ## What's deferred
 
@@ -224,11 +286,34 @@ messages.
   isn't currently observable as a mismatch - using the server's seed for
   real needs world generation deferred until after Welcome arrives, a
   bigger structural change than this phase's scope. See DECISIONS.md.
-- **Block edits aren't replicated at all.** Break/place still only
-  mutates the connected client's own local `World` - not sent to the
-  server, not seen by other clients. Needs the same reliable-message
-  machinery `PlayerInput`/`PlayerCorrection` already prove out, just not
-  wired for block edits yet.
+- ~~Block edits aren't replicated at all~~ **Fixed**: `BlockAction`
+  (client -> server, `ReliableOrdered`) / `BlockChange` (server -> all
+  clients, `ReliableOrdered`) now make block edits server-authoritative -
+  see "Block edit replication" below. Still deferred: a server-side
+  inventory (item pickup/placement-cost is still client-authoritative,
+  optimistic, and unrefunded on server rejection) and a world-diff
+  catch-up for a client that connects *after* an edit already happened
+  (see below).
+- ~~No world-diff catch-up for a late-joining client~~ **Fixed**:
+  `VoxelServer` now keeps every applied `BlockChange` in order
+  (`block_change_history`) and replays the full history to a newly
+  connecting client right after its `Welcome`, before any per-tick
+  traffic - confirmed by an actual test run (a client that broke then
+  placed a block, followed later by a second client connecting only
+  after both edits had happened, still logs `Applied server BlockChange`
+  for both). Unbounded for the server process's lifetime - a real
+  long-running server needs to compact this against persisted chunk
+  state once chunk save/load has an actual server-side trigger (still
+  missing, see PROJECT_STATE.md), not keep every edit forever; fine for
+  this vertical slice's session lengths.
+- **No rejection feedback for a `BlockAction` the server refuses.** The
+  requester's own world silently stays as it was (correct), but nothing
+  tells the client *why* - no error message, no UI feedback. Combined
+  with the client-authoritative/optimistic item accounting above, a
+  rejected place request currently loses the player's item with no
+  visible explanation. Acceptable for this vertical slice (rejections
+  are rare - only a genuine race or a malicious client normally triggers
+  one); a real rejection channel is future work.
 - **RELIABLE_UNORDERED/RELIABLE_ORDERED reorder/ack-set correctness
   under sequence wraparound** (past 65536 messages on one channel) -
   `sequence_greater_than` itself handles wraparound correctly, but the

@@ -103,6 +103,57 @@ verified and how.
 - [x] Wired into `VoxelClient`: breaking/placing a block now plays a real synthesized tone, panned/attenuated by the block's position relative to the camera - verified via a real run (`AudioEngine initialized: 44100 Hz, stereo float` under `SDL_AUDIODRIVER=dummy`, no crash through the break/place round trip). `AudioEngine::init()` failing (no device - most CI/this sandbox without the dummy driver) is non-fatal, logged, and silently skips playback.
 - [x] UI system usable from desktop/gamepad/touch: `engine/ui::draw_debug_overlay` - a real on-screen HUD via bgfx's built-in debug-text character buffer (`Renderer::draw_debug_text`/`clear_debug_text`, new methods keeping bgfx access confined to `engine/rendering` per ARCHITECTURE.md), showing live FPS and a legend for every mobile touch-control button. The button labels are drawn at the exact same normalized rects `TouchInputBackend` hit-tests against (`lcu::platform::kTouchButtonLayout`, promoted out of `touch_input.cpp` into a shared header specifically so hit-testing and drawing can never drift apart) - this closes the Phase 10 "a player would currently be dragging/tapping blind" limitation for the touch overlay, and the pre-existing "debug overlay is a log line, not on-screen" limitation, both for real. Verified via a real bgfx (`Noop` backend) run: full startup-to-shutdown with no crash/assert through `draw_debug_overlay` every frame.
 
+## Phase 13 — Block edit replication (post-original-queue; found via Reality Audit)
+
+The original 12-phase queue from the brief is complete (see Phase 0-12
+above). Per the master brief's explicit rule ("do not stop because the
+roadmap is complete"), a Reality Audit was performed against the actual
+code/build/test/runtime state rather than trusting this file's own
+prior claims - it confirmed every existing PARTIAL/MISSING/UNVERIFIED
+note was accurate, and identified block edit replication (brief section
+19, called out as "besonders wichtig") as the highest-value remaining
+gap: break/place only ever mutated a connected client's own local
+`World`, never reaching the server or any other client. See
+PROJECT_STATE.md "Reality Audit" for the full table.
+
+- [x] `BlockAction` (client->server request) / `BlockChange`
+  (server->all-clients broadcast) added to `game::systems::protocol`,
+  both `ReliableOrdered`. 10 new unit tests.
+- [x] `VoxelServer::handle_block_action`: validates a request (chunk
+  loaded, break targets non-air/place targets air with a registered
+  block_id, target within `kMaxBlockActionRange` of the requester's
+  server-known position - brief section 20), applies it to the
+  server's own `World`, broadcasts the result to every connected
+  client including the requester. Rejections are logged, not replied
+  to - the requester's world simply doesn't change.
+- [x] `VoxelClient`: a block edit is a server-authoritative request,
+  not a local mutation - the client waits for its own `BlockChange`
+  broadcast to come back before touching its `World` (see DECISIONS.md
+  "block edits are not client-predicted"). Item pickup/consumption
+  stays client-local and optimistic, fired at request-send time.
+- [x] Late-joiner catch-up: `VoxelServer` keeps every applied edit
+  (`block_change_history`) and replays it to a newly connecting client
+  right after its `Welcome`, found and fixed in the same pass after the
+  first verification run exposed that a late-connecting client never
+  learned about earlier edits.
+- [x] Verified via a real three-process run (1 server + 2 independent
+  clients, one acting, one purely observing): both clients converge to
+  the identical world state after a break and a place, confirmed by
+  matching `Applied server BlockChange` log lines on both - not just
+  that a message decoded. A separate run confirms the late-joiner
+  catch-up specifically. Single-player mode re-verified unchanged.
+  `ctest` 316/316 (bgfx) / 313/313 (non-bgfx), up from 308/308 / 305/305.
+- [x] Two real bugs found and fixed while verifying (not hypothesized -
+  actually hit while running the feature): a `continue` that would have
+  skipped a frame's render/network-flush/frame-count; networked-mode
+  breaking giving no item (making placing impossible in multiplayer).
+
+Next per brief section 10's priority order (multiplayer fundamentals
+before content/polish) - see PROJECT_STATE.md "Next Task" for the full
+reasoning: chunk network streaming (needs message fragmentation in
+`engine/network::Connection`, still entirely missing), then a
+server-side inventory to close Phase 13's remaining honest gap.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
@@ -251,11 +302,22 @@ unit tests): `AudioEngine initialized: 44100 Hz, stereo float` under
 `SDL_AUDIODRIVER=dummy`, and a full bgfx (`Noop` backend) startup-to-
 shutdown run with `draw_debug_overlay` executing every frame with no
 crash/assert. 15 new unit tests (`GenerateSineWave`, `ComputeStereoPan`,
-`DistanceAttenuation`). This closes out the entire 12-phase queue this
-session started with - see PROJECT_STATE.md "Current Phase" for the
-overall status and what's genuinely still open (mobile/Windows/macOS
-builds untested from this Linux sandbox, no real GPU/display
-verification, several deliberately-deferred systems listed below).
+`DistanceAttenuation`). This closed out the entire 12-phase queue this
+session started with - but per the master brief, that's a checklist
+milestone, not a stopping point (brief section 43: never stop because
+the roadmap is complete).
+
+Phase 13 (block edit replication, post-queue) is now functionally
+complete: a Reality Audit against the actual code (not this file's own
+prior claims) confirmed block edits were the highest-value remaining
+gap given the brief's explicit multiplayer emphasis - closed via
+`BlockAction`/`BlockChange`, server-authoritative validation, broadcast
+to every connected client, and late-joiner catch-up via a replayed
+edit history. Verified via a real three-process run proving two
+independent clients' worlds actually converge, not just that messages
+decode. See PROJECT_STATE.md "Reality Audit" and "Next Task" for the
+full picture and what's next (chunk network streaming, then a
+server-side inventory).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
@@ -265,8 +327,8 @@ bleed); `World::update_streaming` still isn't called by either
 `VoxelClient` or `VoxelServer` (a static area is loaded once at
 startup); `engine/network`'s reliable channel has no RTT
 estimation/congestion control, and its server connection model has no
-authentication; chunk data and block edits aren't replicated over the
-network yet; `EventBus` has only one real event (`block_broken`);
+authentication; chunk *data* still isn't replicated over the network
+(block *edits* are, since Phase 13); `EventBus` has only one real event (`block_broken`);
 `ModLoader` has no manifest/dependency/version format; mod-registered
 ids aren't synced over the network (both hosts must load the same mods
 independently and agree by construction); positional audio is pan +
