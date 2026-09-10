@@ -104,6 +104,16 @@ constexpr lcu::u64 kCorrectionIntervalTicks = 4;
 // currently falls within it (see DECISIONS.md).
 constexpr lcu::f32 kInterestRadius = 24.0f;
 
+// A requested block edit is rejected if its target is farther than this
+// from the requesting client's own (server-known) player position -
+// brief section 20's "never blindly accept client data": without this, a
+// malicious client could send BlockAction for any coordinate in the
+// loaded world regardless of where its player actually is. Deliberately
+// looser than VoxelClient's own kInteractRange (6.0f, client/main.cpp) to
+// tolerate normal client/server position drift under real latency, not
+// tuned any tighter without real-world ping data to justify it.
+constexpr lcu::f32 kMaxBlockActionRange = 10.0f;
+
 struct ClientState {
     lcu::network::Connection connection;
     lcu::physics::PlayerPhysicsState player;
@@ -127,12 +137,14 @@ int main(int argc, char** argv) {
     stone_def.has_collision = true;
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
-    // Not otherwise used by the server yet (no inventories, no item drops -
-    // see NETWORKING.md "what's deferred": block edits aren't replicated).
-    // It exists here purely so mods share one namespaced id space across
-    // client and server (see the LCU_ENABLE_SCRIPTING block below) - a mod
-    // that calls register_item must not fail to load on the server just
-    // because nothing server-side reads the result yet.
+    // Not otherwise used by the server yet - there is no server-side
+    // inventory/item-drop system (block edits themselves are now
+    // replicated, see handle_block_action below and NETWORKING.md, but
+    // items stay entirely client-local for now). Exists here purely so
+    // mods share one namespaced id space across client and server (see
+    // the LCU_ENABLE_SCRIPTING block below) - a mod that calls
+    // register_item must not fail to load on the server just because
+    // nothing server-side reads the result yet.
     lcu::items::ItemRegistry item_registry;
 
 #if defined(LCU_ENABLE_SCRIPTING)
@@ -213,6 +225,81 @@ int main(int argc, char** argv) {
     // no untrusted network exposure, not for a real public server.
     std::unordered_map<lcu::network::Address, ClientState> clients;
 
+    // Every successfully applied block edit, in order - replayed in full
+    // to each newly connecting client right after its Welcome (see the
+    // `inserted` handling below) so it catches up on edits that happened
+    // before it joined, not just ones that happen from now on. Unbounded
+    // for the lifetime of this process - fine for a vertical slice's
+    // session lengths; a real long-running server would need to
+    // periodically compact this against actual persisted chunk state
+    // (once chunk save/load is wired to a server trigger - see
+    // PROJECT_STATE.md "Known Limitations") rather than keep every edit
+    // forever.
+    std::vector<protocol::BlockChange> block_change_history;
+
+    // Server-authoritative block editing (brief section 8/19/20): validates
+    // and applies a client's requested break/place against this server's
+    // own World, then broadcasts the result to every connected client
+    // (including the requester - no client mutates its own World
+    // speculatively for a block edit, see DECISIONS.md). Rejects a
+    // request whose target chunk isn't loaded, whose target block isn't
+    // actually breakable/placeable given its current state, whose
+    // requested block_id isn't a registered block, or whose target is too
+    // far from the requesting client's own known position - logged, no
+    // reply sent (the requester's world simply doesn't change).
+    auto handle_block_action = [&](const lcu::network::Address& from, ClientState& client,
+                                    const protocol::BlockAction& action) {
+        const lcu::voxel::BlockWorldCoord target{action.x, action.y, action.z};
+        const lcu::math::Vec3 target_center{static_cast<lcu::f32>(target.x) + 0.5f,
+                                             static_cast<lcu::f32>(target.y) + 0.5f,
+                                             static_cast<lcu::f32>(target.z) + 0.5f};
+        const lcu::f32 distance = lcu::math::length(target_center - client.player.aabb.center());
+        if (distance > kMaxBlockActionRange) {
+            LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) is {:.1f} blocks away (max {})",
+                         from.to_string(), target.x, target.y, target.z, distance, kMaxBlockActionRange);
+            return;
+        }
+
+        const auto split = lcu::voxel::world_to_chunk_and_local(target, lcu::voxel::Chunk::kEdgeLength);
+        lcu::voxel::Chunk* chunk = world.chunk_at_mutable(split.chunk);
+        if (chunk == nullptr) {
+            LCU_LOG_WARN("Rejected BlockAction from {}: chunk ({},{},{}) isn't loaded", from.to_string(),
+                         split.chunk.x, split.chunk.y, split.chunk.z);
+            return;
+        }
+
+        const lcu::voxel::BlockId current = chunk->block_at(split.local.x, split.local.y, split.local.z);
+        lcu::voxel::BlockId new_id = current;
+        bool valid = false;
+        if (action.action == protocol::BlockActionType::Break) {
+            valid = current != lcu::voxel::kAirBlockId;
+            new_id = lcu::voxel::kAirBlockId;
+        } else {
+            valid = current == lcu::voxel::kAirBlockId && action.block_id < block_registry.count();
+            new_id = action.block_id;
+        }
+        if (!valid) {
+            LCU_LOG_WARN("Rejected BlockAction from {}: target ({},{},{}) current_block={} requested_block={}",
+                         from.to_string(), target.x, target.y, target.z, current, action.block_id);
+            return;
+        }
+
+        chunk->set_block(split.local.x, split.local.y, split.local.z, new_id);
+        LCU_LOG_INFO("Applied BlockAction from {}: ({},{},{}) {} -> {}", from.to_string(), target.x, target.y,
+                     target.z, current, new_id);
+#if defined(LCU_ENABLE_SCRIPTING)
+        if (new_id == lcu::voxel::kAirBlockId) {
+            mod_event_bus.emit_block_broken(target.x, target.y, target.z, current);
+        }
+#endif
+        const protocol::BlockChange change{target.x, target.y, target.z, new_id};
+        block_change_history.push_back(change);
+        const auto change_bytes = protocol::encode_block_change(change);
+        for (auto& [broadcast_addr, broadcast_client] : clients) {
+            broadcast_client.connection.send(lcu::network::Channel::ReliableOrdered, change_bytes);
+        }
+    };
+
     constexpr auto kTickDuration = std::chrono::milliseconds(1000 / kTicksPerSecond);
     constexpr lcu::f32 kTickDt = 1.0f / static_cast<lcu::f32>(kTicksPerSecond);
 
@@ -233,15 +320,20 @@ int main(int argc, char** argv) {
 
             const auto messages = client.connection.on_packet_received(*packet);
             for (const auto& message : messages) {
-                const auto input = protocol::decode_player_input(message.payload);
-                if (!input) {
-                    continue;  // not a PlayerInput (or a malformed one) - nothing else expected client->server yet.
+                if (const auto input = protocol::decode_player_input(message.payload)) {
+                    const lcu::f32 dt = std::min(input->dt, kMaxAcceptedInputDt);
+                    lcu::physics::apply_gravity(client.player, physics_config, dt);
+                    lcu::physics::integrate_player(world, client.player, input->horizontal_delta, physics_config, dt,
+                                                    is_solid);
+                    client.last_acknowledged_sequence = input->sequence;
+                    continue;
                 }
-                const lcu::f32 dt = std::min(input->dt, kMaxAcceptedInputDt);
-                lcu::physics::apply_gravity(client.player, physics_config, dt);
-                lcu::physics::integrate_player(world, client.player, input->horizontal_delta, physics_config, dt,
-                                                is_solid);
-                client.last_acknowledged_sequence = input->sequence;
+                if (const auto action = protocol::decode_block_action(message.payload)) {
+                    handle_block_action(from, client, *action);
+                    continue;
+                }
+                // Neither a PlayerInput nor a BlockAction (or a malformed
+                // one) - nothing else expected client->server yet.
             }
 
             if (inserted) {
@@ -251,6 +343,19 @@ int main(int argc, char** argv) {
                                         protocol::encode_welcome({kWorldSeed, static_cast<lcu::u8>(kTicksPerSecond)}));
                 LCU_LOG_INFO("Sent Welcome (seed={}, tick_rate={}) to {}", kWorldSeed, kTicksPerSecond,
                              from.to_string());
+
+                // Catch this client up on every block edit that happened
+                // before it connected - without this, a late joiner's
+                // World would silently disagree with everyone else's
+                // (see NETWORKING.md "no world-diff catch-up", now fixed).
+                for (const auto& change : block_change_history) {
+                    client.connection.send(lcu::network::Channel::ReliableOrdered,
+                                            protocol::encode_block_change(change));
+                }
+                if (!block_change_history.empty()) {
+                    LCU_LOG_INFO("Replayed {} historical block change(s) to {}", block_change_history.size(),
+                                 from.to_string());
+                }
             }
         }
 

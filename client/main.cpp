@@ -604,9 +604,51 @@ int main() {
                             }
                             break;
                         }
+                        case protocol::MessageType::BlockChange: {
+                            if (const auto change = protocol::decode_block_change(message.payload)) {
+                                const lcu::voxel::BlockWorldCoord world_pos{change->x, change->y, change->z};
+                                const auto split =
+                                    lcu::voxel::world_to_chunk_and_local(world_pos, lcu::voxel::Chunk::kEdgeLength);
+                                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                                    const lcu::voxel::BlockId old_id =
+                                        target->block_at(split.local.x, split.local.y, split.local.z);
+                                    const lcu::voxel::BlockId new_id = change->block_id;
+                                    if (old_id != new_id) {
+                                        target->set_block(split.local.x, split.local.y, split.local.z, new_id);
+                                        update_lighting_for_edit(split.chunk, split.local, old_id, new_id);
+                                        remesh_and_upload(split.chunk);
+                                        for (const lcu::voxel::ChunkCoord& neighbor :
+                                             neighbors_sharing_boundary(split.chunk, split.local)) {
+                                            remesh_and_upload(neighbor);
+                                        }
+#if defined(LCU_ENABLE_SCRIPTING)
+                                        if (new_id == lcu::voxel::kAirBlockId) {
+                                            mod_event_bus.emit_block_broken(change->x, change->y, change->z, old_id);
+                                        }
+#endif
+                                        const lcu::math::Vec3 block_center{static_cast<lcu::f32>(change->x) + 0.5f,
+                                                                             static_cast<lcu::f32>(change->y) + 0.5f,
+                                                                             static_cast<lcu::f32>(change->z) + 0.5f};
+                                        const lcu::audio::StereoGain pan = lcu::audio::compute_stereo_pan(
+                                            camera.position, camera.right(), block_center);
+                                        const lcu::f32 attenuation = lcu::audio::distance_attenuation(
+                                            lcu::math::length(block_center - camera.position), 16.0f);
+                                        const auto& sound =
+                                            new_id == lcu::voxel::kAirBlockId ? break_sound : place_sound;
+                                        audio_engine.play(sound, {pan.left * attenuation, pan.right * attenuation});
+                                        LCU_LOG_INFO("Applied server BlockChange at world ({}, {}, {}): block_id={}",
+                                                     change->x, change->y, change->z, new_id);
+                                    }
+                                } else {
+                                    LCU_LOG_DEBUG("BlockChange target's chunk isn't loaded, ignoring");
+                                }
+                            }
+                            break;
+                        }
                         case protocol::MessageType::Heartbeat:
                         case protocol::MessageType::PlayerInput:
-                            break;  // Heartbeat: nothing to act on. PlayerInput: server->client never sends this.
+                        case protocol::MessageType::BlockAction:
+                            break;  // Heartbeat: nothing to act on. PlayerInput/BlockAction: server->client never sends these.
                     }
                 }
             }
@@ -658,7 +700,34 @@ int main() {
         const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
                                     !previous_input.is_down(lcu::platform::Action::PlaceBlock);
 
-        if (interact_pressed && hit) {
+        if (interact_pressed && hit && networked) {
+            // Server-authoritative: send the request and wait for the
+            // broadcast BlockChange to actually mutate this client's
+            // World (see the BlockChange case below) - this client never
+            // mutates its own World speculatively for a block edit the
+            // way it does for movement (see DECISIONS.md "block edits
+            // are not client-predicted").
+            LCU_LOG_INFO("Requesting break at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
+            server_connection.send(lcu::network::Channel::ReliableOrdered,
+                                    protocol::encode_block_action({protocol::BlockActionType::Break, hit->world.x,
+                                                                    hit->world.y, hit->world.z, 0}));
+            // Item pickup is client-authoritative (no server-side
+            // inventory exists yet, same caveat as the Place request
+            // below) so it happens here, optimistically, at request time -
+            // not in the BlockChange handler, which runs for every
+            // connected client on every edit (including edits other
+            // players made) and has no way to tell "was this my own
+            // break" from "someone else's". A request the server ends up
+            // rejecting currently isn't refunded either.
+            if (hit->block == stone_id) {
+                const lcu::u32 leftover = player_inventory.add_item(item_registry, {stone_item_id, 1});
+                if (leftover == 0) {
+                    LCU_LOG_INFO("Picked up 1 game:stone (inventory: {})", player_inventory.count_item(stone_item_id));
+                } else {
+                    LCU_LOG_INFO("Inventory full, game:stone drop lost");
+                }
+            }
+        } else if (interact_pressed && hit) {
             LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
             const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
             if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
@@ -707,30 +776,48 @@ int main() {
                 hit->world.y + static_cast<lcu::i64>(hit->normal.y),
                 hit->world.z + static_cast<lcu::i64>(hit->normal.z),
             };
-            LCU_LOG_INFO("Placing block at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
-                         place_pos.z, player_inventory.count_item(stone_item_id));
-            const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
-            if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
-                const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
-                target->set_block(split.local.x, split.local.y, split.local.z, stone_id);
-                update_lighting_for_edit(split.chunk, split.local, old_id, stone_id);
-                remesh_and_upload(split.chunk);
-                for (const lcu::voxel::ChunkCoord& neighbor : neighbors_sharing_boundary(split.chunk, split.local)) {
-                    remesh_and_upload(neighbor);
-                }
-                {
-                    const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
-                                                         static_cast<lcu::f32>(place_pos.y) + 0.5f,
-                                                         static_cast<lcu::f32>(place_pos.z) + 0.5f};
-                    const lcu::audio::StereoGain pan =
-                        lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
-                    const lcu::f32 attenuation =
-                        lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
-                    audio_engine.play(place_sound, {pan.left * attenuation, pan.right * attenuation});
-                }
+            if (networked) {
+                // See the interact_pressed/BlockActionType::Break branch
+                // above - same server-authoritative pattern. The item is
+                // still consumed client-side immediately (no server-side
+                // inventory exists yet - see DECISIONS.md), so a request
+                // the server ends up rejecting (e.g. the target stopped
+                // being air by the time it's processed) currently isn't
+                // refunded; a real inventory-sync/rejection channel is a
+                // separate, larger feature.
+                LCU_LOG_INFO("Requesting place at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
+                             place_pos.z, player_inventory.count_item(stone_item_id));
+                server_connection.send(
+                    lcu::network::Channel::ReliableOrdered,
+                    protocol::encode_block_action(
+                        {protocol::BlockActionType::Place, place_pos.x, place_pos.y, place_pos.z, stone_id}));
             } else {
-                LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
-                player_inventory.add_item(item_registry, {stone_item_id, 1});
+                LCU_LOG_INFO("Placing block at world ({}, {}, {}) (inventory: {})", place_pos.x, place_pos.y,
+                             place_pos.z, player_inventory.count_item(stone_item_id));
+                const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                    target->set_block(split.local.x, split.local.y, split.local.z, stone_id);
+                    update_lighting_for_edit(split.chunk, split.local, old_id, stone_id);
+                    remesh_and_upload(split.chunk);
+                    for (const lcu::voxel::ChunkCoord& neighbor :
+                         neighbors_sharing_boundary(split.chunk, split.local)) {
+                        remesh_and_upload(neighbor);
+                    }
+                    {
+                        const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
+                                                             static_cast<lcu::f32>(place_pos.y) + 0.5f,
+                                                             static_cast<lcu::f32>(place_pos.z) + 0.5f};
+                        const lcu::audio::StereoGain pan =
+                            lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
+                        const lcu::f32 attenuation =
+                            lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
+                        audio_engine.play(place_sound, {pan.left * attenuation, pan.right * attenuation});
+                    }
+                } else {
+                    LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
+                    player_inventory.add_item(item_registry, {stone_item_id, 1});
+                }
             }
         }
 
