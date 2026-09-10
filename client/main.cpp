@@ -250,7 +250,56 @@ int main() {
     stone_item_def.max_stack_size = 64;
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
+    // Phase 17's grass/dirt terrain content gets the same direct 1:1
+    // block->item mapping stone already has (see DECISIONS.md "Phase
+    // 17"), not a shared/loot-table drop - breaking game:grass yields
+    // game:grass, breaking game:dirt yields game:dirt. Placing either
+    // isn't wired up (there's still no hotbar/item-selection UI to pick
+    // what to place - PlaceBlock always places game:stone specifically,
+    // see below), so these two items can only ever be picked up today,
+    // not placed - an honest, bounded gap, not a stub.
+    lcu::items::ItemDefinition grass_item_def;
+    grass_item_def.namespaced_id = "game:grass";
+    grass_item_def.display_name = "Grass";
+    grass_item_def.max_stack_size = 64;
+    const lcu::items::ItemId grass_item_id = item_registry.register_item(grass_item_def);
+
+    lcu::items::ItemDefinition dirt_item_def;
+    dirt_item_def.namespaced_id = "game:dirt";
+    dirt_item_def.display_name = "Dirt";
+    dirt_item_def.max_stack_size = 64;
+    const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
+
     lcu::items::Inventory player_inventory(kInventorySlotCount);
+
+    // Block-break's item drop (brief section 55) - a direct 1:1
+    // block->item mapping (Phase 17), still not a loot-table system.
+    // Shared by both the networked (optimistic, client-authoritative -
+    // see DECISIONS.md) and single-player break paths below so the two
+    // don't drift out of sync with each other.
+    const auto grant_item_for_broken_block = [&](lcu::voxel::BlockId broken_block) {
+        lcu::items::ItemId item_id = lcu::items::kNoItemId;
+        const char* item_name = "";
+        if (broken_block == stone_id) {
+            item_id = stone_item_id;
+            item_name = "game:stone";
+        } else if (broken_block == grass_id) {
+            item_id = grass_item_id;
+            item_name = "game:grass";
+        } else if (broken_block == dirt_id) {
+            item_id = dirt_item_id;
+            item_name = "game:dirt";
+        }
+        if (item_id == lcu::items::kNoItemId) {
+            return;
+        }
+        const lcu::u32 leftover = player_inventory.add_item(item_registry, {item_id, 1});
+        if (leftover == 0) {
+            LCU_LOG_INFO("Picked up 1 {} (inventory: {})", item_name, player_inventory.count_item(item_id));
+        } else {
+            LCU_LOG_INFO("Inventory full, {} drop lost", item_name);
+        }
+    };
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Modding stack (Phase 9, brief section 84): one Lua VM shared by every
@@ -900,22 +949,16 @@ int main() {
             server_connection.send(lcu::network::Channel::ReliableOrdered,
                                     protocol::encode_block_action({protocol::BlockActionType::Break, hit->world.x,
                                                                     hit->world.y, hit->world.z, 0}));
-            // Item pickup is client-authoritative (no server-side
-            // inventory exists yet, same caveat as the Place request
-            // below) so it happens here, optimistically, at request time -
-            // not in the BlockChange handler, which runs for every
-            // connected client on every edit (including edits other
-            // players made) and has no way to tell "was this my own
-            // break" from "someone else's". A request the server ends up
-            // rejecting currently isn't refunded either.
-            if (hit->block == stone_id) {
-                const lcu::u32 leftover = player_inventory.add_item(item_registry, {stone_item_id, 1});
-                if (leftover == 0) {
-                    LCU_LOG_INFO("Picked up 1 game:stone (inventory: {})", player_inventory.count_item(stone_item_id));
-                } else {
-                    LCU_LOG_INFO("Inventory full, game:stone drop lost");
-                }
-            }
+            // Item pickup is client-authoritative for grass/dirt (no
+            // server-side inventory tracks them yet - see DECISIONS.md
+            // "Phase 17") and only reconciled against the server for
+            // game:stone specifically (Phase 15's InventoryUpdate). It
+            // happens here, optimistically, at request time - not in
+            // the BlockChange handler, which runs for every connected
+            // client on every edit (including edits other players made)
+            // and has no way to tell "was this my own break" from
+            // "someone else's".
+            grant_item_for_broken_block(hit->block);
         } else if (interact_pressed && hit) {
             LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
             const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
@@ -941,19 +984,10 @@ int main() {
                     audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
                 }
                 // The broken block hands the player its item - block-break's
-                // first real item consumer (see DECISIONS.md). Only
-                // "game:stone" exists to break today, so this is a direct
-                // 1:1 mapping; a real block->item drop table is added once
-                // more than one droppable block exists (Phase 9-ish).
-                if (hit->block == stone_id) {
-                    const lcu::u32 leftover = player_inventory.add_item(item_registry, {stone_item_id, 1});
-                    if (leftover == 0) {
-                        LCU_LOG_INFO("Picked up 1 game:stone (inventory: {})",
-                                     player_inventory.count_item(stone_item_id));
-                    } else {
-                        LCU_LOG_INFO("Inventory full, game:stone drop lost");
-                    }
-                }
+                // first real item consumer (see DECISIONS.md), a direct
+                // 1:1 block->item mapping (stone/grass/dirt as of Phase
+                // 17), not a loot-table system.
+                grant_item_for_broken_block(hit->block);
             } else {
                 LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
             }

@@ -188,6 +188,24 @@ int main(int argc, char** argv) {
     stone_item_def.max_stack_size = 64;
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
+    // Registered (in the same order as VoxelClient) purely to keep the
+    // two sides' ItemId spaces aligned, same as game:stone's own
+    // comment above - the server doesn't track either in a per-client
+    // Inventory yet (Phase 17's grass/dirt item pickup is entirely
+    // client-authoritative/optimistic for now, see DECISIONS.md), so
+    // neither id is bound to a variable here.
+    lcu::items::ItemDefinition grass_item_def;
+    grass_item_def.namespaced_id = "game:grass";
+    grass_item_def.display_name = "Grass";
+    grass_item_def.max_stack_size = 64;
+    item_registry.register_item(grass_item_def);
+
+    lcu::items::ItemDefinition dirt_item_def;
+    dirt_item_def.namespaced_id = "game:dirt";
+    dirt_item_def.display_name = "Dirt";
+    dirt_item_def.max_stack_size = 64;
+    item_registry.register_item(dirt_item_def);
+
 #if defined(LCU_ENABLE_SCRIPTING)
     // Mods run here too (Phase 9) so a mod's registered blocks/items exist
     // in the server's authoritative registries, not just the client's -

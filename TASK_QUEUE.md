@@ -329,6 +329,47 @@ Task" for the full reasoning: item mappings for grass/dirt, then
 extending server-side inventory past `game:stone`, then interest-scoped
 chunk unloading.
 
+## Phase 18 — Item mappings for grass/dirt (post-original-queue; closes Phase 17's immediate follow-up gap)
+
+`game:grass`/`game:dirt` were fully real terrain content (Phase 17) but
+breaking either granted no item - Phase 5's break->item logic was one
+hardcoded `if (block == stone_id)` check.
+
+- [x] `VoxelClient` registers `game:grass`/`game:dirt` items (1:1
+  mapping to their block counterparts, matching `game:stone`'s own
+  convention). A new `grant_item_for_broken_block` helper replaces the
+  two previously-duplicated stone-only blocks (networked and
+  single-player break paths) with one lookup covering all three blocks.
+- [x] `VoxelServer` registers the same two items, same order, purely to
+  keep both sides' `ItemId` spaces aligned - doesn't track either in a
+  per-client `Inventory` yet.
+- [x] Verified via a real single-player run (`LCU_VERIFY_BREAK_PLACE`):
+  the player spawns standing on a grass surface block (Phase 17's
+  layering means the straight-down raycast now hits grass, not stone) -
+  log shows `Breaking block at world (0, 28, -1)` then `Picked up 1
+  game:grass (inventory: 1)`, an unforced real exercise of the new path.
+- [x] Verified via a real two-process networked run: server logs
+  `Applied BlockAction from <addr>: (0,28,-1) 2 -> 0` (block id 2 =
+  `game:grass`), client logs `Requesting break`, `Picked up 1
+  game:grass (inventory: 1)`, then `Applied server BlockChange ...
+  block_id=0` - confirming the mapping works under server-authoritative
+  editing too, not just single-player.
+
+No new unit tests - pure orchestration logic reusing already-tested
+`ItemRegistry`/`Inventory` primitives. `ctest` unchanged at 343/343
+(bgfx) / 340/340 (non-bgfx).
+
+Honestly scoped: placing grass/dirt isn't wired up (no hotbar/item-
+selection UI - `PlaceBlock` always places `game:stone`), and
+server-side authoritative tracking (Phase 15's `InventoryUpdate`) still
+only covers `game:stone` - grass/dirt pickup is client-authoritative
+and optimistic, same as `game:stone` was before Phase 15.
+
+Next per brief section 10's priority order - see PROJECT_STATE.md "Next
+Task" for the full reasoning: extending server-side inventory past
+`game:stone`, then interest-scoped chunk unloading, then placing
+grass/dirt.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
@@ -529,18 +570,29 @@ order) on `VoxelClient` and `VoxelServer`, flowing through the
 *existing* collision/meshing/replication pipeline unmodified (nothing
 in those systems hardcodes block ids). Verified via a real
 single-player run and a real two-process networked run streaming a
-chunk that actually contains the new layered content. See
-PROJECT_STATE.md "Reality Audit" and "Next Task" for the full picture
-and what's next (item mappings for grass/dirt, then extending
-server-side inventory past `game:stone`, then interest-scoped chunk
-unloading).
+chunk that actually contains the new layered content.
+
+Phase 18 (item mappings for grass/dirt, post-queue) closes Phase 17's
+immediate follow-up gap: breaking `game:grass`/`game:dirt` now grants a
+real like-named item, via a `grant_item_for_broken_block` helper
+replacing two duplicated stone-only checks. Verified via a real
+single-player run (the player spawns on a grass block, so the existing
+`LCU_VERIFY_BREAK_PLACE` hook naturally exercises the new path
+unforced) and a real two-process networked run confirming the mapping
+works under server-authoritative editing too. See PROJECT_STATE.md
+"Reality Audit" and "Next Task" for the full picture and what's next
+(extending server-side inventory past `game:stone`, then interest-
+scoped chunk unloading, then placing grass/dirt).
 
 Known simplifications carried forward, still accurate and still
 acceptable until something needs more: `RecipeRegistry` has no
-crafting-UI caller; item drops are a direct 1:1 block->item mapping, not
-a loot-table system (server-enforced for `game:stone` specifically, see
-Phase 15 - `game:grass`/`game:dirt` have no item mapping yet at all, see
-Phase 17); worldgen still has no climate/biome/caves/ores/structures/
+crafting-UI caller; item drops are a direct, hardcoded 1:1 block->item
+mapping (stone/grass/dirt as of Phase 18), not a data-driven table or a
+loot-table system - and server-side authoritative tracking (Phase 15's
+`InventoryUpdate`) still only covers `game:stone`, grass/dirt pickup is
+client-authoritative/optimistic only; placing a block still always
+places `game:stone` regardless of what's in the inventory (no hotbar/
+item-selection UI); worldgen still has no climate/biome/caves/ores/structures/
 vegetation (brief section 21's later pipeline stages - every column
 uses the same three block ids regardless of position); lighting is
 single-chunk scoped (no cross-chunk

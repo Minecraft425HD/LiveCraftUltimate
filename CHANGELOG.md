@@ -2,7 +2,39 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18
+
+### Phase 18
+
+- `VoxelClient` registers `game:grass`/`game:dirt` items (1:1 mapping
+  to their block counterparts, matching `game:stone`'s own convention -
+  not a shared loot-table drop). A new `grant_item_for_broken_block`
+  helper replaces two previously-duplicated stone-only checks
+  (networked and single-player break paths) with one lookup covering
+  all three blocks - closes Phase 17's immediate follow-up gap (both
+  new terrain blocks were real content, but breaking either granted no
+  item).
+- `VoxelServer` registers the same two items, same order, purely to
+  keep both sides' `ItemId` spaces aligned - doesn't track either in a
+  per-client `Inventory` yet.
+- Verified via a real single-player run (`LCU_VERIFY_BREAK_PLACE`): the
+  player spawns standing on a grass surface block (Phase 17's layering
+  means the straight-down raycast now hits grass, not stone) - log
+  shows "Breaking block at world (0, 28, -1)" then "Picked up 1
+  game:grass (inventory: 1)", an unforced real exercise of the new
+  path.
+- Verified via a real two-process networked run: server logs "Applied
+  BlockAction from <addr>: (0,28,-1) 2 -> 0" (block id 2 = game:grass),
+  client logs "Requesting break", "Picked up 1 game:grass (inventory:
+  1)", then "Applied server BlockChange ... block_id=0" - confirming
+  the mapping works under server-authoritative editing too.
+- No new unit tests - pure orchestration logic reusing already-tested
+  `ItemRegistry`/`Inventory` primitives. `ctest` unchanged at 343/343
+  (bgfx) / 340/340 (non-bgfx).
+- Honestly scoped: placing grass/dirt isn't wired up (no hotbar/item-
+  selection UI - `PlaceBlock` always places `game:stone`), and
+  server-side authoritative tracking still only covers `game:stone` -
+  grass/dirt pickup is client-authoritative and optimistic.
 
 ### Phase 17
 
