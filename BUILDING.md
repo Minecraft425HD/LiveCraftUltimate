@@ -95,14 +95,109 @@ frame loop; `bgfx::submit()` is called every frame after that. This
 compiles `client/shaders/{vs_chunk,fs_chunk}.sc` (see `DECISIONS.md`)
 into `<binary dir>/shaders/chunk/<profile>/{vs,fs}_chunk.sc.bin` via
 bgfx.cmake's `bgfx_compile_shaders()` helper, for the `spirv`
-(Vulkan), `glsl` (desktop OpenGL) and `essl` (OpenGL ES) profiles.
-`VoxelClient` picks the profile matching `bgfx::getRendererType()` at
-runtime, falling back to `glsl` for anything else (including `Noop`,
-which never actually samples the shader bytecode).
+(Vulkan), `glsl` (desktop OpenGL) and `essl` (OpenGL ES) profiles -
+and, automatically on a macOS host (see the macOS section below),
+`metal` too. `VoxelClient` picks the profile matching
+`bgfx::getRendererType()` at runtime, falling back to `glsl` for
+anything else (including `Noop`, which never actually samples the
+shader bytecode).
+
+## macOS (Phase 25 — code-audited in this Linux sandbox, not yet run on a real Mac)
+
+Everything below was verified by reading the actual CMake/FetchContent
+config this repo uses (`CMakeLists.txt`, `third_party/CMakeLists.txt`,
+`CMakePresets.json`, and the fetched `bgfx.cmake` package's own
+`cmake/bgfxToolUtils.cmake`/`cmake/bgfx/bgfx.cmake`), not assumed -
+this sandbox has no macOS host to actually run these commands on, so
+the result of a real `cmake --build` here is **NOT VERIFIED —
+ENVIRONMENT LIMITATION**. One real bug *was* found and fixed as part
+of this audit (see below) - the rest of this section documents what
+checked out clean.
+
+**Prerequisites** (exact commands, not just package names):
+
+```sh
+xcode-select --install          # Apple Clang (C++20) + the system SDK/frameworks bgfx needs (Cocoa, Metal, QuartzCore, IOKit) - no Homebrew equivalent needed for these
+brew install cmake ninja        # CMake's own minimum here is 3.24; Homebrew's is newer
+```
+
+Every other dependency (SDL3, bgfx, zstd, Lua 5.4, GoogleTest, Google
+Benchmark, fmt) is fetched via CMake `FetchContent` from the exact same
+`third_party/CMakeLists.txt` the Linux build uses - none of them need a
+Homebrew package, and none of their CMake scripts branch into a
+Linux-only path that would need one. Confirmed by reading
+`bgfx.cmake`'s own macOS linking (`cmake/bgfx/bgfx.cmake`): it links
+`-framework Cocoa -framework Metal -framework QuartzCore -framework
+IOKit` (all part of the Xcode SDK, not Homebrew) instead of the
+`libgl1-mesa-dev`/`libwayland-dev` packages the Linux build needs (see
+above) - the macOS equivalent ships with Xcode CLT itself.
+
+**Configure + build** (both paths - `CMakePresets.json`'s `macos`
+preset already sets `CMAKE_OSX_ARCHITECTURES=arm64`; pass
+`-DCMAKE_OSX_ARCHITECTURES=x86_64` instead, or plain `cmake -S . -B ...`
+without the preset, on an Intel Mac):
+
+```sh
+# Fast iteration, no bgfx (window opens, renders nothing):
+cmake --preset macos -DLCU_ENABLE_BGFX=OFF
+cmake --build build/macos -j$(sysctl -n hw.ncpu)
+ctest --test-dir build/macos --output-on-failure
+
+# Real rendering, a real draw call (what the user actually wants to see):
+cmake --preset macos -DLCU_ENABLE_BGFX=ON -DLCU_BUILD_SHADER_TOOLS=ON
+cmake --build build/macos -j$(sysctl -n hw.ncpu)
+ctest --test-dir build/macos --output-on-failure
+```
+
+**Run:**
+
+```sh
+./build/macos/bin/VoxelClient
+```
+
+**What should happen:** a real window opens (SDL3's Cocoa backend);
+`engine/rendering::Renderer` selects bgfx's Metal backend (its
+default/preferred choice on macOS, over the deprecated OpenGL path);
+`Renderer::get_native_window_handle` already has a macOS-specific
+branch (`SDL_PROP_WINDOW_COCOA_WINDOW_POINTER`, `engine/platform/src/
+native_handle.cpp`) that was already correct before this phase - not
+something this audit needed to add. The client should log `Chunk
+shader program valid=true` and render actual frames, same log-level
+proof already confirmed headlessly under bgfx's `Noop` backend on
+Linux.
+
+**Real bug found and fixed by this audit** (not merely documented -
+see `DECISIONS.md` "Phase 25"): `engine/rendering::
+active_shader_profile_dir()` mapped `bgfx::RendererType` to a shader
+profile subdirectory for Vulkan/OpenGL/OpenGL ES, but had **no case for
+Metal** - it silently fell through to the `default: return "glsl"`
+branch. Since bgfx auto-selects Metal as its preferred renderer on
+macOS, and `bgfx_compile_shaders()` (see above) already compiles a
+real `metal` profile automatically there, a real Mac run would have
+loaded the *wrong* shader binary format into a Metal renderer - not a
+missing profile, a genuinely wrong one, which `bgfx::createShader`
+would have rejected (the code already tolerates that: an invalid
+handle just means no draw call, not a crash - `VoxelClient` would still
+run and show a cleared-color window with no chunk mesh drawn). Fixed
+by adding the missing `case bgfx::RendererType::Metal: return
+"metal";` branch. This is a code fix confirmed correct by reading both
+sides (the compile-time profile list bgfx.cmake generates for an
+`APPLE` host, and the runtime profile bgfx reports via
+`getRendererType()`) - actually running it on a Mac is still needed to
+call the *visual result* verified, per this repo's "never trust
+without verifying" discipline.
+
+**Not verified, environment limitation, no way around it here:**
+whether the window actually appears, renders correctly-colored/shaped
+geometry, or performs acceptably on real Apple Silicon/Metal hardware.
+Someone with a real Mac needs to run the commands above and report
+back - see `BUILD_STATUS.md`'s macOS preset row.
 
 ## Platform status
 
 See `BUILD_STATUS.md` for the up-to-date, verified-vs-untested matrix.
-Windows/macOS/Android/iOS presets exist in `CMakePresets.json` but have
-not been exercised from this Linux-only sandbox — they need their native
-toolchain (MSVC, Xcode, Android NDK respectively).
+Windows/Android/iOS presets exist in `CMakePresets.json` but have not
+been exercised from this Linux-only sandbox — they need their native
+toolchain (MSVC, Android NDK, Xcode-on-macOS respectively). macOS was
+code-audited (see above) but still not run on a real Mac from this
+sandbox.

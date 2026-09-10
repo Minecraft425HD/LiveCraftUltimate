@@ -2,7 +2,36 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25
+
+### Phase 25
+
+- macOS build audit (user-directed, start of Phases 25-42: visible
+  game, global lighting, procedural terrain): read every CMake/
+  FetchContent path and every macOS-specific branch already in the
+  codebase, rather than assuming. No Linux-only assumptions found
+  anywhere in `third_party/CMakeLists.txt`; `engine/network`'s socket
+  code already branches correctly for POSIX (macOS's path);
+  `engine/platform`'s native-window-handle code already had a correct
+  macOS Cocoa branch; bgfx.cmake's macOS linking needs zero Homebrew
+  packages beyond `cmake`/`ninja` (Xcode CLT ships the rest);
+  `bgfx_compile_shaders()` already auto-compiles a `metal` profile on
+  an `APPLE` host with no code change needed.
+- **Real bug found and fixed**: `engine/rendering::
+  active_shader_profile_dir()` had no case for `bgfx::RendererType::
+  Metal` and would have loaded the wrong (glsl) shader binary format
+  into bgfx's macOS-preferred Metal renderer. Fixed with one added
+  `case`.
+- New "macOS" section in `BUILDING.md`: exact prerequisites, configure/
+  build/run commands, what a real run should show.
+- `ctest` unchanged at 350/350 (bgfx) / 347/347 (non-bgfx) - a real
+  headless Linux run confirms the fix doesn't regress the existing
+  Noop/glsl fallback path.
+- Honestly scoped: this is a code audit, not a real build - actually
+  running `cmake --build` against a macOS toolchain has not happened
+  from this Linux-only sandbox and is marked **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**, not TESTED, until someone with a real Mac
+  runs the documented commands.
 
 ### Phase 24
 

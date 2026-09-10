@@ -1584,3 +1584,80 @@ crafting behaves identically in both) - it simply won't see other
 players' remote crafts in networked mode, an honest scope note
 consistent with crafting itself never having had multiplayer
 visibility to begin with.
+
+## 2026-09-10 — macOS build audit: real code review, not a build attempt (Phase 25)
+
+**Context:** The user wants to run `VoxelClient` on a real Mac and
+actually see it for the first time - all verification so far has been
+headless in this Linux sandbox (bgfx's `Noop` backend, no GPU/display).
+This sandbox genuinely cannot run `cmake --build` against a macOS
+toolchain - there is no way to make that claim TESTED here, and
+claiming it would violate this project's core "never trust without
+verifying" rule.
+
+**Decision:** Do the next best real thing: read every CMake/
+FetchContent path this repo actually uses and every macOS-specific
+branch bgfx.cmake and this repo's own code already contain, rather than
+assuming either "it'll just work" or "it's probably broken." This is
+the same discipline already applied to Android in Phase 10 (`cmake
+--preset android-arm64` was actually *run*, confirmed to fail only at
+NDK detection as expected) - macOS has no equivalent "run it and see"
+option here, so a structural code audit is the honest substitute, with
+its result marked **NOT VERIFIED — ENVIRONMENT LIMITATION**, not
+TESTED.
+
+**What the audit actually found, concretely:**
+- `third_party/CMakeLists.txt`: every dependency (SDL3, bgfx.cmake,
+  zstd, Lua 5.4, GoogleTest, Google Benchmark, fmt) is a plain
+  `FetchContent_Declare`/`FetchContent_MakeAvailable` pair with no
+  Linux-only `if()` branch gating it - all six build via their own
+  standard CMake on macOS with no special-casing needed here.
+- `engine/network/src/udp_socket.cpp` already branches
+  `#if defined(_WIN32)` for Winsock vs. the POSIX BSD-socket path
+  (`sys/socket.h`/`netinet/in.h`/`arpa/inet.h`/`unistd.h`) - macOS
+  takes the POSIX branch, identical headers/APIs to the Linux path
+  already tested here.
+- `engine/platform/src/native_handle.cpp` already has a correct macOS
+  Cocoa branch (`SDL_PROP_WINDOW_COCOA_WINDOW_POINTER`) - written
+  before this audit, confirmed still correct, not something this phase
+  needed to add.
+- bgfx.cmake's own `cmake/bgfx/bgfx.cmake` links `-framework Cocoa
+  -framework Metal -framework QuartzCore -framework IOKit` on
+  `APPLE` (not `find_library` against a Homebrew path) - these ship
+  with Xcode Command Line Tools, so unlike the Linux build (which
+  needs `libgl1-mesa-dev`/`libwayland-dev` from `apt`, see
+  `BUILDING.md`), macOS needs zero Homebrew packages beyond
+  `cmake`/`ninja` themselves.
+- `cmake/bgfxToolUtils.cmake`'s `bgfx_compile_shaders()` already
+  auto-appends the `metal` profile when `PROFILES` isn't explicitly
+  overridden and the host is `APPLE` (and not `IOS`) - `client/
+  CMakeLists.txt`'s two `bgfx_compile_shaders()` calls don't pass
+  `PROFILES`, so this already happens with zero code change.
+
+**The one real bug this audit found and fixed, not merely
+documented:** `engine/rendering::active_shader_profile_dir()`
+(`shader_program.cpp`) mapped `bgfx::RendererType` to a shader-profile
+subdirectory name for Vulkan/OpenGL/OpenGL ES only, falling through to
+`default: return "glsl"` for everything else - including Metal, which
+bgfx auto-selects as its preferred backend on macOS (over the
+deprecated OpenGL path). Since `bgfx_compile_shaders()` already
+produces a real `metal`-profile shader binary (confirmed above), the
+gap wasn't a missing shader - it was the client asking for the *wrong*
+directory (`glsl` instead of `metal`) and getting a shader binary in
+the wrong format, which `bgfx::createShader` would reject. The
+existing code already tolerates an invalid shader handle gracefully
+(logs a warning, skips the draw call, doesn't crash - `load_shader_
+from_file`'s existing behavior), so this wouldn't have crashed
+`VoxelClient` on a real Mac - it would have opened a window with the
+correct clear color but no visible terrain, a confusing "half-working"
+state exactly of the kind this project's "no fake features, no silent
+gaps" discipline exists to catch. Fixed with one added `case
+bgfx::RendererType::Metal: return "metal";` branch.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether the window actually opens, whether Metal initializes without
+error, whether the compiled shader binaries actually produce correct
+visible output, and real Apple Silicon performance - none of that is
+knowable from a code read. See `BUILDING.md` "macOS" for the exact
+commands someone with a real Mac needs to run, and what they should
+see if everything above is correct.

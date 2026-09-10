@@ -15,6 +15,8 @@ std::string active_shader_profile_dir() {
             return "glsl";
         case bgfx::RendererType::OpenGLES:
             return "essl";
+        case bgfx::RendererType::Metal:
+            return "metal";
         default:
             return "glsl";
     }

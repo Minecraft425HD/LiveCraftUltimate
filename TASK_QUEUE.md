@@ -712,6 +712,35 @@ performance work, then UI/audio polish.
 
 ---
 
+## Phase 25 — macOS build audit (user-directed: start of Phases 25-42, visible game + global lighting + procedural terrain)
+
+The user wants to run `VoxelClient` on a real Mac and see it for the
+first time. This sandbox cannot run a macOS toolchain, so this phase
+is a real code audit (every CMake/FetchContent path, every existing
+macOS-specific branch), not a build attempt - result marked **NOT
+VERIFIED — ENVIRONMENT LIMITATION**, not TESTED, per this project's
+own discipline.
+
+- [x] Audited `third_party/CMakeLists.txt`: no Linux-only assumptions
+  in any of the 7 fetched dependencies.
+- [x] Audited `engine/network`'s socket code (already POSIX/Winsock
+  branched correctly), `engine/platform`'s native-window-handle code
+  (already has a correct macOS Cocoa branch), and bgfx.cmake's own
+  macOS framework linking (Cocoa/Metal/QuartzCore/IOKit - zero
+  Homebrew packages needed beyond `cmake`/`ninja`).
+- [x] Confirmed `bgfx_compile_shaders()` already auto-compiles a
+  `metal` profile on an `APPLE` host with zero code change needed.
+- [x] **Found and fixed a real bug**: `active_shader_profile_dir()`
+  had no case for `bgfx::RendererType::Metal`, would have loaded the
+  wrong shader binary format on macOS. Fixed with one added `case`.
+- [x] New "macOS" section in `BUILDING.md`: prerequisites, configure/
+  build/run commands, what a real run should show.
+
+`ctest` unchanged at 350/350 (bgfx) / 347/347 (non-bgfx). See
+DECISIONS.md "Phase 25" for the full audit writeup.
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet

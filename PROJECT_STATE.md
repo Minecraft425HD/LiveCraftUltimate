@@ -23,10 +23,15 @@ extended past game:stone)**, **Phase 20 (interest-scoped chunk
 unloading, real chunk persistence, disconnect detection)**, **Phase 21
 (hotbar item selection for placing grass/dirt)**, **Phase 22
 (data-driven block-id-to-item-id mapping)**, **Phase 23
-(quick-craft: RecipeRegistry's first real caller)**, and **Phase 24
-(item_crafted: EventBus's second real event)** are done; see "Reality
-Audit" and "Last Completed Task" below for what they cover and what's
-next.
+(quick-craft: RecipeRegistry's first real caller)**, **Phase 24
+(item_crafted: EventBus's second real event)**, and **Phase 25
+(macOS build audit)** are done; see "Reality Audit" and "Last
+Completed Task" below for what they cover and what's next. A large,
+user-directed program (Phases 26-42: visible terrain colors, skybox,
+cross-chunk global lighting with real performance constraints,
+procedural terrain with sea level at y=0, water, biomes, caves/ores,
+vegetation) is now in progress - see TASK_QUEUE.md for per-phase
+detail as each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -1070,9 +1075,17 @@ None currently tracked.
 - bgfx's real GPU backend (Vulkan/GL/Metal/D3D) selection is untested —
   only the `Noop` headless fallback has been exercised, since this sandbox
   has no GPU/display.
-- Mobile/Windows/macOS builds are untested from this Linux-only sandbox;
-  `CMakePresets.json` presets exist for them but have not been exercised
-  on their native toolchains.
+- Mobile/Windows builds are untested from this Linux-only sandbox;
+  `CMakePresets.json` presets exist for them but have not been
+  exercised on their native toolchains. macOS (Phase 25) was
+  code-audited - every CMake/FetchContent path and macOS-specific
+  branch was read directly, and one real bug was found and fixed
+  (`active_shader_profile_dir()` had no Metal case - see
+  DECISIONS.md/BUILDING.md) - but actually running `cmake --build`
+  against a real Mac toolchain still hasn't happened from this
+  sandbox, so it stays **NOT VERIFIED — ENVIRONMENT LIMITATION**, not
+  TESTED, until someone with a real Mac runs the commands in
+  `BUILDING.md`.
 - Input abstraction covers keyboard only (`KeyboardInputBackend`); no
   real mouse-look, gamepad or touch backend yet — camera look is driven
   by arrow keys (`LookUp/Down/Left/Right`, see `DECISIONS.md`) as an
