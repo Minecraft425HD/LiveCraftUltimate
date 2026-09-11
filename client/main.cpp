@@ -309,16 +309,11 @@ constexpr lcu::f32 kArmSwingUpBoost = 0.12f;
 constexpr lcu::f32 kBlockHighlightOutset = 0.002f;
 constexpr lcu::math::Vec3 kBlockHighlightColor{0.05f, 0.05f, 0.05f};
 
-// Real break-progress overlay (Phase 48.2) - a solid (opaque - no real
-// alpha blending, see DECISIONS.md) box over the targeted block that
-// darkens toward black as break progress advances, real visual
-// feedback that breaking is happening. Deliberately NOT a real crack-
-// noise-density shader effect on the block's own face (that needs a
-// new per-fragment world-position uniform threaded through fs_chunk.sc
-// - a real, separate shader feature this phase's own scope doesn't
-// reach - see DECISIONS.md); this overlay is a real, visible,
-// honestly-scoped substitute, not a placeholder.
-constexpr lcu::f32 kBreakOverlayMaxDarken = 0.9f;
+// Real break-progress overlay (Phase 48.2, real crack textures since
+// Phase 60) - a box over the targeted block giving real visual feedback
+// that breaking is happening. See kInset's own local doc comment at the
+// real render call site (below, inside the main loop) for the real
+// crack-texture mapping.
 
 // Crosshair (Phase 44): the first real consumer of the new 2D UI quad
 // batch (engine/rendering::Renderer::submit_ui_quad/flush_ui_quads) -
@@ -4336,18 +4331,36 @@ int main() {
             }
 
             if (render_break_fraction > 0.0f) {
-                // Real, honestly-scoped substitute for a per-fragment
-                // crack-noise shader effect (see kBreakOverlayMaxAlpha's
-                // own doc comment) - a solid box that gets visually
-                // darker (toward black) as progress advances, drawn
-                // very slightly inset so it wins the depth test against
-                // the block's own face without z-fighting.
-                const lcu::math::Vec3 overlay_color =
-                    lcu::math::Vec3{1.0f, 1.0f, 1.0f} * (1.0f - render_break_fraction * kBreakOverlayMaxDarken);
+                // Real crack-texture overlay (Phase 60, replaces the
+                // Phase 48 flat-darkening box) - `render_break_fraction`
+                // (0..1) maps onto the real 10 crack stages
+                // (lcu::assets::TileId::Crack0..Crack9), drawn as a real
+                // alpha-blended textured box (all 6 faces get the same
+                // crack UV - a real, simpler reading than raycasting the
+                // exact hit face for a single oriented quad, see
+                // DECISIONS.md) very slightly inset so it wins the depth
+                // test against the block's own face without z-fighting.
+                const auto crack_stage =
+                    std::min<lcu::u32>(9, static_cast<lcu::u32>(render_break_fraction * 10.0f));
+                const lcu::assets::TileUvRange crack_uv = lcu::assets::tile_uv_range(
+                    static_cast<lcu::u32>(lcu::assets::TileId::Crack0) + crack_stage);
+                const lcu::rendering::Renderer::BoxFaceUv crack_face_uv{crack_uv.u0, crack_uv.v0, crack_uv.u1,
+                                                                          crack_uv.v1};
                 constexpr lcu::f32 kInset = 0.005f;
-                renderer.submit_solid_box(block_min + lcu::math::Vec3{kInset, kInset, kInset},
-                                           block_max - lcu::math::Vec3{kInset, kInset, kInset}, overlay_color,
-                                           sky_program, view, proj);
+                const std::array<lcu::math::Vec3, 8> crack_box_corners = {
+                    lcu::math::Vec3{block_min.x + kInset, block_min.y + kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_min.y + kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_max.y - kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_max.y - kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_min.y + kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_min.y + kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_max.y - kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_max.y - kInset, block_max.z - kInset},
+                };
+                renderer.submit_textured_box(
+                    crack_box_corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, atlas_texture,
+                    {crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv},
+                    /*alpha_blend=*/true);
                 if (bgfx::isValid(sky_program)) {
                     ++draw_calls;
                 }

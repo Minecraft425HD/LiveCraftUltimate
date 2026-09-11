@@ -434,7 +434,7 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
 
 void Renderer::submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
                                     bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
-                                    bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs) {
+                                    bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs, bool alpha_blend) {
     LCU_ASSERT(initialized_);
     if (!bgfx::isValid(program)) {
         return;
@@ -514,7 +514,12 @@ void Renderer::submit_textured_box(const std::array<math::Vec3, 8>& corners, con
     if (use_texture) {
         bgfx::setTexture(0, atlas_sampler_, atlas_texture);
     }
-    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS);
+    // Real alpha blending (Phase 60) for the one real caller that needs
+    // it (the break-progress crack overlay) - see this function's own
+    // doc comment in renderer.h. No depth write either way, matching
+    // every other real per-frame world-space primitive here.
+    const u64 blend_state = alpha_blend ? BGFX_STATE_BLEND_ALPHA : 0;
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS | blend_state);
     bgfx::submit(0, program);
 }
 

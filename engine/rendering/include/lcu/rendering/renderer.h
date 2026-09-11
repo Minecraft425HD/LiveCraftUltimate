@@ -217,9 +217,18 @@ class Renderer : public NonCopyable {
     // `atlas_texture` draws flat `color` instead, same honest
     // fallback). Real depth test against terrain, no depth write - same
     // reasoning every other per-frame world-space primitive here gives.
+    // `alpha_blend` (Phase 60, defaulted false so every existing caller
+    // - the character model - is unaffected): when true, real
+    // `BGFX_STATE_BLEND_ALPHA` is set instead of an opaque write, so a
+    // texture with real transparent pixels (e.g. the break-progress
+    // crack overlay, see lcu::assets::generate_crack) actually
+    // composites see-through instead of rendering those pixels solid
+    // black - the same real alpha-blending gap documented for the rest
+    // of this shader family (see DECISIONS.md) closed for this one real
+    // caller that needs it.
     void submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
                               bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
-                              bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs);
+                              bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs, bool alpha_blend = false);
 
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in

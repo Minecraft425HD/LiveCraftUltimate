@@ -43,7 +43,27 @@ enum class TileId : u32 {
     Cactus = 14,
     Compost = 15,
     Planks = 16,
-    Count = 17,
+    // Real break-progress "crack" overlay tiles (Phase 60.1) - 10 real
+    // stages (0 = barely cracked, 9 = almost fully cracked), each a
+    // transparent base with an increasing real coverage of dark crack
+    // pixels (see generate_crack's own doc comment). Their own atlas
+    // area within the SAME block/item atlas (brief 60.1's own "Eigener
+    // Atlas-Bereich" reading) rather than a whole second texture/
+    // sampler - unlike the font atlas (Phase 57) or skin texture (Phase
+    // 58), these are still real block-face-adjacent overlay content
+    // conceptually close to the rest of this atlas, and there's ample
+    // spare atlas room (17 of 256 slots used before this phase).
+    Crack0 = 17,
+    Crack1 = 18,
+    Crack2 = 19,
+    Crack3 = 20,
+    Crack4 = 21,
+    Crack5 = 22,
+    Crack6 = 23,
+    Crack7 = 24,
+    Crack8 = 25,
+    Crack9 = 26,
+    Count = 27,
 };
 
 // One real, deterministic (fixed-seed-per-texture, see each .cpp
@@ -70,6 +90,13 @@ TilePixels generate_crafting_table_top();
 TilePixels generate_cactus();
 TilePixels generate_compost();
 TilePixels generate_planks();
+
+// Real break-progress crack overlay (Phase 60.1) - `stage` 0-9, an
+// increasingly dense real coverage of dark crack pixels over a
+// transparent base (see the .cpp for the exact deterministic
+// generation). `generate_tile(TileId::Crack0 + stage)` reaches the
+// same real pixels through the general dispatcher below.
+TilePixels generate_crack(u32 stage);
 
 // Returns the same TilePixels generate_* above would for `tile`
 // (dispatches on TileId) - the one real call site build_block_atlas_

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 using lcu::assets::build_block_atlas_pixels;
+using lcu::assets::generate_crack;
 using lcu::assets::generate_tile;
 using lcu::assets::kAtlasSize;
 using lcu::assets::kTileSize;
@@ -12,12 +13,14 @@ using lcu::assets::TilePixels;
 namespace {
 
 // Every real generate_* function under test, by TileId - used to
-// iterate "every real texture" without a 17-way copy/paste block.
+// iterate "every real texture" without a 27-way copy/paste block.
 constexpr TileId kAllTiles[] = {
-    TileId::GrassTop,  TileId::GrassSide,         TileId::Dirt,    TileId::Stone,   TileId::Sand,
-    TileId::Snow,      TileId::Water,             TileId::WoodSide, TileId::WoodTop, TileId::Leaves,
-    TileId::CoalOre,   TileId::IronOre,           TileId::Torch,   TileId::CraftingTableTop,
-    TileId::Cactus,    TileId::Compost,           TileId::Planks,
+    TileId::GrassTop,  TileId::GrassSide, TileId::Dirt,  TileId::Stone,           TileId::Sand,
+    TileId::Snow,      TileId::Water,     TileId::WoodSide, TileId::WoodTop,      TileId::Leaves,
+    TileId::CoalOre,   TileId::IronOre,   TileId::Torch, TileId::CraftingTableTop,
+    TileId::Cactus,    TileId::Compost,   TileId::Planks,
+    TileId::Crack0,    TileId::Crack1,    TileId::Crack2, TileId::Crack3, TileId::Crack4,
+    TileId::Crack5,    TileId::Crack6,    TileId::Crack7, TileId::Crack8, TileId::Crack9,
 };
 
 }  // namespace
@@ -100,4 +103,54 @@ TEST(BuildBlockAtlasPixels, EveryRealTileIsReachableAtItsOwnFixedSlot) {
         EXPECT_EQ(atlas[atlas_index + 2], expected[2]) << "tile " << index;
         EXPECT_EQ(atlas[atlas_index + 3], expected[3]) << "tile " << index;
     }
+}
+
+namespace {
+
+lcu::u32 count_opaque_pixels(const TilePixels& px) {
+    lcu::u32 count = 0;
+    for (std::size_t i = 3; i < px.size(); i += 4) {
+        if (px[i] != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+}  // namespace
+
+TEST(GenerateCrack, Stage0HasSomeRealCrackCoverageButStaysMostlyTransparent) {
+    const TilePixels stage0 = generate_crack(0);
+    const lcu::u32 opaque = count_opaque_pixels(stage0);
+    EXPECT_GT(opaque, 0u);
+    EXPECT_LT(opaque, static_cast<lcu::u32>(kTileSize) * kTileSize / 2);
+}
+
+TEST(GenerateCrack, CoverageGrowsMonotonicallyWithStage) {
+    lcu::u32 previous_count = 0;
+    for (lcu::u32 stage = 0; stage < 10; ++stage) {
+        const lcu::u32 count = count_opaque_pixels(generate_crack(stage));
+        EXPECT_GE(count, previous_count) << "stage " << stage;
+        previous_count = count;
+    }
+}
+
+TEST(GenerateCrack, EachStageIsARealSupersetOfTheStageBefore) {
+    // Same underlying noise field, only the threshold changes - every
+    // pixel cracked at stage N should still be cracked at stage N+1.
+    for (lcu::u32 stage = 0; stage < 9; ++stage) {
+        const TilePixels lower = generate_crack(stage);
+        const TilePixels higher = generate_crack(stage + 1);
+        for (std::size_t i = 3; i < lower.size(); i += 4) {
+            if (lower[i] != 0) {
+                EXPECT_NE(higher[i], 0) << "stage " << stage << " pixel " << i;
+            }
+        }
+    }
+}
+
+TEST(GenerateCrack, DeterministicSameStageAlwaysProducesTheSameBytes) {
+    const TilePixels first = generate_crack(5);
+    const TilePixels second = generate_crack(5);
+    EXPECT_EQ(first, second);
 }

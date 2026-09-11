@@ -2,7 +2,46 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60
+
+### Phase 60
+
+- **Real crack textures**: 10 new procedural atlas tiles
+  (`TileId::Crack0`..`Crack9`, in the SAME block/item atlas - a real,
+  spare-capacity "own atlas area", not a whole new texture/sampler).
+  `generate_crack(stage)` samples one deterministic per-pixel noise
+  field with a threshold that grows with `stage`, so every higher
+  stage's real cracked pixels are a real superset of the stage below -
+  the same real growing-damage look Minecraft's own break overlay has,
+  without 10 independently hand-authored crack patterns.
+- **Real alpha-blended rendering**: `Renderer::submit_textured_box`
+  gains an `alpha_blend` parameter (defaulted false, every Phase 58/59
+  caller unaffected) - when true, real `BGFX_STATE_BLEND_ALPHA`
+  replaces the opaque write, so the crack texture's real transparent
+  "uncracked" pixels actually composite see-through instead of
+  rendering solid black (closing, for this one real caller, the same
+  alpha-blending gap documented since Phase 56).
+- **Real rendering**: the Phase 48.2 flat-darkening break-progress box
+  is replaced by a real alpha-blended, crack-textured box (all 6 faces
+  share the same crack UV - a real, simpler reading than raycasting the
+  exact hit face for one oriented quad, see DECISIONS.md) - `render_
+  break_fraction` (0..1) maps onto the real 10 crack stages.
+- 4 new unit tests (`GenerateCrack.*`, incl. a real superset-growth
+  check across all 10 stages) plus the existing `ProceduralTextures.*`/
+  `BuildBlockAtlasPixels.*` suites now also iterate the 10 new tiles.
+- Verified via real headless runs, real `LCU_VERIFY_BREAK_PLACE`
+  (exercises the real crack overlay across multiple frames of held
+  break progress) and the full regression sweep (`HEALTH`/`MENU`/
+  `INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH`/`HUD`, all complete cleanly),
+  and a real `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files
+  touched - the new `alpha_blend` flag is a pure bgfx render-state
+  change, `vs_sky.sc`/`fs_sky.sc` are unchanged). `ctest` 591/591
+  (bgfx, up from 587) / 583/583 (non-bgfx, up from 579).
+- Honestly scoped: what the real crack texture looks like on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+  crack overlay covers all 6 faces of the targeted block uniformly
+  rather than only the specific face being broken (a real, documented
+  simplification, see DECISIONS.md).
 
 ### Phase 59
 

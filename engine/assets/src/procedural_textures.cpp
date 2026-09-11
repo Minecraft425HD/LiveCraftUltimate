@@ -322,6 +322,29 @@ TilePixels generate_planks() {
     return px;
 }
 
+TilePixels generate_crack(u32 stage) {
+    TilePixels px{};  // Zero-initialized = fully transparent base.
+    LCU_ASSERT(stage < 10);
+    constexpr u32 kSeed = 200;
+    // Real, monotonically-growing crack coverage: every stage samples
+    // the SAME per-pixel noise field (same kSeed, same x/y), only the
+    // threshold against it grows with `stage` - so stage N's real crack
+    // pixels are always a real superset of stage N-1's (nothing that
+    // was cracked ever "uncracks" going up a stage), the same real
+    // growing-damage look Minecraft's own break-stage overlay has,
+    // without needing 10 independently hand-designed crack patterns.
+    const f32 threshold = 0.06f + static_cast<f32>(stage) * 0.055f;  // stage 0: 6%, stage 9: 55.5%.
+    for (u32 y = 0; y < kSize; ++y) {
+        for (u32 x = 0; x < kSize; ++x) {
+            if (pixel_noise(kSeed, x, y) < threshold) {
+                const u8 shade = noisy_channel(20, 0.3f, kSeed + 1, x, y, 7);
+                set_pixel(px, x, y, shade, shade, shade, 255);
+            }
+        }
+    }
+    return px;
+}
+
 TilePixels generate_tile(TileId tile) {
     switch (tile) {
         case TileId::GrassTop:
@@ -358,6 +381,17 @@ TilePixels generate_tile(TileId tile) {
             return generate_compost();
         case TileId::Planks:
             return generate_planks();
+        case TileId::Crack0:
+        case TileId::Crack1:
+        case TileId::Crack2:
+        case TileId::Crack3:
+        case TileId::Crack4:
+        case TileId::Crack5:
+        case TileId::Crack6:
+        case TileId::Crack7:
+        case TileId::Crack8:
+        case TileId::Crack9:
+            return generate_crack(static_cast<u32>(tile) - static_cast<u32>(TileId::Crack0));
         case TileId::Count:
             break;
     }

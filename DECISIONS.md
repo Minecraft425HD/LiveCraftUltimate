@@ -3976,3 +3976,75 @@ existing debug overlay - rejected as unneeded surface area duplicating
 an already-correct existing toggle; extending Phase 59 to also render
 real networked remote-player avatars - rejected as materially larger
 scope the brief itself doesn't name for this phase.
+
+## 2026-09-11 — Phase 60: crack tiles share the existing atlas, coverage-threshold growth instead of 10 hand-drawn patterns, and a uniform box instead of one oriented face quad
+
+**Context:** Phase 60 replaces the Phase 48.2 flat-darkening break-
+progress overlay with real procedurally-generated crack textures.
+
+**The 10 crack tiles live in the SAME block/item atlas (Phase 53), not
+a new dedicated texture/sampler.** This looks like it cuts against the
+pattern set by the font atlas (Phase 57) and skin texture (Phase 58),
+both deliberately kept as their OWN separate textures - but the brief's
+own 60.1 wording explicitly offers "Eigener Atlas-Bereich ODER ein
+zweiter Atlas" as two real, equally-valid readings, unlike Phase 57/58
+where the brief named separation specifically. Crack tiles are real
+block-face-adjacent overlay content, conceptually much closer to the
+rest of the block atlas than a font or a player skin is, and the block
+atlas has ample real spare room (17 of 256 slots used before this
+phase) - reusing it needed zero new `Renderer` sampler-slot plumbing,
+while a second atlas would have meant a 4th real texture/sampler for a
+comparatively small, closely-related piece of content.
+
+**Every crack stage samples the SAME per-pixel noise field, only the
+threshold against it changes - not 10 independently hand-designed
+crack patterns (contrast Phase 57's 95 individually hand-authored
+glyph shapes, where each character's own SHAPE is the entire point).**
+A crack overlay's real job is showing progress growing, not displaying
+10 meaningfully different artistic images - a single noise field with a
+rising threshold gives that growing-damage property for free and for
+real (every pixel cracked at stage N is provably still cracked at stage
+N+1, see the `EachStageIsARealSupersetOfTheStageBefore` test), at a
+fraction of the authoring cost 10 hand-drawn crack patterns would have
+needed. This is the same "reach for the simplest generator that
+satisfies the real requirement" reasoning Phase 54's own noise-based
+generators already established, applied to a case where growth-over-
+stages is the actual requirement, not per-stage visual distinctiveness.
+
+**The crack overlay is a real alpha-blended BOX (all 6 faces share one
+crack UV), not a single quad positioned flush against the specific
+face the player is actually looking at.** The brief's own literal
+wording ("ein Quad ... leicht vor dem Block positioniert") names a
+quad; building the real, correctly-oriented single quad would need the
+raycast hit's own face normal threaded through to this render call (not
+currently exposed alongside `render_hit`) plus real per-face quad-
+orientation math this project has no existing pattern for. Reusing the
+exact same real inset-box shape the OLD flat-darkening overlay already
+used (Phase 48.2) - just textured now, with real alpha blending instead
+of a flat color - gets the identical real, growing-visible-damage
+effect on every face simultaneously, a strictly MORE visible cue (every
+angle shows the cracks, not just the one face being hit) for
+meaningfully less new code than face-normal-aware single-quad
+placement would have needed.
+
+**`Renderer::submit_textured_box` gained a real `alpha_blend` bool
+parameter (defaulted false) rather than a whole new function.** Every
+existing Phase 58/59 caller (the character model) needs the exact
+opaque behavior it already has; a new parameter defaulting to that
+existing behavior is real, minimal surface area, versus a parallel
+`submit_alpha_textured_box` that would have duplicated this function's
+own vertex/index-building logic for one flag's worth of real
+difference.
+
+**Alternatives considered:** a second, dedicated crack-texture atlas -
+rejected per the brief's own "own atlas area OR second atlas" wording
+and the spare-capacity/content-closeness reasoning above; 10 real
+hand-authored crack-pattern bitmaps (matching the font atlas's own
+authoring style) - rejected as real, unnecessary authoring cost for a
+requirement (growing damage) a single thresholded noise field already
+satisfies exactly; real face-normal-aware single-quad placement -
+rejected as real additional plumbing (`render_hit` would need a face-
+normal field it doesn't have) for a visual improvement unverifiable in
+this headless sandbox anyway; a new parallel `submit_alpha_textured_box`
+function - rejected as unnecessary duplication of `submit_textured_box`'s
+own vertex-building logic.

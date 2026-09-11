@@ -69,9 +69,12 @@ the old flat hand icon, and a real 3-way F5 perspective cycle)** and
 Steve-like NPCs via `submit_character_model` - Phase 58's own body
 rendering, extracted and reused - with real wander-direction facing and
 walk/idle animation; debug wireframe boxes became a real toggle,
-default off)** are done - see TASK_QUEUE.md for per-phase detail as
-each of the remaining
-7 phases lands. See
+default off)**, and **Phase 60 (the Phase 48.2 flat-darkening break-
+progress box is now a real alpha-blended, procedurally-generated
+crack-texture overlay, 10 real growing-damage stages sharing the
+existing block atlas)** are done - see TASK_QUEUE.md for per-phase
+detail as each of the remaining
+6 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2544,6 +2547,12 @@ None currently tracked.
   visible character model (only local `AIWander` NPCs do) - a remote
   player still renders as, at most, a debug wireframe box when
   `options.debug_overlay_enabled` is on, nothing at all otherwise.
+- The Phase 60 crack overlay covers all 6 faces of the targeted block
+  uniformly, not only the specific face the player is actually
+  breaking - a real, documented simplification (see DECISIONS.md;
+  `render_hit` doesn't currently expose which face was hit, and the
+  effect is still real and visible from every angle, just not face-
+  specific).
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No

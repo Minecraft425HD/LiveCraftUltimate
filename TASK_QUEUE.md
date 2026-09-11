@@ -2474,6 +2474,33 @@ walk-cycle speed is a fixed constant, not derived from each NPC's own
 real `AIWander::speed`; no player-vs-NPC collision (unchanged,
 pre-existing).
 
+## Phase 60 — Crack textures for break progress
+
+- [x] 10 new procedural atlas tiles (`TileId::Crack0..Crack9`, in the
+  SAME block/item atlas - own atlas area, no new texture/sampler).
+- [x] `generate_crack(stage)` samples one deterministic per-pixel noise
+  field with a threshold that grows with `stage` - every higher stage
+  is a real superset of the one below.
+- [x] New `Renderer::submit_textured_box` `alpha_blend` parameter
+  (defaulted false, existing callers unaffected) - real
+  `BGFX_STATE_BLEND_ALPHA` for this one real caller.
+- [x] The Phase 48.2 flat-darkening break-progress box replaced by a
+  real alpha-blended, crack-textured box (all 6 faces share the crack
+  UV); `render_break_fraction` maps onto the 10 real crack stages.
+- [x] 4 new unit tests (`GenerateCrack.*`, incl. a real superset-growth
+  check across all 10 stages).
+- [x] Verified via real headless runs, real `LCU_VERIFY_BREAK_PLACE`
+  (exercises the crack overlay across multiple frames), the full
+  regression sweep, and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 591/591 (bgfx, up from 587) / 583/583 (non-bgfx, up from 579).
+
+Honestly scoped: what the real crack texture looks like on a real
+GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+overlay covers all 6 faces uniformly rather than only the specific
+face being broken (a real, documented simplification, see
+DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
