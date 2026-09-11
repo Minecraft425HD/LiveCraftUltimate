@@ -167,4 +167,6 @@ Window::MousePosition Window::mouse_position() {
     return {x, y};
 }
 
+void Window::warp_mouse(f32 x, f32 y) { SDL_WarpMouseInWindow(handle_, x, y); }
+
 }  // namespace lcu::platform

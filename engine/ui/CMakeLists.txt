@@ -8,6 +8,7 @@ if(LCU_BUILD_CLIENT)
     add_library(LcuUi STATIC
         src/menu_stack.cpp
         src/hud.cpp
+        src/inventory_screen.cpp
     )
     add_library(Lcu::Ui ALIAS LcuUi)
 
@@ -22,6 +23,7 @@ if(LCU_BUILD_CLIENT)
             src/debug_overlay.cpp
             src/menu_renderer.cpp
             src/hud_renderer.cpp
+            src/inventory_screen_renderer.cpp
         )
         # Never bgfx directly (see debug_overlay.h's doc comment) - only
         # Lcu::Rendering touches bgfx; Lcu::Platform for the shared

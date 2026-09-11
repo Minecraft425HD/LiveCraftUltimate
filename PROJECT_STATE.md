@@ -41,8 +41,9 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 (input overhaul + mouse look + Minecraft-parity defaults)**,
 **Phase 44 (2D UI framework)**, **Phase 45 (persistent options)**,
 **Phase 46 (menu framework: pause/options/controls)**, **Phase 47
-(HUD overhaul: hotbar + health/hunger bars + F-toggles)**, and **Phase
-48 (block highlight + hold-to-break + hand)** are done; see
+(HUD overhaul: hotbar + health/hunger bars + F-toggles)**, **Phase
+48 (block highlight + hold-to-break + hand)**, and **Phase 49
+(inventory screen + drag/drop + crafting grid)** are done; see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -1787,6 +1788,84 @@ Honestly scoped: what the highlight/overlay/hand icon actually look
 like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
 LIMITATION**; no real crack-noise-density shader effect on the block's
 own face (deferred, see above).
+
+**Phase 49 (inventory screen + drag/drop + crafting grid)**: the
+biggest structural change of this batch. Phase 21's `placeable_items`/
+`selected_placeable_index` - a virtual "known item types" selector,
+completely decoupled from where an item actually lived in the inventory
+- is gone entirely. The hotbar is now real: `selected_hotbar_slot` is a
+plain index (0-8) into 9 of `player_inventory`'s own 36 slots;
+`CycleHotbar`/`CycleHotbarPrev`/`SelectHotbar1-9` move it, placing
+reads whatever `ItemStack` actually sits there via a new
+`BlockItemMapping::block_for_item` reverse lookup. Any block/item pair
+registered via `register_pair` is now automatically placeable the
+moment the player holds it - `game:wood` (Phase 41's block, never
+before given an item - a real, now-closed gap) needed nothing beyond
+its own `register_pair` call.
+
+Pressing `E` opens a real Minecraft-shaped inventory screen: 2x2
+crafting grid + result slot on top, 3x9 main storage, the same hotbar
+again at the bottom. New `engine/ui::inventory_screen.{h,cpp}` (pure
+layout/hit-testing, mirrors `hud.h`'s own pure-logic/renderer split)
+and `inventory_screen_renderer.{h,cpp}` (drawing). Opening it does
+**not** pause the simulation - day/night and AI wander keep running,
+matching the phase's own directive ("no pause in inventory"); only the
+player's own movement/camera/mining/placing/crafting lock, via a new
+`inventory_open` bool independent of the existing `menu_stack`-driven
+`paused`. `ESC` closes the inventory instead of opening the pause menu
+when it's open; the two states are kept mutually exclusive.
+
+Real drag/drop: new `engine/items::inventory_ops.{h,cpp}` -
+`inventory_left_click` (pick up/place/merge/swap a whole stack),
+`inventory_right_click` (half stack / place one), `inventory_shift_click`
+(transfer to another slot range or a whole other `Inventory`, backed by
+a new `Inventory::add_item_to_range`) - pure logic, dispatched from real
+mouse clicks in `client/main.cpp` (Interact=left button, PlaceBlock=right
+button, `Crouch`=shift modifier, the same physical keys Minecraft itself
+uses). The 2x2 crafting grid is a genuine `RecipeRegistry::find_match`
+query against a separate 5-slot `Inventory`, recomputed on every input
+change; a new `game:planks` item plus the phase's own suggested
+`1 wood -> 4 planks` shapeless recipe give it a real, reachable first
+recipe. Phase 23's quick-craft convenience path is untouched.
+
+A real, previously-hit-and-fixed bug during this phase's own
+verification: the new `LCU_VERIFY_INVENTORY` headless hook's first
+draft silently never opened the inventory at all - its `input.set_down`
+calls sat alongside `LCU_VERIFY_BREAK_PLACE`/`CRAFT`/`TORCH` later in
+the frame, *after* the E-toggle/click-handling code that reads them had
+already run that frame. Confirmed via the real log output (no
+"Inventory opened" line), then fixed by moving the hook next to
+`LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`, which already sit earlier in the
+frame for the identical reason - see DECISIONS.md. This also motivated
+a new `Window::warp_mouse` (`SDL_WarpMouseInWindow`) - the first real
+mouse-*position*-driven headless verification in this project (every
+earlier UI hook, including `LCU_VERIFY_MENU`, used keyboard navigation
+instead); confirmed empirically to work under `SDL_VIDEODRIVER=dummy`.
+
+44 new unit tests (30 drag/drop, 2 `Inventory::add_item_to_range`, 8
+inventory-screen layout/hit-testing, 3 `BlockItemMapping` reverse-lookup
+regression). Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_
+TORCH`/`LCU_VERIFY_CRAFT` regression runs (both updated for the new
+slot-based hotbar - cycling now needs a real net-zero round trip via
+`CycleHotbar`+`CycleHotbarPrev` to land back on the right slot before
+placing), a real `LCU_VERIFY_INVENTORY` run in both the bgfx and
+non-bgfx builds (full pipeline: pick up wood -> drop in craft grid ->
+take the crafted 4 planks -> place in main inventory -> shift-click back
+to hotbar -> close), real `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD` regression
+runs, a real two-process networked `LCU_VERIFY_BREAK_PLACE` run, and a
+real `LCU_BUILD_SHADER_TOOLS=ON` build. `ctest` 506/506 (bgfx, up from
+475) / 498/498 (non-bgfx, up from 467).
+
+Honestly scoped: what the inventory screen actually looks like on a
+real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+shift-clicking a craft-grid slot lands anywhere in the whole 36-slot
+inventory rather than hotbar-first-then-main (a real, minor
+simplification vs. Minecraft's own precise ordering); a recipe needing
+more than one of the same ingredient in a single 2x2 cell wouldn't be
+correctly consumed by the result-click's "decrement each ingredient by
+1" logic (documented at the call site, no registered recipe needs it
+yet); still no icon/texture atlas (flat-color quads, unchanged since
+Phase 44).
 
 ## Build Status
 

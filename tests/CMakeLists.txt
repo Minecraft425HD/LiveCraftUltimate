@@ -19,6 +19,7 @@ add_executable(VoxelTests
     physics/collision_test.cpp
     items/item_registry_test.cpp
     items/inventory_test.cpp
+    items/inventory_ops_test.cpp
     items/recipe_registry_test.cpp
     ecs/registry_test.cpp
     lighting/propagation_test.cpp
@@ -84,7 +85,7 @@ endif()
 # Lcu::Platform's own tests, in both the bgfx and non-bgfx configs (see
 # engine/ui/CMakeLists.txt).
 if(TARGET Lcu::Ui)
-    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp)
+    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp ui/inventory_screen_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
 endif()
 

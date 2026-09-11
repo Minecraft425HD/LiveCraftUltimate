@@ -4,6 +4,7 @@
 
 using game::items::BlockItemMapping;
 using lcu::items::kNoItemId;
+using lcu::voxel::kAirBlockId;
 
 TEST(BlockItemMapping, UnmappedBlockReturnsNoItemId) {
     BlockItemMapping mapping;
@@ -39,4 +40,29 @@ TEST(BlockItemMapping, MultipleBlocksCanMapToTheSameItem) {
 
     EXPECT_EQ(mapping.item_for_block(1), 50);
     EXPECT_EQ(mapping.item_for_block(2), 50);
+}
+
+TEST(BlockItemMapping, UnmappedItemReturnsAirBlockId) {
+    BlockItemMapping mapping;
+    EXPECT_EQ(mapping.block_for_item(999), kAirBlockId);
+}
+
+TEST(BlockItemMapping, RegisteredPairRoundTripsInReverseToo) {
+    BlockItemMapping mapping;
+    mapping.register_pair(1, 100);
+    mapping.register_pair(2, 200);
+
+    EXPECT_EQ(mapping.block_for_item(100), 1);
+    EXPECT_EQ(mapping.block_for_item(200), 2);
+    EXPECT_EQ(mapping.block_for_item(300), kAirBlockId);
+}
+
+TEST(BlockItemMapping, RegisteringSameBlockIdAgainOverwritesTheReverseMappingToo) {
+    BlockItemMapping mapping;
+    mapping.register_pair(1, 100);
+    mapping.register_pair(1, 999);
+
+    EXPECT_EQ(mapping.block_for_item(999), 1);
+    EXPECT_EQ(mapping.block_for_item(100), kAirBlockId)
+        << "the old item 100 no longer maps back to block 1 once it's been reassigned to item 999";
 }

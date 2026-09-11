@@ -3297,3 +3297,110 @@ reproducing the failure first (rejected - this project's own standing
 discipline is real runs over assumptions, and the actual failed run
 here is what pinned down that 0.2s specifically wasn't enough, not a
 guess dressed up as a fix).
+
+## 2026-09-11 — Inventory screen: deep hotbar integration, pause-vs-lock, and a real mouse-click verification ordering bug
+
+**Context:** Phase 49 added a real inventory screen with drag/drop and
+a 2x2 crafting grid, and had to decide whether the on-screen hotbar
+would be a real view onto `player_inventory`'s own slots, or a second,
+separate concept layered on top of the pre-existing
+`placeable_items`/`selected_placeable_index` mechanism (Phase 21).
+
+**Chose the deep integration: `placeable_items` is gone, the hotbar is
+9 real inventory slots.** The old mechanism was a *virtual* selector -
+a fixed 4-entry list of known item types, cycled by index, completely
+decoupled from which physical slot an item actually occupied (placing
+just searched the whole inventory by item id via `remove_item`). An
+inventory screen showing a "hotbar" row that isn't what `PlaceBlock`
+actually reads would have been exactly the kind of misleading,
+disconnected UI this project's "no fake features" discipline argues
+against elsewhere. The real fix took more surgery than a smaller,
+additive change would have: `selected_hotbar_slot` (a real index 0-8),
+`BlockItemMapping::block_for_item` (a new reverse lookup, since placing
+now needs "what block does *this* held item place" rather than "what
+item does the selected virtual entry place"), and every one of
+`placeable_items`' ~12 call sites (cycling, direct-select, pick-block,
+break-grant, place, hand-icon color, HUD population) rewritten to read
+real inventory slots. The payoff: any block/item pair registered via
+`block_item_mapping.register_pair` is automatically placeable the
+moment the player holds it, with zero hotbar-specific wiring - `game:wood`
+needed nothing beyond its own `register_pair` call to become placeable
+from any hotbar slot it lands in.
+
+**Opening the inventory does not pause the simulation - it locks player
+control instead, a distinct state from the pause menu.** The phase's
+own directive was explicit: "game keeps running (Minecraft behavior: no
+pause in inventory)". The existing `paused` local (`!menu_stack.empty()`)
+already gated `day_night_cycle.update`/`update_ai_wander` *and* the
+whole player-control block (movement, camera, raycast, break/place,
+crafting) with one flag. Reusing it for the inventory screen (e.g. by
+pushing another `MenuStack` entry) would have frozen the world too -
+wrong per the directive. Instead, a new independent `inventory_open`
+bool gates *only* the player-control block (`!paused && !inventory_open`)
+while `day_night_cycle`/AI wander stay gated on `paused` alone -
+matching real Minecraft's behavior (mobs/time keep moving behind an
+open inventory GUI, but the player can't simultaneously mine while
+managing items). `menu_stack` and `inventory_open` are kept mutually
+exclusive by construction (E refuses to open the inventory while
+`!menu_stack.empty()`; ESC closes whichever one is open, checking
+`inventory_open` first) rather than by a runtime assertion, since
+there's no real scenario where both should ever be true at once.
+
+**A real, previously-hit ordering bug in `LCU_VERIFY_INVENTORY`'s first
+draft: the hook set input state *after* the code that reads it had
+already run that frame.** Every prior `LCU_VERIFY_*` hook that drives
+gameplay actions (`BREAK_PLACE`/`CRAFT`/`TORCH`) sits in one block,
+positioned intentionally *before* the big player-control block further
+down the same frame that consumes those actions. The inventory screen's
+own E-toggle/ESC/click-handling code, though, has to run *earlier* than
+that - before menu-navigation and mouse-capture-recapture logic, both
+of which sit near the top of the frame. Placing the new hook alongside
+`BREAK_PLACE`/`CRAFT`/`TORCH` (i.e. after the E-toggle code, in frame
+order) meant its `input.set_down(Action::Inventory, ...)` call landed
+*after* the only code that ever reads that action that frame - the
+inventory silently never opened on the very first real headless run (no
+crash, no error, just nothing happening - the kind of bug a "did it
+compile" check would never catch). Confirmed the actual cause via the
+real log output (no "Inventory opened" line at all), then fixed by
+moving the whole hook next to `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`, which
+already sit before that same early consumer code for the identical
+reason. A concrete, real instance of this project's own standing rule:
+verify by actually running it, not by reasoning that it should work.
+
+**`Window::warp_mouse` (`SDL_WarpMouseInWindow`) is a new, real API
+surface - the first headless verification in this project driven by
+mouse *position*, not just synthetic key edges.** Every earlier UI
+verification (`LCU_VERIFY_MENU`'s row activation) deliberately used
+keyboard navigation instead of a real click, avoiding the question of
+"can a click position even be simulated headlessly" entirely. The
+inventory screen's *only* real interaction is mouse clicks, so that
+question couldn't be dodged this time. Tested empirically rather than
+assumed: `SDL_WarpMouseInWindow` under `SDL_VIDEODRIVER=dummy` does
+move the cursor the dummy driver's own `SDL_GetMouseState` reports back
+- confirmed by the real `LCU_VERIFY_INVENTORY` run's own click-hit-test
+log lines (`region=4 index=0`, `region=1 index=0`, etc.) landing exactly
+where each step warped to, in both the bgfx and non-bgfx builds.
+
+**Taking the crafted result consumes exactly 1 of each non-empty
+ingredient slot, not the recipe's own per-ingredient counts.** Every
+shapeless recipe registered so far (`compost`, the new `planks`) lists
+each ingredient exactly once, so "decrement every non-empty craft-input
+slot by 1" and "consume what the matched recipe actually specifies"
+produce identical results today. A future recipe needing, say, 2 of the
+same item in one cell would silently under-consume under this
+simplification - documented at the real call site rather than papered
+over, and deferred rather than building a more general per-recipe
+consumption count this phase's own scope didn't need.
+
+**Alternatives considered:** keeping `placeable_items` as a thin
+compatibility shim mapping virtual indices onto real slots (rejected -
+two sources of truth for "what's in the hotbar" is exactly the kind of
+drift this project avoids; the real slots *are* the simpler model once
+committed to); giving the inventory screen its own `MenuStack` entry for
+free ESC-handling/backdrop reuse (rejected - `paused` freezing the world
+directly contradicts the phase's own directive, and `inventory_open` as
+an independent flag was a small enough addition not to need the reuse);
+building a general per-recipe ingredient-count consumption system now
+rather than the simpler "decrement by 1" (rejected - no registered
+recipe needs it yet, and the limitation is small, real, and documented,
+not a silent correctness gap for anything reachable today).

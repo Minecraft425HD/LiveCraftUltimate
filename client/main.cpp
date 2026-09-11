@@ -26,6 +26,7 @@
 #include "lcu/debug/frame_stats.h"
 #include "lcu/ecs/registry.h"
 #include "lcu/items/inventory.h"
+#include "lcu/items/inventory_ops.h"
 #include "lcu/items/item_registry.h"
 #include "lcu/items/recipe_registry.h"
 #include "lcu/jobs/job_system.h"
@@ -48,6 +49,7 @@
 #include "lcu/replication/prediction_buffer.h"
 #include "lcu/serialization/chunk_serializer.h"
 #include "lcu/ui/hud.h"
+#include "lcu/ui/inventory_screen.h"
 #include "lcu/ui/menu_stack.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/break_progress.h"
@@ -73,6 +75,7 @@
 #include "lcu/rendering/shader_program.h"
 #include "lcu/ui/debug_overlay.h"
 #include "lcu/ui/hud_renderer.h"
+#include "lcu/ui/inventory_screen_renderer.h"
 #include "lcu/ui/menu_renderer.h"
 #endif
 
@@ -261,12 +264,19 @@ constexpr lcu::math::Vec4 kCrosshairColor{1.0f, 1.0f, 1.0f, 0.85f};
 // a frame count that happened to cover 0.6s on one run could cover a
 // wildly different real duration on another.
 constexpr lcu::f32 kVerifyBreakHoldSeconds = 0.7f;  // grass hardness 0.6s + margin.
-// After the hold above releases: exercises the real CycleHotbar
-// selection path (Phase 21) end to end, so the same hook proves
-// PlaceBlock now places whatever's selected, not just the hardcoded
-// game:stone default - see "Hotbar item selection" below.
+// After the hold above releases: exercises the real CycleHotbar/
+// CycleHotbarPrev selection path end to end (Phase 21, redone for
+// Phase 49's real slot-driven hotbar - see "Real Minecraft-style hotbar
+// selection" below). The broken grass item lands in the player's first
+// empty real inventory slot, slot 0 (Inventory::add_item always fills
+// earliest-first, and the inventory starts empty) - CycleHotbar moves
+// off it (0 -> 1) to prove forward cycling really works, then
+// CycleHotbarPrev moves back (1 -> 0) to prove the reverse direction
+// too *and* land back on the slot actually holding the broken item
+// before PlaceBlock fires.
 constexpr lcu::f32 kVerifyCycleHotbarAtSeconds = 0.9f;
-constexpr lcu::f32 kVerifyPlaceAtSeconds = 1.1f;
+constexpr lcu::f32 kVerifyCycleHotbarPrevAtSeconds = 1.0f;
+constexpr lcu::f32 kVerifyPlaceAtSeconds = 1.2f;
 // Real width of a single-press pulse window for an edge-triggered
 // action driven by elapsed time (CycleHotbar/PlaceBlock/Craft below) -
 // wide enough to reliably span at least one real frame at any
@@ -354,9 +364,15 @@ constexpr lcu::f32 kVerifyCraftRejectAtSeconds = 3.0f;
 // build's world drops one to break/craft yet, so this is the synthetic
 // setup the hook needs, the same honest "hook synthesizes exactly the
 // input/state a real key press or drop would produce" approach
-// LCU_VERIFY_BREAK_PLACE/LCU_VERIFY_CRAFT already use), cycles the
-// hotbar three times to reach it (index 3 - see `placeable_items`),
-// then places it into the hole the break just made. Proves the real
+// LCU_VERIFY_BREAK_PLACE/LCU_VERIFY_CRAFT already use, done *before* the
+// break below so the torch is the first item added and lands in real
+// inventory slot 0), cycles the hotbar three forward and three back
+// (Phase 49 update - proves both CycleHotbar and CycleHotbarPrev really
+// work via a real net-zero round trip, then correctly lands back on
+// slot 0 - the torch's own slot - before placing; the old fixed-list
+// scheme's "cycle 3 times to reach index 3" no longer applies now that
+// the hotbar is real slot storage, not a virtual item-type list), then
+// places it into the hole the break just made. Proves the real
 // end-to-end pipeline: a placed torch actually reaches update_
 // lighting_for_edit -> propagate_added_block_light_cross_chunk -> a
 // real, observably nonzero block_light value at its own position,
@@ -365,13 +381,52 @@ constexpr lcu::f32 kVerifyTorchBreakHoldSeconds = 0.7f;  // grass hardness 0.6s 
 constexpr lcu::f32 kVerifyTorchCycleAt1Seconds = 0.9f;
 constexpr lcu::f32 kVerifyTorchCycleAt2Seconds = 1.0f;
 constexpr lcu::f32 kVerifyTorchCycleAt3Seconds = 1.1f;
-constexpr lcu::f32 kVerifyTorchPlaceAtSeconds = 1.3f;
+constexpr lcu::f32 kVerifyTorchCyclePrevAt1Seconds = 1.2f;
+constexpr lcu::f32 kVerifyTorchCyclePrevAt2Seconds = 1.3f;
+constexpr lcu::f32 kVerifyTorchCyclePrevAt3Seconds = 1.4f;
+constexpr lcu::f32 kVerifyTorchPlaceAtSeconds = 1.6f;
 
-// Hotbar-sized (Minecraft-like); the rest of a real inventory (a
-// separate main storage grid, armor slots, ...) has no consumer yet -
-// nothing reads/writes them - so isn't built speculatively (brief
-// section 98).
-constexpr lcu::usize kInventorySlotCount = 9;
+// A fifth, independent headless hook (LCU_VERIFY_INVENTORY, Phase 49):
+// grants the player 1 game:wood directly (same synthetic-setup
+// precedent as LCU_VERIFY_TORCH's torch grant - nothing in this build's
+// world drops wood fast enough to rely on breaking one), opens the
+// inventory screen (E), then drives four real mouse clicks via
+// Window::warp_mouse + a synthesized Interact press each - exactly the
+// same "hook synthesizes exactly the input/state a real key press or
+// click would produce" approach every other verify hook here already
+// uses, just extended to mouse position for the first time (Phase 49's
+// screen is the first real mouse-click-driven UI in this project - see
+// Window::warp_mouse's own doc comment): pick up the wood from hotbar
+// slot 0 into the cursor, drop it into the 2x2 craft grid's first cell,
+// take the crafted result (proving RecipeRegistry::find_match's real
+// 2x2 integration, not just the quick-craft path LCU_VERIFY_CRAFT
+// already covers), place the result into the main inventory, then
+// shift-click it back into the hotbar range - exercising every real
+// click kind (plain left-click pick-up/place and shift-click transfer)
+// end to end in one real run. Closes the screen at the end.
+constexpr lcu::f32 kVerifyInventoryOpenAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyInventoryPickupWoodAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyInventoryDropInCraftAtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyInventoryTakeResultAtSeconds = 0.8f;
+constexpr lcu::f32 kVerifyInventoryPlaceInMainAtSeconds = 1.0f;
+constexpr lcu::f32 kVerifyInventoryShiftToHotbarAtSeconds = 1.2f;
+constexpr lcu::f32 kVerifyInventoryCloseAtSeconds = 1.4f;
+
+// Real Minecraft-sized inventory (Phase 49): 9 hotbar slots (indices
+// 0-8, real Minecraft slot numbering) + 27 main storage slots (indices
+// 9-35, 3 rows of 9). Armor slots have no consumer yet - nothing reads/
+// writes them - so aren't built speculatively (brief section 98).
+constexpr lcu::usize kHotbarSlotCount = 9;
+constexpr lcu::usize kMainInventorySlotCount = 27;
+constexpr lcu::usize kInventorySlotCount = kHotbarSlotCount + kMainInventorySlotCount;
+// 2x2 real crafting grid (Phase 49.3) - a separate, real
+// `lcu::items::Inventory` from the main 36-slot one above, since a
+// craft grid's contents are consumed on craft, not just stored (see
+// build_inventory_screen below). Slots 0-3 are the 2x2 input grid,
+// slot 4 is the read-only result slot.
+constexpr lcu::usize kCraftGridInputSlotCount = 4;
+constexpr lcu::usize kCraftGridResultSlotIndex = kCraftGridInputSlotCount;
+constexpr lcu::usize kCraftGridTotalSlotCount = kCraftGridInputSlotCount + 1;
 
 // A handful of wandering AI entities near spawn - a real (if minimal)
 // consumer of engine/ecs and game/systems::update_ai_wander, not just
@@ -759,6 +814,20 @@ int main() {
     torch_item_def.icon_color = {1.0f, 0.65f, 0.2f, 1.0f};
     const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
+    // game:wood's own item (Phase 49): Phase 41 registered the wood
+    // *block* but never gave it an item, so breaking one has always
+    // granted nothing - the same honest gap block_item_mapping.h's own
+    // doc comment describes for any block with no registered pair. This
+    // closes it, and gives the new real 2x2 crafting grid (49.3) its own
+    // in-house recipe ingredient rather than reusing compost's grass+dirt
+    // pairing for the grid's own verification.
+    lcu::items::ItemDefinition wood_item_def;
+    wood_item_def.namespaced_id = "game:wood";
+    wood_item_def.display_name = "Wood";
+    wood_item_def.max_stack_size = 64;
+    wood_item_def.icon_color = {wood_def.color.x, wood_def.color.y, wood_def.color.z, 1.0f};
+    const lcu::items::ItemId wood_item_id = item_registry.register_item(wood_item_def);
+
     // First crafted-only item (Phase 23, closing brief section 55's
     // "no crafting-grid caller anywhere" gap): game:compost has no
     // corresponding block - it exists purely as RecipeRegistry's first
@@ -772,12 +841,26 @@ int main() {
     compost_item_def.icon_color = {0.25f, 0.15f, 0.05f, 1.0f};
     const lcu::items::ItemId compost_item_id = item_registry.register_item(compost_item_def);
 
+    // Phase 49's own suggested example recipe's crafted-only result:
+    // game:planks, a lighter shade of wood's own color (no block behind
+    // it yet - planks-as-a-placeable-block isn't part of this phase's
+    // scope, only the recipe itself is, see the phase's own brief).
+    lcu::items::ItemDefinition planks_item_def;
+    planks_item_def.namespaced_id = "game:planks";
+    planks_item_def.display_name = "Planks";
+    planks_item_def.max_stack_size = 64;
+    planks_item_def.icon_color = {0.65f, 0.48f, 0.28f, 1.0f};
+    const lcu::items::ItemId planks_item_id = item_registry.register_item(planks_item_def);
+
     lcu::items::Inventory player_inventory(kInventorySlotCount);
 
     // Crafting (Phase 23, closing RecipeRegistry's long-standing "no
     // crafting-grid caller anywhere" gap - Phase 5 built and unit
-    // tested it, nothing ever called it). One real shapeless recipe:
-    // 1 game:grass + 1 game:dirt -> 1 game:compost. Purely client-side
+    // tested it, nothing ever called it). Two real shapeless recipes:
+    // 1 game:grass + 1 game:dirt -> 1 game:compost (Phase 23's quick-craft
+    // path, see craft_pressed below), and 1 game:wood -> 4 game:planks
+    // (Phase 49's own suggested example, the real 2x2 grid's own first
+    // recipe - see build_inventory_screen below). Purely client-side
     // local inventory bookkeeping, same as item pickup itself
     // (DECISIONS.md "Item pickup/consumption stays client-authoritative")
     // - crafting never touches the World or needs server validation, so
@@ -785,29 +868,25 @@ int main() {
     // no protocol involvement.
     lcu::items::RecipeRegistry recipe_registry;
     recipe_registry.add_shapeless({{grass_item_id, dirt_item_id}, {compost_item_id, 1}});
+    recipe_registry.add_shapeless({{wood_item_id}, {planks_item_id, 4}});
 
-    // Hotbar item selection (Phase 21, closing Phase 18/19's remaining
-    // honest gap): PlaceBlock used to always place game:stone regardless
-    // of what the player actually held, since there was no way to choose
-    // otherwise. This is a real, minimal selection mechanism - a plain
-    // index cycled by the new CycleHotbar action - not a graphical hotbar
-    // (no on-screen slot rendering/highlight exists yet, needs
-    // engine/ui's texture-atlas work first - see DECISIONS.md). Order
-    // matches every other block/item list in this file (stone, grass,
-    // dirt); index 0 (stone) is the default, preserving pre-Phase-21
-    // behavior for anyone who never presses CycleHotbar.
-    struct PlaceableItem {
-        lcu::voxel::BlockId block_id;
-        lcu::items::ItemId item_id;
-        const char* name;
-    };
-    const std::array<PlaceableItem, 4> placeable_items{{
-        {stone_id, stone_item_id, "game:stone"},
-        {grass_id, grass_item_id, "game:grass"},
-        {dirt_id, dirt_item_id, "game:dirt"},
-        {torch_id, torch_item_id, "game:torch"},
-    }};
-    lcu::usize selected_placeable_index = 0;
+    // Real Minecraft-style hotbar selection (Phase 49, replacing Phase
+    // 21's placeable_items/selected_placeable_index "virtual known-item-
+    // types" selector, which never actually pointed at where an item
+    // physically lived in the inventory - it just remembered up to 4
+    // fixed item *types* you could cycle between, decoupled from real
+    // slot storage). The active hotbar slot is now a real index (0-8)
+    // into player_inventory itself: whatever ItemStack physically sits
+    // in that slot is what gets placed, exactly like Minecraft's own
+    // hotbar - see the real inventory screen below (build_
+    // inventory_screen) for how items actually get organized into it.
+    // CycleHotbar/CycleHotbarPrev/SelectHotbar1-9 all just move this
+    // index around now; there's no separate "known placeable item types"
+    // list to keep in sync - block_item_mapping (below) is the only
+    // thing translating a held item into a placeable block, so any newly
+    // registered block/item pair is automatically placeable the moment
+    // the player holds it in their hotbar.
+    lcu::usize selected_hotbar_slot = 0;
 
     // Data-driven block->item mapping (Phase 22, closing Phase 19's
     // remaining honest gap): replaces the hardcoded if/else chain this
@@ -816,12 +895,15 @@ int main() {
     // block/item pair is registered above. Adding a new item-backed
     // block from here on is one register_pair call, not a new branch
     // here and a matching one in VoxelServer's own item_for_block - see
-    // game/items/block_item_mapping.h and DECISIONS.md.
+    // game/items/block_item_mapping.h and DECISIONS.md. Its reverse
+    // direction (block_for_item, Phase 49) is now real placement's only
+    // source of truth for "what block does this held item place".
     game::items::BlockItemMapping block_item_mapping;
     block_item_mapping.register_pair(stone_id, stone_item_id);
     block_item_mapping.register_pair(grass_id, grass_item_id);
     block_item_mapping.register_pair(dirt_id, dirt_item_id);
     block_item_mapping.register_pair(torch_id, torch_item_id);
+    block_item_mapping.register_pair(wood_id, wood_item_id);
 
     // Block-break's item drop (brief section 55) - still a direct 1:1
     // block->item mapping (Phase 17), not a loot-table system, just
@@ -1517,6 +1599,10 @@ int main() {
     const auto verify_torch_start = std::chrono::steady_clock::now();
     bool verify_torch_granted = false;
 
+    const bool verify_inventory = std::getenv("LCU_VERIFY_INVENTORY") != nullptr;
+    const auto verify_inventory_start = std::chrono::steady_clock::now();
+    bool verify_inventory_wood_granted = false;
+
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
     // (wall-clock) seconds - frame-count-indexed like
@@ -1547,6 +1633,42 @@ int main() {
     // every frame below).
     lcu::ui::MenuStack menu_stack;
     bool quit_requested = false;
+
+    // Real inventory screen (Phase 49, brief section 60's own directive:
+    // "game keeps running (Minecraft behavior: no pause in inventory)").
+    // Deliberately NOT another menu_stack entry: menu_stack being
+    // non-empty freezes the whole simulation (day/night, AI wander - see
+    // `paused` below), but Minecraft's own inventory screen doesn't
+    // pause the world, only the player's own control - movement/camera/
+    // mining/placing lock while it's open (see the new `!inventory_open`
+    // gate added below to the big `if (!paused)` player-control block),
+    // while everything else keeps ticking. craft_grid_inventory is a
+    // separate, small 5-slot Inventory (not part of player_inventory's
+    // own 36 slots) since its slot 4 (kCraftGridResultSlotIndex) is a
+    // read-only, recomputed-on-change display of whatever the 2x2 grid's
+    // real ingredients currently craft, not stored player state.
+    // cursor_stack is the real drag/drop "stack picked up by the mouse"
+    // (Phase 49.2) - shared across every slot in both inventories, since
+    // Minecraft only ever lets you hold one stack on the cursor at a
+    // time regardless of which screen/inventory it came from.
+    bool inventory_open = false;
+    lcu::items::Inventory craft_grid_inventory(kCraftGridTotalSlotCount);
+    lcu::items::ItemStack cursor_stack;
+
+    // Recomputes the real crafting result (Phase 49.3) from the 2x2
+    // grid's current contents via RecipeRegistry::find_match - called
+    // after every click that could have changed craft_grid_inventory's
+    // input slots (0-3), so the result slot (4) always reflects real,
+    // live ingredient state rather than a stale guess.
+    const auto recompute_craft_result = [&]() {
+        std::vector<lcu::items::ItemId> grid(kCraftGridInputSlotCount, lcu::items::kNoItemId);
+        for (lcu::usize i = 0; i < kCraftGridInputSlotCount; ++i) {
+            grid[i] = craft_grid_inventory.slot_at(i).item;
+        }
+        const lcu::items::ItemStack* match =
+            recipe_registry.find_match(grid, lcu::ui::kCraftGridEdge, lcu::ui::kCraftGridEdge);
+        craft_grid_inventory.set_slot(kCraftGridResultSlotIndex, match != nullptr ? *match : lcu::items::ItemStack{});
+    };
 
     // Real F-key HUD/display state (Phase 47) - toggled by their own
     // edge-detected Actions below, independent of pause state (a
@@ -1809,6 +1931,82 @@ int main() {
             input.set_down(lcu::platform::Action::Screenshot, frame == kVerifyHudScreenshotFrame);
         }
 
+        // LCU_VERIFY_INVENTORY (Phase 49) - placed here, same as
+        // LCU_VERIFY_MENU/LCU_VERIFY_HUD above (and unlike LCU_VERIFY_
+        // BREAK_PLACE/CRAFT/TORCH further below): the real E-key toggle/
+        // click-handling code this hook drives runs earlier in the frame
+        // than those three (it has to, to run before menu-navigation and
+        // gate mouse-capture-recapture - see the inventory-open/close and
+        // drag/drop blocks right below), so this hook's own input.
+        // set_down calls need to land before that consumer code reads
+        // them, not after - a real, previously-hit-and-fixed ordering
+        // bug found during this hook's own first headless run (it
+        // initially sat with the other three hooks further down and
+        // silently never opened the inventory at all - previous_input/
+        // input edge-detection isn't "late by a frame", it's "never sees
+        // the press" when the override lands after its only reader).
+        if (verify_inventory) {
+            if (!verify_inventory_wood_granted) {
+                // Synthetic setup (see kVerifyInventoryOpenAtSeconds' own
+                // doc comment above) - lands in real inventory slot 0,
+                // the same "first item added to an empty inventory"
+                // precedent LCU_VERIFY_BREAK_PLACE/LCU_VERIFY_TORCH both
+                // already rely on.
+                player_inventory.add_item(item_registry, {wood_item_id, 1});
+                verify_inventory_wood_granted = true;
+            }
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_inventory_start).count();
+            input.set_down(lcu::platform::Action::Inventory,
+                            (elapsed >= kVerifyInventoryOpenAtSeconds &&
+                             elapsed < kVerifyInventoryOpenAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyInventoryCloseAtSeconds &&
+                                 elapsed < kVerifyInventoryCloseAtSeconds + kVerifyEdgePulseSeconds));
+
+            // Real mouse-click simulation (Phase 49, see Window::
+            // warp_mouse's own doc comment): computed fresh each frame
+            // from the real current window size, same as the real
+            // click-handling code below does, so this hook exercises the
+            // exact same layout math the player's own clicks would.
+            const lcu::ui::InventoryScreenLayout verify_inventory_layout = lcu::ui::inventory_screen_layout(
+                static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+            const auto verify_slot_center = [](const lcu::ui::InventorySlotRect& rect) {
+                return lcu::platform::Window::MousePosition{rect.x + rect.size * 0.5f, rect.y + rect.size * 0.5f};
+            };
+
+            bool interact_now = false;
+            bool shift_now = false;
+            if (elapsed >= kVerifyInventoryPickupWoodAtSeconds &&
+                elapsed < kVerifyInventoryPickupWoodAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_slot_center(verify_inventory_layout.hotbar_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyInventoryDropInCraftAtSeconds &&
+                       elapsed < kVerifyInventoryDropInCraftAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_slot_center(verify_inventory_layout.craft_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyInventoryTakeResultAtSeconds &&
+                       elapsed < kVerifyInventoryTakeResultAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_slot_center(verify_inventory_layout.craft_result);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyInventoryPlaceInMainAtSeconds &&
+                       elapsed < kVerifyInventoryPlaceInMainAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_slot_center(verify_inventory_layout.main_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyInventoryShiftToHotbarAtSeconds &&
+                       elapsed < kVerifyInventoryShiftToHotbarAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_slot_center(verify_inventory_layout.main_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+                shift_now = true;
+            }
+            input.set_down(lcu::platform::Action::Interact, interact_now);
+            input.set_down(lcu::platform::Action::Crouch, shift_now);
+        }
+
         // Real mouse-capture management (Phase 43, extended Phase 46):
         // ESC/Tab or losing window focus releases capture; clicking
         // while free re-captures it. The re-capture click must not ALSO
@@ -1854,13 +2052,51 @@ int main() {
             }
         }
 
+        // Real inventory screen open/close (Phase 49) - the cursor stack
+        // (drag/drop's "picked up by the mouse" item, Phase 49.2) is
+        // never simply discarded on close: whatever's still on it drops
+        // back into player_inventory the same way a broken block's item
+        // does (add_item's own earliest-slot-first fill order), any
+        // leftover that doesn't fit staying on the cursor rather than
+        // vanishing - a real inventory can't silently delete items.
+        const auto close_inventory = [&]() {
+            inventory_open = false;
+            window.set_relative_mouse_mode(true);
+            if (!cursor_stack.is_empty()) {
+                const lcu::u32 leftover = player_inventory.add_item(item_registry, cursor_stack);
+                cursor_stack =
+                    leftover > 0 ? lcu::items::ItemStack{cursor_stack.item, leftover} : lcu::items::ItemStack{};
+            }
+        };
+
+        const bool inventory_toggle_pressed =
+            input.is_down(lcu::platform::Action::Inventory) && !previous_input.is_down(lcu::platform::Action::Inventory);
+        if (inventory_toggle_pressed && !waiting_for_rebind && menu_stack.empty()) {
+            if (inventory_open) {
+                close_inventory();
+                LCU_LOG_INFO("Inventory closed");
+            } else {
+                inventory_open = true;
+                window.set_relative_mouse_mode(false);
+                recompute_craft_result();
+                LCU_LOG_INFO("Inventory opened");
+            }
+        }
+
         // ESC opens the pause menu from gameplay, or pops one screen
         // back while a menu is already open (popping the last screen
         // closes it and re-captures the mouse) - see Phase 46's own
-        // directive. Suppressed while actively capturing a rebind so
-        // ESC cancels that instead (handled above).
+        // directive. Closes the inventory screen instead if that's what
+        // is currently open (Phase 49) - Minecraft's own ESC behavior,
+        // and keeps the pause menu and inventory screen mutually
+        // exclusive (menu_stack.empty() above already refuses to open
+        // the inventory while paused, so this side only needs the
+        // reverse check). Suppressed while actively capturing a rebind
+        // so ESC cancels that instead (handled above).
         if (escape_pressed && !waiting_for_rebind) {
-            if (menu_stack.empty()) {
+            if (inventory_open) {
+                close_inventory();
+            } else if (menu_stack.empty()) {
                 menu_stack.push(build_pause_screen());
                 window.set_relative_mouse_mode(false);
             } else {
@@ -1874,10 +2110,137 @@ int main() {
             window.set_relative_mouse_mode(false);
         }
         bool suppress_click_for_recapture = false;
-        if (menu_stack.empty() && !window.relative_mouse_mode() &&
+        if (menu_stack.empty() && !inventory_open && !window.relative_mouse_mode() &&
             (input.is_down(lcu::platform::Action::Interact) || input.is_down(lcu::platform::Action::PlaceBlock))) {
             window.set_relative_mouse_mode(true);
             suppress_click_for_recapture = true;
+        }
+
+        // Real inventory-screen drag/drop (Phase 49.2): reuses the same
+        // Interact/PlaceBlock actions gameplay break/place would - since
+        // the whole gameplay block below is gated off while
+        // inventory_open (see `!inventory_open` on the big `if (!paused)`
+        // below), these two actions are unambiguously "left-click a UI
+        // slot" / "right-click a UI slot" while the screen is open,
+        // exactly mirroring their real mouse-button bindings (Interact =
+        // left button, PlaceBlock = right button - see key_bindings.cpp).
+        // Crouch (bound to Left Shift by default, same as Minecraft's
+        // own Sneak key) doubles as the real shift-click modifier, same
+        // physical key Minecraft itself uses for both purposes.
+        if (inventory_open && !waiting_for_rebind) {
+            const bool inv_left_pressed =
+                input.is_down(lcu::platform::Action::Interact) && !previous_input.is_down(lcu::platform::Action::Interact);
+            const bool inv_right_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
+                                            !previous_input.is_down(lcu::platform::Action::PlaceBlock);
+            if (inv_left_pressed || inv_right_pressed) {
+                const bool shift_held = input.is_down(lcu::platform::Action::Crouch);
+                const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
+                const lcu::ui::InventoryScreenLayout inventory_layout = lcu::ui::inventory_screen_layout(
+                    static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+                const lcu::ui::InventoryScreenHit hit = lcu::ui::hit_test_inventory_screen(
+                    inventory_layout, static_cast<lcu::f32>(mouse_pos.x), static_cast<lcu::f32>(mouse_pos.y));
+
+                switch (hit.region) {
+                    case lcu::ui::InventoryScreenRegion::kCraftInput: {
+                        if (shift_held && inv_left_pressed) {
+                            lcu::items::inventory_shift_click(craft_grid_inventory, hit.index, item_registry,
+                                                               player_inventory, 0, kInventorySlotCount);
+                        } else if (inv_left_pressed) {
+                            lcu::items::inventory_left_click(craft_grid_inventory, item_registry, hit.index, cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(craft_grid_inventory, item_registry, hit.index,
+                                                               cursor_stack);
+                        }
+                        recompute_craft_result();
+                        break;
+                    }
+                    case lcu::ui::InventoryScreenRegion::kCraftResult: {
+                        // Real "take the crafted result" (Phase 49.3) -
+                        // Minecraft's own right-click on the result slot
+                        // behaves identically to left-click (there's no
+                        // "half the result" concept), so this
+                        // deliberately doesn't distinguish inv_left_pressed
+                        // from inv_right_pressed, an honest simplification
+                        // rather than a fake distinct behavior.
+                        const lcu::items::ItemStack result = craft_grid_inventory.slot_at(kCraftGridResultSlotIndex);
+                        const lcu::u32 max_stack =
+                            result.is_empty() ? 0 : item_registry.definition_of(result.item).max_stack_size;
+                        const bool cursor_accepts =
+                            cursor_stack.is_empty() ||
+                            (cursor_stack.item == result.item && cursor_stack.count + result.count <= max_stack);
+                        if (!result.is_empty() && cursor_accepts) {
+                            cursor_stack = cursor_stack.is_empty()
+                                               ? result
+                                               : lcu::items::ItemStack{cursor_stack.item, cursor_stack.count + result.count};
+                            // Consumes exactly 1 of each non-empty
+                            // ingredient slot - correct for every real
+                            // shapeless recipe registered so far (each
+                            // lists each ingredient once - see
+                            // recipe_registry.add_shapeless above); a
+                            // recipe needing >1 of the same ingredient in
+                            // one cell would need per-recipe ingredient
+                            // counts this simple "decrement by 1" doesn't
+                            // model - a real, documented limit, not
+                            // silently wrong for anything actually
+                            // registered.
+                            for (lcu::usize i = 0; i < kCraftGridInputSlotCount; ++i) {
+                                const lcu::items::ItemStack ingredient = craft_grid_inventory.slot_at(i);
+                                if (!ingredient.is_empty()) {
+                                    craft_grid_inventory.set_slot(
+                                        i, ingredient.count > 1 ? lcu::items::ItemStack{ingredient.item, ingredient.count - 1}
+                                                                : lcu::items::ItemStack{});
+                                }
+                            }
+                            recompute_craft_result();
+                        }
+                        break;
+                    }
+                    case lcu::ui::InventoryScreenRegion::kMainInventory: {
+                        // Main-grid slot i maps to real inventory index
+                        // kHotbarSlotCount + i - the main storage range
+                        // starts right after the 9 hotbar slots (see
+                        // "Real Minecraft-sized inventory" above).
+                        const lcu::usize slot = kHotbarSlotCount + hit.index;
+                        if (shift_held && inv_left_pressed) {
+                            lcu::items::inventory_shift_click(player_inventory, slot, item_registry, player_inventory,
+                                                               0, kHotbarSlotCount);
+                        } else if (inv_left_pressed) {
+                            lcu::items::inventory_left_click(player_inventory, item_registry, slot, cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(player_inventory, item_registry, slot, cursor_stack);
+                        }
+                        break;
+                    }
+                    case lcu::ui::InventoryScreenRegion::kHotbar: {
+                        // Hotbar slot i IS real inventory slot i - the
+                        // inventory screen's hotbar row is the same
+                        // physical storage the in-world hotbar reads
+                        // (Phase 49's whole point), not a separate copy.
+                        const lcu::usize slot = hit.index;
+                        if (shift_held && inv_left_pressed) {
+                            lcu::items::inventory_shift_click(player_inventory, slot, item_registry, player_inventory,
+                                                               kHotbarSlotCount, kInventorySlotCount);
+                        } else if (inv_left_pressed) {
+                            lcu::items::inventory_left_click(player_inventory, item_registry, slot, cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(player_inventory, item_registry, slot, cursor_stack);
+                        }
+                        break;
+                    }
+                    case lcu::ui::InventoryScreenRegion::kNone:
+                        break;
+                }
+                if (hit.region != lcu::ui::InventoryScreenRegion::kNone) {
+                    if (cursor_stack.is_empty()) {
+                        LCU_LOG_INFO("Inventory click: region={} index={}{} -> cursor empty",
+                                     static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "");
+                    } else {
+                        LCU_LOG_INFO("Inventory click: region={} index={}{} -> cursor {} x{}",
+                                     static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "",
+                                     item_registry.definition_of(cursor_stack.item).namespaced_id, cursor_stack.count);
+                    }
+                }
+            }
         }
 
         // Real menu navigation (Phase 46): while a menu is open, the
@@ -1963,6 +2326,9 @@ int main() {
             input.set_down(lcu::platform::Action::CycleHotbar,
                             elapsed >= kVerifyCycleHotbarAtSeconds &&
                                 elapsed < kVerifyCycleHotbarAtSeconds + kVerifyEdgePulseSeconds);
+            input.set_down(lcu::platform::Action::CycleHotbarPrev,
+                            elapsed >= kVerifyCycleHotbarPrevAtSeconds &&
+                                elapsed < kVerifyCycleHotbarPrevAtSeconds + kVerifyEdgePulseSeconds);
             input.set_down(lcu::platform::Action::PlaceBlock,
                             elapsed >= kVerifyPlaceAtSeconds && elapsed < kVerifyPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
@@ -1996,7 +2362,13 @@ int main() {
                 // doc comment above): nothing in this build's world
                 // drops a torch to pick up yet, so this hook grants one
                 // directly, the same way LCU_VERIFY_CRAFT's own setup
-                // breaks real blocks to seed its inventory state.
+                // breaks real blocks to seed its inventory state. Granted
+                // before the break below so it's the first item the
+                // (empty) inventory ever receives, landing in real slot
+                // 0 - the default selected_hotbar_slot, so no cycling is
+                // actually *required* to place it, but the hook still
+                // exercises CycleHotbar/CycleHotbarPrev below for real
+                // (see their own doc comment above).
                 player_inventory.add_item(item_registry, {torch_item_id, 1});
                 verify_torch_granted = true;
             }
@@ -2010,11 +2382,17 @@ int main() {
                                  elapsed < kVerifyTorchCycleAt2Seconds + kVerifyEdgePulseSeconds) ||
                                 (elapsed >= kVerifyTorchCycleAt3Seconds &&
                                  elapsed < kVerifyTorchCycleAt3Seconds + kVerifyEdgePulseSeconds));
+            input.set_down(lcu::platform::Action::CycleHotbarPrev,
+                            (elapsed >= kVerifyTorchCyclePrevAt1Seconds &&
+                             elapsed < kVerifyTorchCyclePrevAt1Seconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyTorchCyclePrevAt2Seconds &&
+                                 elapsed < kVerifyTorchCyclePrevAt2Seconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyTorchCyclePrevAt3Seconds &&
+                                 elapsed < kVerifyTorchCyclePrevAt3Seconds + kVerifyEdgePulseSeconds));
             input.set_down(lcu::platform::Action::PlaceBlock,
                             elapsed >= kVerifyTorchPlaceAtSeconds &&
                                 elapsed < kVerifyTorchPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
-
         const auto now = std::chrono::steady_clock::now();
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
@@ -2264,7 +2642,15 @@ int main() {
             day_night_cycle.update(delta_seconds);
         }
 
-        if (!paused) {
+        // Real inventory-screen player-control lock (Phase 49, brief
+        // section 60's own directive: "game keeps running - Minecraft
+        // behavior: no pause in inventory"): unlike `paused` above
+        // (menu_stack non-empty), opening the inventory does NOT freeze
+        // day_night_cycle/AI wander (both gated on `paused` alone,
+        // above/at the top of this frame) - only the player's own
+        // movement/camera/mining/placing/crafting lock, the same real
+        // Minecraft behavior (the world keeps ticking behind the GUI).
+        if (!paused && !inventory_open) {
             // Real hand-swing elapsed time (Phase 48) - reset to 0 on
             // every real break/place action below, counted up here so
             // the render section can compute a real swing offset from
@@ -2387,53 +2773,79 @@ int main() {
             const bool craft_pressed =
                 input.is_down(lcu::platform::Action::Craft) && !previous_input.is_down(lcu::platform::Action::Craft);
 
+            // Real Minecraft-style hotbar selection (Phase 49): logs
+            // whatever real item currently sits in the newly-selected
+            // slot (or "(empty)"), rather than a fixed name table - the
+            // slot's own contents are the only source of truth now.
+            const auto log_selected_hotbar_slot = [&](const char* verb) {
+                const lcu::items::ItemStack& stack = player_inventory.slot_at(selected_hotbar_slot);
+                if (stack.is_empty()) {
+                    LCU_LOG_INFO("{} hotbar slot {} (empty)", verb, selected_hotbar_slot);
+                } else {
+                    LCU_LOG_INFO("{} hotbar slot {}: {}", verb, selected_hotbar_slot,
+                                 item_registry.definition_of(stack.item).namespaced_id);
+                }
+            };
+
             if (cycle_hotbar_pressed) {
-                selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
-                LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+                selected_hotbar_slot = (selected_hotbar_slot + 1) % kHotbarSlotCount;
+                log_selected_hotbar_slot("Selected");
             }
             if (cycle_hotbar_prev_pressed) {
-                selected_placeable_index =
-                    (selected_placeable_index + placeable_items.size() - 1) % placeable_items.size();
-                LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+                selected_hotbar_slot = (selected_hotbar_slot + kHotbarSlotCount - 1) % kHotbarSlotCount;
+                log_selected_hotbar_slot("Selected");
             }
 
             // Direct number-row hotbar selection (Phase 43): SelectHotbar1..9
             // are declared consecutively in Action (see input.h), so this
             // walks them as one contiguous range instead of 9 near-identical
-            // if-blocks. A slot with no matching placeable_items entry (5-9,
-            // today - only 4 placeable items exist) is a real, silent no-op,
-            // not a crash or a wraparound onto some other slot.
-            for (lcu::usize i = 0; i < 9; ++i) {
+            // if-blocks. Every slot 0-8 is now a real hotbar slot (Phase 49,
+            // kHotbarSlotCount == 9 == the number of SelectHotbar actions) -
+            // no "no matching entry" case remains, selection just points at
+            // a real inventory slot whether or not it's currently holding
+            // anything.
+            for (lcu::usize i = 0; i < kHotbarSlotCount; ++i) {
                 const auto slot_action =
                     static_cast<lcu::platform::Action>(static_cast<lcu::u8>(lcu::platform::Action::SelectHotbar1) + i);
                 if (input.is_down(slot_action) && !previous_input.is_down(slot_action)) {
-                    if (i < placeable_items.size()) {
-                        selected_placeable_index = i;
-                        LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
-                    }
+                    selected_hotbar_slot = i;
+                    log_selected_hotbar_slot("Selected");
                     break;
                 }
             }
 
             if (pick_block_pressed && hit) {
-                // Real "middle-click to pick block" (Phase 43) - selects
-                // whichever placeable_items entry matches the looked-at
-                // block, without granting the item (the player still needs
-                // to actually hold it to place - see place_pressed below).
-                // A silent no-op if the block has no placeable entry (e.g.
-                // looking at an ore/cave-only block with no matching hotbar
-                // slot yet).
-                bool found_placeable = false;
-                for (lcu::usize i = 0; i < placeable_items.size(); ++i) {
-                    if (placeable_items[i].block_id == hit->block) {
-                        selected_placeable_index = i;
-                        LCU_LOG_INFO("Picked block into hotbar: {}", placeable_items[selected_placeable_index].name);
-                        found_placeable = true;
-                        break;
+                // Real "middle-click to pick block" (Phase 43, redone for
+                // Phase 49's real inventory-driven hotbar): looks up the
+                // item the targeted block itself drops
+                // (block_item_mapping::item_for_block), then, if the
+                // player already holds that item somewhere in their
+                // inventory, swaps it into the currently selected hotbar
+                // slot - Minecraft's own real survival-mode pick-block
+                // behavior (it never grants a new item, only rearranges
+                // ones you already have). A silent no-op if the block has
+                // no item mapping, or the player isn't holding that item
+                // anywhere.
+                const lcu::items::ItemId wanted_item = block_item_mapping.item_for_block(hit->block);
+                bool found = false;
+                if (wanted_item != lcu::items::kNoItemId) {
+                    for (lcu::usize i = 0; i < player_inventory.slot_count(); ++i) {
+                        if (player_inventory.slot_at(i).item == wanted_item) {
+                            if (i != selected_hotbar_slot) {
+                                const lcu::items::ItemStack held = player_inventory.slot_at(selected_hotbar_slot);
+                                player_inventory.set_slot(selected_hotbar_slot, player_inventory.slot_at(i));
+                                player_inventory.set_slot(i, held);
+                            }
+                            found = true;
+                            break;
+                        }
                     }
                 }
-                if (!found_placeable) {
-                    LCU_LOG_DEBUG("PickBlock: no placeable hotbar entry for block id {}", hit->block);
+                if (found) {
+                    LCU_LOG_INFO("Picked block into hotbar slot {}: {}", selected_hotbar_slot,
+                                 item_registry.definition_of(wanted_item).namespaced_id);
+                } else {
+                    LCU_LOG_DEBUG("PickBlock: not holding an item for block id {}", hit->block);
                 }
             }
 
@@ -2538,14 +2950,26 @@ int main() {
                 }
             }
 
-            const PlaceableItem& selected_placeable = placeable_items[selected_placeable_index];
-            if (place_pressed && hit && player_inventory.remove_item(selected_placeable.item_id, 1) == 1) {
+            // Real slot-driven placement (Phase 49): whatever item
+            // physically sits in the selected hotbar slot right now is
+            // what places - block_item_mapping::block_for_item is the
+            // only thing translating it into a block id.
+            // kAirBlockId gate: an empty slot (kNoItemId) or a held item
+            // with no registered block (e.g. game:compost/game:planks,
+            // both crafted-only with no placeable block) real-honestly
+            // no-ops here rather than "placing air" - see block_for_item's
+            // own doc comment for why kAirBlockId is the sentinel.
+            const lcu::items::ItemStack selected_stack = player_inventory.slot_at(selected_hotbar_slot);
+            const lcu::voxel::BlockId selected_place_block_id = block_item_mapping.block_for_item(selected_stack.item);
+            if (place_pressed && hit && selected_place_block_id != lcu::voxel::kAirBlockId &&
+                player_inventory.remove_item(selected_stack.item, 1) == 1) {
                 hand_swing_elapsed = 0.0f;
                 const lcu::voxel::BlockWorldCoord place_pos{
                     hit->world.x + static_cast<lcu::i64>(hit->normal.x),
                     hit->world.y + static_cast<lcu::i64>(hit->normal.y),
                     hit->world.z + static_cast<lcu::i64>(hit->normal.z),
                 };
+                const std::string& selected_place_name = item_registry.definition_of(selected_stack.item).namespaced_id;
                 if (networked) {
                     // See the break_ready/BlockActionType::Break branch
                     // above - same server-authoritative pattern. The item is
@@ -2555,26 +2979,24 @@ int main() {
                     // being air by the time it's processed) currently isn't
                     // refunded; a real inventory-sync/rejection channel is a
                     // separate, larger feature.
-                    LCU_LOG_INFO("Requesting place {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
-                                 place_pos.x, place_pos.y, place_pos.z,
-                                 player_inventory.count_item(selected_placeable.item_id));
+                    LCU_LOG_INFO("Requesting place {} at world ({}, {}, {}) (inventory: {})", selected_place_name,
+                                 place_pos.x, place_pos.y, place_pos.z, player_inventory.count_item(selected_stack.item));
                     server_connection.send(lcu::network::Channel::ReliableOrdered,
                                             protocol::encode_block_action({protocol::BlockActionType::Place, place_pos.x,
                                                                             place_pos.y, place_pos.z,
-                                                                            selected_placeable.block_id}));
+                                                                            selected_place_block_id}));
                 } else {
-                    LCU_LOG_INFO("Placing {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
-                                 place_pos.x, place_pos.y, place_pos.z,
-                                 player_inventory.count_item(selected_placeable.item_id));
+                    LCU_LOG_INFO("Placing {} at world ({}, {}, {}) (inventory: {})", selected_place_name, place_pos.x,
+                                 place_pos.y, place_pos.z, player_inventory.count_item(selected_stack.item));
                     const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
                     if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                         const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
-                        target->set_block(split.local.x, split.local.y, split.local.z, selected_placeable.block_id);
+                        target->set_block(split.local.x, split.local.y, split.local.z, selected_place_block_id);
                         const auto light_touched =
-                            update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
+                            update_lighting_for_edit(split.chunk, split.local, old_id, selected_place_block_id);
                         remesh_and_upload(split.chunk);
                         remesh_edit_neighbors(split.chunk, split.local, light_touched);
-                        if (selected_placeable.block_id == torch_id) {
+                        if (selected_place_block_id == torch_id) {
                             // Real confirmation a placed light source actually
                             // lit itself (Phase 34) - not test-only scaffolding,
                             // this fires for any real torch placement, headless
@@ -2597,11 +3019,11 @@ int main() {
                         }
                     } else {
                         LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
-                        player_inventory.add_item(item_registry, {selected_placeable.item_id, 1});
+                        player_inventory.add_item(item_registry, {selected_stack.item, 1});
                     }
                 }
             }
-        }  // if (!paused)
+        }  // if (!paused && !inventory_open)
 
         // Real F-key HUD/display toggles (Phase 47) - work regardless
         // of pause state (see `third_person`'s own doc comment above).
@@ -2692,6 +3114,16 @@ int main() {
         // (20/20, full) this phase - Phase 51 wires real per-frame
         // values in once PlayerHealth/PlayerHunger exist.
         lcu::ui::HudState hud_state;
+
+        // Real inventory screen (Phase 49.1) - same populate-then-queue-
+        // then-draw-labels split as hud_state above. Only actually
+        // populated with real slot contents below when inventory_open
+        // (see "Real HUD" section below); stays default/empty otherwise,
+        // which is fine since queue/draw_inventory_screen_* are also
+        // gated on inventory_open and never read it that frame.
+        lcu::ui::InventoryScreenState inventory_state{};
+        const lcu::ui::InventoryScreenLayout inventory_layout =
+            lcu::ui::inventory_screen_layout(renderer_desc.width, renderer_desc.height);
 
         // Sun/moon (Phase 27) - see kCelestialRadius's doc comment. Direction
         // math lives in game::systems::sun_direction (headlessly unit-tested
@@ -2802,26 +3234,32 @@ int main() {
             }
         }
 
-        // Real hand icon (Phase 48.3) - the currently-selected
-        // placeable item's own icon color (Phase 47's icon_color),
-        // bottom-right corner, swinging toward center-screen and back
-        // over kHandSwingDuration on every real break/place action
-        // (hand_swing_elapsed, reset to 0 by those - see above).
+        // Real hand icon (Phase 48.3, updated for Phase 49's real
+        // inventory-driven hotbar) - whatever item physically sits in
+        // the selected hotbar slot right now, own icon color (Phase 47's
+        // icon_color), bottom-right corner, swinging toward center-screen
+        // and back over kHandSwingDuration on every real break/place
+        // action (hand_swing_elapsed, reset to 0 by those - see above).
+        // An empty selected slot draws no hand icon at all - there's no
+        // real item color to show, the same honest "nothing to render"
+        // choice place_pressed's own kAirBlockId gate makes.
         if (options.hud_enabled) {
-            const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
-            // A real, simple ease: swings out over the first half, back
-            // over the second - std::sin(swing_t * pi) peaks at 1.0
-            // exactly at swing_t=0.5, is 0 at both ends.
-            const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
-            const lcu::f32 rest_x =
-                static_cast<lcu::f32>(renderer_desc.width) - kHandIconSize - kHandRestMarginX;
-            const lcu::f32 rest_y =
-                static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
-            const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
-            const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
-            const lcu::math::Vec4 hand_color =
-                item_registry.definition_of(placeable_items[selected_placeable_index].item_id).icon_color;
-            renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+            const lcu::items::ItemStack& held_stack = player_inventory.slot_at(selected_hotbar_slot);
+            if (!held_stack.is_empty()) {
+                const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
+                // A real, simple ease: swings out over the first half, back
+                // over the second - std::sin(swing_t * pi) peaks at 1.0
+                // exactly at swing_t=0.5, is 0 at both ends.
+                const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
+                const lcu::f32 rest_x =
+                    static_cast<lcu::f32>(renderer_desc.width) - kHandIconSize - kHandRestMarginX;
+                const lcu::f32 rest_y =
+                    static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
+                const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
+                const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
+                const lcu::math::Vec4 hand_color = item_registry.definition_of(held_stack.item).icon_color;
+                renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+            }
         }
 
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
@@ -2841,8 +3279,10 @@ int main() {
                                      kCrosshairColor);
         }
 
-        // Real HUD: hotbar (real held-item icons/counts from
-        // placeable_items + player_inventory) and health/hunger bars
+        // Real HUD: hotbar (real held-item icons/counts read directly
+        // from player_inventory's own real slots 0-8, Phase 49 - no
+        // separate placeable_items table anymore, the hotbar row IS the
+        // inventory's own hotbar range now) and health/hunger bars
         // (Phase 47 - hardcoded full this phase; Phase 51 wires real
         // values in). Same options.hud_enabled gate as the crosshair -
         // one real "HUD" toggle, not several independent ones. `hud_state`
@@ -2850,12 +3290,14 @@ int main() {
         // draw_hud_labels, since the quad- and text-drawing halves can't
         // happen at the same call site (same split menu_renderer.h's own
         // doc comment explains for the pause menu).
-        hud_state.selected_hotbar_slot = selected_placeable_index;
-        for (lcu::usize i = 0; i < lcu::ui::kHotbarSlotCount && i < placeable_items.size(); ++i) {
-            const auto& placeable = placeable_items[i];
-            hud_state.hotbar[i].has_item = true;
-            hud_state.hotbar[i].icon_color = item_registry.definition_of(placeable.item_id).icon_color;
-            hud_state.hotbar[i].count = player_inventory.count_item(placeable.item_id);
+        hud_state.selected_hotbar_slot = selected_hotbar_slot;
+        for (lcu::usize i = 0; i < lcu::ui::kHotbarSlotCount; ++i) {
+            const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
+            hud_state.hotbar[i].has_item = !stack.is_empty();
+            if (!stack.is_empty()) {
+                hud_state.hotbar[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                hud_state.hotbar[i].count = stack.count;
+            }
         }
         if (options.hud_enabled) {
             lcu::ui::queue_hud_quads(renderer, hud_state, renderer_desc.width, renderer_desc.height);
@@ -2869,6 +3311,57 @@ int main() {
         // text-drawing halves can't happen at the same call site here).
         if (!menu_stack.empty()) {
             lcu::ui::queue_menu_backdrop(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
+        }
+
+        // Real inventory screen (Phase 49.1) - drawn on top of the
+        // HUD/crosshair (menu_stack and inventory_open are mutually
+        // exclusive, see the E/ESC handling above, so this never
+        // double-draws with the pause menu backdrop). Built fresh from
+        // player_inventory/craft_grid_inventory/cursor_stack every frame
+        // it's open - real, live state, not a cached snapshot.
+        if (inventory_open) {
+            for (lcu::usize i = 0; i < lcu::ui::kCraftGridSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = craft_grid_inventory.slot_at(i);
+                inventory_state.craft_input[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    inventory_state.craft_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    inventory_state.craft_input[i].count = stack.count;
+                }
+            }
+            const lcu::items::ItemStack& result_stack = craft_grid_inventory.slot_at(kCraftGridResultSlotIndex);
+            inventory_state.craft_result.has_item = !result_stack.is_empty();
+            if (!result_stack.is_empty()) {
+                inventory_state.craft_result.icon_color = item_registry.definition_of(result_stack.item).icon_color;
+                inventory_state.craft_result.count = result_stack.count;
+            }
+            for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
+                inventory_state.main_slots[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    inventory_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    inventory_state.main_slots[i].count = stack.count;
+                }
+            }
+            for (lcu::usize i = 0; i < lcu::ui::kHotbarSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
+                inventory_state.hotbar_slots[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    inventory_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    inventory_state.hotbar_slots[i].count = stack.count;
+                }
+            }
+            if (!cursor_stack.is_empty()) {
+                inventory_state.cursor.has_item = true;
+                inventory_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                inventory_state.cursor.count = cursor_stack.count;
+                const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
+                inventory_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
+                inventory_state.cursor_y = static_cast<lcu::f32>(mouse_pos.y);
+            } else {
+                inventory_state.cursor = lcu::ui::InventorySlotDisplay{};
+            }
+            lcu::ui::queue_inventory_screen_quads(renderer, inventory_layout, inventory_state, renderer_desc.width,
+                                                   renderer_desc.height);
         }
 
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
@@ -2902,6 +3395,13 @@ int main() {
         // hud_enabled gate as queue_hud_quads above.
         if (options.hud_enabled) {
             lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height);
+        }
+        // Real inventory screen slot-count labels (Phase 49.1) - drawn
+        // after the debug overlay/HUD text for the same reason menu row
+        // labels are (see below): the inventory screen is meant to be
+        // readable while it's open.
+        if (inventory_open) {
+            lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state);
         }
         // Menu row labels last - drawn on top of (after) the debug
         // overlay/HUD text, since the pause menu is meant to be the one

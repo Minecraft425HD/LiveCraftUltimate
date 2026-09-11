@@ -2,7 +2,107 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49
+
+### Phase 49
+
+- **Real, deep hotbar/inventory integration** - the biggest structural
+  change this phase: Phase 21's `placeable_items`/`selected_placeable_index`
+  (a virtual "known item types" selector, decoupled from where items
+  physically lived) is gone entirely. The hotbar is now real: 9 of
+  `player_inventory`'s own 36 slots (indices 0-8), `selected_hotbar_slot`
+  a real index into it. `CycleHotbar`/`CycleHotbarPrev`/`SelectHotbar1-9`
+  move the index; placing reads whatever `ItemStack` actually sits there
+  and looks up its block via `BlockItemMapping::block_for_item` (new
+  reverse lookup, `game/items/block_item_mapping.{h,cpp}`); breaking
+  still grants via `add_item` (fills matching stacks/empty slots,
+  earliest-first). PickBlock (middle-click) now swaps an already-held
+  item into the selected slot rather than merely "selecting a known
+  type" - Minecraft's own real survival behavior.
+- **Real inventory screen** (`E`): Minecraft's own layout - 2x2 craft
+  grid + result slot on top, 3x9 main storage, the same 9 hotbar slots
+  again at the bottom. Pure layout/hit-testing in
+  `engine/ui/inventory_screen.{h,cpp}` (mirrors `hud.h`'s own
+  pure-logic/renderer split), drawing in
+  `inventory_screen_renderer.{h,cpp}`. Opening does **not** pause the
+  simulation (`day_night_cycle`/AI wander keep running) - only the
+  player's own movement/camera/mining/placing/crafting lock while it's
+  open, via a new `!inventory_open` gate alongside the existing
+  `!paused` one. `ESC` closes the screen instead of opening the pause
+  menu when it's open; the two are mutually exclusive.
+- **Real drag/drop**: `engine/items/inventory_ops.{h,cpp}` -
+  `inventory_left_click` (pick up/place/merge/swap a whole stack),
+  `inventory_right_click` (half stack via ceil-division / place one /
+  add one), `inventory_shift_click` (transfer to another slot range or
+  a whole other `Inventory`, via a new `Inventory::add_item_to_range`).
+  Pure logic, no UI/mouse state of its own - the real mouse-click
+  dispatch in `client/main.cpp` reuses Interact/PlaceBlock (left/right
+  mouse button) while the screen is open, with `Crouch` (Shift by
+  default, same key Minecraft itself uses) as the shift-click modifier.
+- **Real crafting-grid integration**: the 2x2 grid is a genuine
+  `RecipeRegistry::find_match(grid, 2, 2)` query against a separate
+  5-slot `Inventory` (4 input + 1 result), recomputed on every input
+  change. Clicking the result slot takes it into the cursor and consumes
+  1 of each non-empty ingredient - correct for every shapeless recipe
+  registered so far (each lists an ingredient once), a real, documented
+  limit for a future recipe needing >1 of the same ingredient in one
+  cell. Phase 23's quick-craft stays as a convenience path, untouched.
+- **New real recipe + items**: `game:wood` finally has its own item
+  (breaking a wood block previously granted nothing - a real gap since
+  Phase 41 registered the block with no matching item), plus
+  `game:planks` (crafted-only) and the phase's own suggested `1 wood ->
+  4 planks` shapeless recipe - the 2x2 grid's first real, reachable
+  recipe.
+- **New `Window::warp_mouse`** (`SDL_WarpMouseInWindow`) - the first
+  real mouse-*position*-driven headless verification in this project
+  (every prior click-like hook used keyboard navigation instead, see
+  `LCU_VERIFY_MENU`'s own history); needed since the inventory screen's
+  only real input is mouse clicks.
+- **New `LCU_VERIFY_INVENTORY` headless hook**: grants 1 wood (synthetic
+  setup, same precedent as `LCU_VERIFY_TORCH`'s torch grant), opens the
+  screen, then drives 5 real mouse clicks via `warp_mouse` + synthesized
+  `Interact`/`Crouch` presses: pick up wood from the hotbar into the
+  cursor, drop it in the craft grid, take the crafted result (4 planks -
+  proving the real 2x2 `RecipeRegistry` integration, not just quick-
+  craft), place it in the main inventory, shift-click it back to the
+  hotbar. A real, previously-hit-and-fixed ordering bug: this hook's
+  `input.set_down` calls originally sat alongside `LCU_VERIFY_BREAK_
+  PLACE`/`CRAFT`/`TORCH` later in the frame, after the E-toggle/click-
+  handling code that reads them already ran that frame - the inventory
+  silently never opened on the first real run. Fixed by moving it next
+  to `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`, which sit before that consumer
+  code for the same reason.
+- Existing `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH` hooks updated for
+  the new slot-based hotbar: both now press `CycleHotbar` *and*
+  `CycleHotbarPrev` (a real net-zero round trip) to land back on the
+  slot actually holding the relevant item before placing, since cycling
+  now moves a real slot pointer instead of a virtual list index.
+  `LCU_VERIFY_CRAFT` needed no changes (quick-craft never referenced
+  `placeable_items`).
+- 30 new `InventoryLeftClick`/`InventoryRightClick`/`InventoryShiftClick`
+  unit tests, 2 new `Inventory.AddItemToRange*` tests, 8 new
+  `InventoryScreenLayoutTest`/`HitTestInventoryScreen`/
+  `InventoryScreenConstants` tests, 3 new `BlockItemMapping` reverse-
+  lookup tests (44 new total).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` regression runs (all still pass with the new
+  hotbar), a real `LCU_VERIFY_INVENTORY` run (both bgfx and non-bgfx
+  builds - full pipeline confirmed: pick up -> craft -> take result ->
+  place -> shift-click -> close), real `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`
+  regression runs, a real two-process networked `LCU_VERIFY_BREAK_PLACE`
+  run (break/place both still reach the server correctly through the
+  new hotbar), and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+- `ctest` 506/506 (bgfx, up from 475) / 498/498 (non-bgfx, up from 467).
+- Honestly scoped: shift-clicking a craft-grid slot moves it anywhere in
+  the whole 36-slot inventory rather than hotbar-first-then-main (a
+  real, minor simplification vs. Minecraft's own precise ordering);
+  right-click on the craft result behaves identically to left-click (no
+  "half result" concept exists); a recipe needing more than one of the
+  same ingredient in a single 2x2 cell isn't correctly consumed by the
+  result-click's "decrement each ingredient by 1" logic (documented in
+  `inventory_shift_click`'s own call site, not silently wrong for
+  anything actually registered); no icon/texture atlas still (flat-color
+  quads, same as every prior phase).
 
 ### Phase 48
 

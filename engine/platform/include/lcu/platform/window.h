@@ -89,6 +89,15 @@ class Window : public NonCopyable {
     };
     static MousePosition mouse_position();
 
+    // Moves the OS cursor to an absolute window-pixel position
+    // (SDL_WarpMouseInWindow) - real headless verification's only way to
+    // exercise a real mouse-position-driven click path (Phase 49's
+    // inventory screen hit-testing) deterministically, the same way
+    // synthesizing a real key press via InputState::set_down already
+    // exercises keyboard-driven paths. Requires a live window, so it's
+    // an instance method (unlike the static mouse_position() getter).
+    void warp_mouse(f32 x, f32 y);
+
     // Real fullscreen toggle (Phase 47, F11) - wraps
     // `SDL_SetWindowFullscreen`. Logs a warning (not fatal, same
     // tolerance `set_relative_mouse_mode` already has) if SDL reports

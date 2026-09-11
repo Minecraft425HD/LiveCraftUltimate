@@ -2003,6 +2003,77 @@ above); the break-progress overlay is opaque, not alpha-blended, so it
 appears at whatever darkness the first held frame computes rather than
 fading in from invisible (a real, documented rough edge).
 
+## Phase 49 — Inventory screen + drag/drop + crafting grid
+
+The visible gameplay elements Minecraft players expect in their first
+minutes: a real inventory screen, drag/drop, and a working crafting
+grid - built on a genuinely real hotbar/inventory integration rather
+than layering a UI on top of Phase 21's old virtual item-type selector.
+
+- [x] **Real, deep hotbar integration**: `placeable_items`/
+  `selected_placeable_index` removed entirely. `selected_hotbar_slot` is
+  now a real index (0-8) into 9 of `player_inventory`'s own 36 slots;
+  new `BlockItemMapping::block_for_item` reverse lookup drives placement
+  from whatever's actually held there. Any block/item pair registered
+  via `register_pair` is automatically placeable with zero
+  hotbar-specific wiring.
+- [x] **Real inventory screen** (`E`): 2x2 craft grid + result slot, 3x9
+  main storage, the hotbar again at the bottom. New pure
+  `engine/ui::inventory_screen.{h,cpp}` (layout/hit-testing) +
+  `inventory_screen_renderer.{h,cpp}` (drawing), mirroring `hud.h`'s own
+  split. Does **not** pause the simulation - only player control locks
+  (new `!inventory_open` gate, independent of `!paused`); `ESC` closes
+  the screen instead of the pause menu when it's open.
+- [x] **Real drag/drop**: new `engine/items::inventory_ops.{h,cpp}` -
+  `inventory_left_click`/`inventory_right_click`/`inventory_shift_click`
+  (pure logic) + new `Inventory::add_item_to_range`, dispatched from
+  real mouse clicks (Interact=left, PlaceBlock=right, Crouch=shift
+  modifier).
+- [x] **Real crafting-grid integration**: the 2x2 grid is a genuine
+  `RecipeRegistry::find_match(grid, 2, 2)` query against a separate
+  5-slot craft-grid `Inventory`, recomputed on every input change.
+  Taking the result consumes 1 of each non-empty ingredient slot and
+  grants the crafted stack to the cursor. Phase 23's quick-craft stays
+  as a convenience path.
+- [x] **New real recipe**: `game:wood` finally has an item (the block
+  existed since Phase 41 with no item - a real, now-closed gap), plus
+  `game:planks` (crafted-only) and `1 wood -> 4 planks` (shapeless) -
+  the grid's first real reachable recipe.
+- [x] **New `Window::warp_mouse`** (`SDL_WarpMouseInWindow`) - the first
+  real mouse-position-driven headless verification here.
+- [x] **New `LCU_VERIFY_INVENTORY` hook**: grants 1 wood, opens the
+  screen, then drives 5 real clicks via `warp_mouse` + synthesized
+  Interact/Crouch presses (pick up wood -> drop in craft grid -> take
+  result -> place in main inventory -> shift-click back to hotbar) ->
+  close. A real ordering bug found and fixed during verification: its
+  first draft's `input.set_down` calls sat after the E-toggle/click
+  code that reads them that frame, so the inventory silently never
+  opened - fixed by moving the hook next to `LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD`. See DECISIONS.md.
+- [x] `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH` updated for the real
+  slot-based hotbar (both now press `CycleHotbar` *and*
+  `CycleHotbarPrev` - a real net-zero round trip - to land back on the
+  right slot before placing). `LCU_VERIFY_CRAFT` needed no changes.
+- [x] 44 new unit tests (30 drag/drop, 2 `Inventory::add_item_to_range`,
+  8 inventory-screen layout/hit-testing, 3 `BlockItemMapping`
+  reverse-lookup regression).
+- [x] Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` regression runs, a real `LCU_VERIFY_INVENTORY` run
+  in both bgfx and non-bgfx builds (full pipeline confirmed), real
+  `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD` regression runs, a real
+  two-process networked `LCU_VERIFY_BREAK_PLACE` run, and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 506/506 (bgfx, up from 475) / 498/498 (non-bgfx, up from 467).
+
+Honestly scoped: what the inventory screen actually looks like on a
+real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+shift-clicking a craft-grid slot lands anywhere in the whole inventory
+rather than hotbar-first (a real, minor simplification); a recipe
+needing >1 of the same ingredient in one cell isn't correctly consumed
+by the result-click logic (documented, no registered recipe needs it
+yet); still no icon/texture atlas.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

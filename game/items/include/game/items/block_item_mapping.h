@@ -35,8 +35,26 @@ class BlockItemMapping {
     // their last explicit check).
     lcu::items::ItemId item_for_block(lcu::voxel::BlockId block_id) const;
 
+    // The reverse direction (Phase 49, real inventory-driven hotbar
+    // placement): which block a held item places, or
+    // lcu::voxel::kAirBlockId if item_id isn't a real placeable item
+    // (kAirBlockId, not some other sentinel, so a caller that
+    // mistakenly tries to place it ends up placing "nothing" rather
+    // than needing a second special case - see client/main.cpp).
+    // register_pair keeps both directions in sync from one call, so
+    // this can never drift from item_for_block for today's real 1:1
+    // content - a real, documented limit for the many-to-one case
+    // item_for_block itself already supports (several blocks dropping
+    // the same item): the reverse lookup can only ever remember one
+    // block per item (last-registered-for-that-item wins), since
+    // placing needs a single real answer, not a set. No content
+    // registered so far actually needs a many-to-one item, so this
+    // hasn't mattered in practice.
+    lcu::voxel::BlockId block_for_item(lcu::items::ItemId item_id) const;
+
    private:
     std::unordered_map<lcu::voxel::BlockId, lcu::items::ItemId> block_to_item_;
+    std::unordered_map<lcu::items::ItemId, lcu::voxel::BlockId> item_to_block_;
 };
 
 }  // namespace game::items
