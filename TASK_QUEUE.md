@@ -2212,6 +2212,38 @@ from Phase 43); apple/bread have no survival obtain path (no
 farming/mob drops); real fall damage isn't verifiable in networked
 mode (see above).
 
+## Phase 52 — Documentation
+
+Closes the Phases 43-52 program. Documentation-only, no code changes.
+
+- [x] **README.md**: new `## Controls` section - a full table of every
+  real default keybinding (from `KeyBindings::reset_to_defaults()`),
+  each noted as rebindable via Esc -> Steuerung. Feature summary bullets
+  updated to mention the real inventory/crafting/HUD/menu/vitals
+  systems Phases 44-51 actually built, replacing the old generic
+  "inventory/item/crafting system" line.
+- [x] **BUILDING.md**: new `## Options file (options.txt)` section -
+  its real `SDL_GetPrefPath`-derived path (logged on every run), the
+  plain-`options.txt`-in-CWD fallback if that call fails, and that
+  deleting it is a safe, real reset to code defaults.
+- [x] **CHANGELOG.md**: Phases 43-51 already had their own entries,
+  added incrementally as each phase landed - confirmed present, no
+  backfill needed. This phase's own entry added.
+- [x] **PROJECT_STATE.md**: "Current Phase" and "Next Task" updated to
+  reflect Phases 43-52 as a closed, done program; "Test Status"
+  ctest counts/test-suite list refreshed to the real current numbers
+  (were stale since before Phase 49); new Known Limitations items for
+  the standing exclusion list (mobs/redstone/enchantments/Nether/
+  villagers/structures/farming/chat/skins) and Phase 51's own real
+  gaps (fall-damage armor, Sprint's missing speed boost, apple/bread's
+  missing obtain path, the networked fall-damage verification gap).
+- [x] **DECISIONS.md**: new entry recording *why* the standing
+  exclusion list holds up - each excluded vertical is a genuinely
+  separate system with no current attachment point, and none of them
+  block what Phases 43-51 actually built.
+- [x] `ctest` unchanged at 547/547 (bgfx) / 539/539 (non-bgfx) - no
+  code touched this phase.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

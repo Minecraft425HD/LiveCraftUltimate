@@ -30,9 +30,15 @@ As of the most recent phase, the game has:
   terrain shape, sea level with real water, three climate biomes
   (Snowy/Plains/Desert), cave carving, two ore types (coal/iron), and
   single-column tree/cactus vegetation.
-- First-person movement, AABB collision, block break/place, an
-  inventory/item/crafting system, simple wandering AI, and a day/night
-  cycle.
+- First-person movement, AABB collision, block break/place, simple
+  wandering AI, and a day/night cycle.
+- A real inventory/crafting system: physically-simulated dropped item
+  entities, a real drag/drop inventory screen and a crafting table with
+  its own 3x3 grid, a rebindable-input pause/options/controls menu, and
+  a real HUD (hotbar, health/hunger bars, crosshair, block-break
+  progress).
+- Real player vitals: fall damage, natural regen, starvation, hunger
+  drain, eating, and death/respawn.
 - A real client/server network protocol (reliable + unreliable
   channels over UDP) with server-authoritative block edits, chunk
   streaming, interest-scoped unloading, and client-side
@@ -61,6 +67,36 @@ LCU_MAX_TICKS=5 ./build/dev/bin/VoxelServer --world MyWorld --port 25565
 
 See `BUILDING.md` for prerequisites, build options, shader compilation,
 ThreadSanitizer testing, and a macOS-specific build/run guide.
+
+## Controls
+
+Every binding below is the real default from `KeyBindings::
+reset_to_defaults()`, and every one is rebindable in-game via Esc →
+Steuerung (Controls) — select a row and press Enter/click to capture a
+new key, Reset restores these defaults.
+
+| Action | Default | Notes |
+|---|---|---|
+| Move | `W` `A` `S` `D` | |
+| Jump | `Space` | Falling more than 3 blocks deals real fall damage on landing. |
+| Sprint | `Left Ctrl` | Doubles hunger drain while held and moving; doesn't itself move you faster yet (see `PROJECT_STATE.md` Known Limitations). |
+| Crouch | `Left Shift` | Shift-click modifier in the inventory/crafting-table screens only (moves a whole stack at once) — no movement/sneak effect. |
+| Look | Mouse (captured) / `↑` `↓` `←` `→` | Click into the window to capture the mouse for real mouse-look; the arrow keys always work as a fallback and can be used together with the mouse. |
+| Break / Attack | `Left Mouse` (hold) | Real per-block hold-to-break timing (hardness-based). |
+| Place / Use / Eat | `Right Mouse` | Places the block in your selected hotbar slot, opens a crafting table you're looking at, or eats a held food item — whichever applies. |
+| Pick Block | `Middle Mouse` | Selects the hotbar slot already holding the block you're looking at (never grants a new item). |
+| Open Inventory | `E` | Doesn't pause the world — only your own movement/mining/placing/eating lock while it's open. |
+| Quick-craft | `C` | Auto-assembles one of each distinct held item into a query grid; use the inventory/crafting-table screen's 2x2/3x3 grid for anything needing more than one of an ingredient. |
+| Select hotbar slot 1-9 | `1`-`9` | |
+| Cycle hotbar | `R` / mouse wheel down | Mouse wheel up is the reverse (`CycleHotbarPrev`, no keyboard default). |
+| Swap offhand | `F` | Bound but not wired to anything yet — no offhand slot exists. |
+| Pause / back | `Esc` or `Tab` | Opens the pause menu; also closes the inventory/crafting-table screen or cancels a rebind capture. |
+| Confirm (menus) | `Enter` | |
+| Toggle HUD | `F1` | |
+| Screenshot | `F2` | Writes a PNG next to the executable (bgfx builds only). |
+| Toggle debug overlay | `F3` | |
+| Toggle perspective | `F5` | First-person/third-person camera only — doesn't change hit-detection. |
+| Fullscreen | `F11` | |
 
 ## Documentation map
 

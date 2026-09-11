@@ -3577,3 +3577,65 @@ for the same real answer already computed once, later in the frame,
 under the narrower movement gate; a server-side fix for the networked
 fall-damage verification gap - rejected as out of this phase's own
 scope (see above), documented instead as a real, known limitation.
+
+## 2026-09-11 — Closing Phases 43-52: why mobs/redstone/enchantments/Nether/villagers/structures/farming/chat/skins stayed out
+
+**Context:** Phase 52 closes the third user-directed program (Phases
+43-52: rebindable input, a 2D UI framework, persistent options, a menu
+framework, HUD, block interaction polish, inventory/crafting, item
+entities, health/hunger, and this documentation pass). The directive
+driving these ten phases explicitly named a fixed exclusion list up
+front - mobs, redstone, enchantments/anvil/potions, Nether/End,
+villagers, structures, farming, chat/server-browser, skin
+customization, and a real audio-content/font-atlas pipeline - and it's
+worth recording *why* that list holds up, not just that it was followed.
+
+**Every one of these is a genuinely separate content vertical, not a
+missing detail inside the ten phases actually built.** This program's
+own real throughline - input, UI, inventory, items, vitals - is about
+giving the *existing* player character (movement, blocks, items) a
+complete, self-contained interaction loop. Mobs need their own AI/
+combat/spawning systems (this project's existing `game::systems::
+update_ai_wander` is deliberately simple wandering, not combat AI -
+see the Phase 6 entries above); redstone needs a whole new simulation
+domain (signal propagation, block-update ordering) orthogonal to
+lighting's own BFS; enchantments/potions need a stat-modifier system
+with no current attachment point (no armor/tool-tier system exists to
+modify); Nether/End need a second dimension's worth of worldgen +
+portal mechanics; villagers need their own AI plus a trade-UI system
+layered on top of the inventory screen this program just built;
+structures were already explicitly out of scope since Phase 38-41 (see
+PROJECT_STATE.md); farming needs crop block states + growth ticks with
+no current consumer (this is *why* Phase 51's `game:apple`/`game:bread`
+have no survival obtain path - see the entry above); chat/server-browser
+is a UI + protocol feature with no bearing on the vitals/inventory loop
+this program targeted; skin customization needs a texture/model
+pipeline this project has never built (every visual element remains
+flat-colored quads, see the "content pipeline" Known Limitation).
+Pulling any one of these in would have meant this program either ran
+long past its own ten-phase scope or shipped each new vertical
+half-built - both worse than a clean, honestly-documented boundary.
+
+**None of the exclusions block what got built.** Every one of Phases
+43-51's own features - rebindable input, menus, HUD, inventory/
+crafting/item-entities, health/hunger/fall-damage/respawn - is fully
+self-contained against the *existing* single-overworld, no-mob,
+no-redstone game: nothing in this program's own real feature set (e.g.
+`game::systems::player_vitals_system`, `engine/ui::inventory_screen`)
+references or half-implements anything from the excluded list. This is
+what makes marking Phases 43-52 "done" honest rather than "done for a
+game that also happens to be missing half of Minecraft" - the program
+delivered exactly the interaction loop it set out to build, verified
+end to end, with a plainly-stated, unambiguous line around what it
+never attempted.
+
+**Alternatives considered:** silently treating the exclusion list as
+implicit scope creep protection and never writing it down - rejected
+since a future session reading only `PROJECT_STATE.md`'s per-phase
+history could otherwise reasonably ask "why is there no combat" without
+an answer; picking off one small excluded item (e.g. a single mob type,
+or a minimal chat log) as a "quick win" outside the ten-phase plan -
+rejected as exactly the kind of unplanned scope growth the standing
+directive's own phase structure exists to prevent, and none of these
+verticals are actually small once a real implementation (not a stub) is
+attempted.

@@ -44,8 +44,8 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 (HUD overhaul: hotbar + health/hunger bars + F-toggles)**, **Phase
 48 (block highlight + hold-to-break + hand)**, **Phase 49
 (inventory screen + drag/drop + crafting grid)**, **Phase 50
-(item entities + crafting table)**, and **Phase 51 (health, hunger,
-fall damage, respawn)** are done; see
+(item entities + crafting table)**, **Phase 51 (health, hunger,
+fall damage, respawn)**, and **Phase 52 (documentation)** are done; see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2570,17 +2570,20 @@ before content/polish):
    packet volume) - deferred since it needs dedicated networking-code
    investigation, not a quick fix, and hasn't affected any real
    verification run at this vertical slice's normal traffic volume.
-8. **Active, user-directed program (Phases 43-52)**: a third program
-   after items 6/above - rebindable input (43), a 2D UI framework (44),
-   persistent options (45), the menu/pause framework (46), a real HUD
-   (47), block highlight/hold-to-break/hand (48), the inventory screen +
-   drag/drop + crafting grid (49), item entities + a crafting table
-   (50), and health/hunger/fall damage/respawn (51) are all done - see
-   PROJECT_STATE.md "Phase 43" through "Phase 51" above and
-   TASK_QUEUE.md for full per-phase detail. Next: Phase 52
-   (documentation: README controls table, BUILDING options.txt note,
-   CHANGELOG/PROJECT_STATE/DECISIONS.md wrap-up for Phases 43-51, then a
-   final summary to the user), which closes this program out.
+8. ~~Active, user-directed program (Phases 43-52)~~ **Done**: a third
+   program after items 6/above - rebindable input (43), a 2D UI
+   framework (44), persistent options (45), the menu/pause framework
+   (46), a real HUD (47), block highlight/hold-to-break/hand (48), the
+   inventory screen + drag/drop + crafting grid (49), item entities + a
+   crafting table (50), health/hunger/fall damage/respawn (51), and a
+   documentation pass (52 - README controls table, BUILDING
+   options.txt note, a DECISIONS.md entry on the standing exclusion
+   list's own rationale) are all done - see PROJECT_STATE.md "Phase 43"
+   through "Phase 51" above and TASK_QUEUE.md for full per-phase detail.
+   Next: no further phase is currently queued - future work should be
+   directed by the user (mobs/redstone/enchantments/Nether/villagers/
+   structures/farming/chat/skins were all explicitly out of scope for
+   this program, see DECISIONS.md "Closing Phases 43-52").
 
 Update state docs and commit after each, same discipline as every phase
 before it - see "Resume Protocol" implicit throughout this file: read

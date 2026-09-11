@@ -2,7 +2,27 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52
+
+### Phase 52
+
+- **Documentation-only phase** closing the Phases 43-52 program
+  (rebindable input through health/hunger/respawn). New README.md
+  `## Controls` section: a full table of every real default keybinding
+  (from `KeyBindings::reset_to_defaults()`), each one noted as
+  rebindable via the in-game Controls screen. New BUILDING.md
+  `## Options file (options.txt)` section documenting its real
+  `SDL_GetPrefPath`-derived path (logged on every run), the CWD-relative
+  fallback if that call fails, and that deleting it is a safe reset.
+  New DECISIONS.md entry recording *why* the standing directive's own
+  exclusion list (mobs/redstone/enchantments/Nether/villagers/
+  structures/farming/chat/skins) holds up - each is a genuinely separate
+  content vertical, none of them block what Phases 43-51 actually built.
+  CHANGELOG/PROJECT_STATE/TASK_QUEUE entries for Phases 43-51 were kept
+  up to date incrementally as each phase landed (not deferred to this
+  phase) - see each phase's own section above.
+- No code changes; `ctest` unchanged at 547/547 (bgfx) / 539/539
+  (non-bgfx).
 
 ### Phase 51
 
