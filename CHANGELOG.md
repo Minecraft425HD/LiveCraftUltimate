@@ -2,7 +2,75 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38
+
+### Phase 38
+
+- **Two genuinely separate worldgen noise stages**, matching brief
+  section 21's own pipeline naming ("kontinental -> terrain") for real
+  instead of as a comment on one combined noise sample:
+  - **Continental**: a new, much-lower-frequency noise layer
+    (`kContinentalNoiseScale`, ~666-block wavelength vs. the terrain
+    layer's ~100-block one) producing a broad "how much landmass"
+    value per column. Alone decides two things: the column's base
+    elevation before any local detail (`kDeepOceanBase` for
+    continental=0 up to `kHighlandBase` for continental=1), and how
+    much amplitude the terrain-detail layer below gets to work with
+    (`kMinMountainAmplitude`..`kMaxMountainAmplitude`) - a coastal/
+    oceanic column is capped to gentle relief regardless of what the
+    detail layer samples there, a highland column can swing into
+    real mountain-sized peaks and valleys.
+  - **Terrain (detail)**: the original Phase 3 4-octave fractal noise,
+    frequency unchanged, now scaled by the continental-driven
+    amplitude above instead of one fixed `kHeightVariation` everywhere
+    - this is what actually produces mountain-shaped relief inland and
+    keeps ocean/coastal regions comparatively flat, rather than the
+    uniform bumpiness every earlier phase generated regardless of
+    location.
+  - A separate seed offset (`kContinentalSeedOffset`) keeps the two
+    noise fields statistically independent, so "how mountainous" and
+    "the mountain shape itself" don't visibly correlate through the
+    same lattice.
+- **A real, pre-existing-pattern bug caught and fixed in the same
+  phase**: `find_dry_spawn_column`'s search radius (`kMaxRadius=64`,
+  Phase 37) was sized for the old single-frequency noise, where dry/
+  wet transitions happened every ~100 blocks. Continental noise's
+  much larger ~666-block wavelength means a 64-block search can now
+  legitimately stay inside one giant ocean basin the entire time and
+  never find land - confirmed for real: seed 1337's spawn search
+  needed radius 84 to find any dry land at all, so the old radius
+  would have silently fallen back to (0,0), which is itself
+  underwater for this seed. Fixed by raising `kMaxRadius` to 1024 (on
+  both `VoxelClient` and `VoxelServer`) and rewriting the ring search
+  from an O(ring-area) re-scanned square (skipping most cells via a
+  `continue`) to an O(ring-perimeter) walk of only the new ring's
+  boundary cells - keeps even the worst case a fast, one-time startup
+  cost (confirmed via a real run: the full search, chunk load, and
+  spawn completed in 0.23s wall-clock).
+- 1 worldgen test's height-range bounds widened to the new
+  continental-modulated range (measured empirically via a real 20-seed
+  sweep: [-15, 20], test bounds set to [-20, 30] for real headroom); 1
+  new test (`LocalRoughnessVariesAcrossRegions`) - the real, directly
+  observable new behavior: local terrain roughness (height range
+  within a small neighborhood) now varies meaningfully from region to
+  region, unlike the old uniform-amplitude model.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn column
+  (-84,-84) found for seed 1337, dry land, full sky light 5 blocks
+  above), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs at the new location, and a real two-process
+  networked run where client and server independently compute the
+  identical spawn column and the server-reconciled player position
+  lands on dry land, zero warnings/errors.
+- `ctest` 394/394 (bgfx, up from 393) / 391/391 (non-bgfx, up from
+  390).
+- Honestly scoped: **what the new mountain/continental terrain shape
+  actually looks like on a real GPU/display is still NOT VERIFIED —
+  ENVIRONMENT LIMITATION**; still no ridged-multifractal or erosion-
+  style mountain shaping (a straightforward amplitude-modulated two-
+  stage composition, not a full geological simulation - a real,
+  scoped choice, not a shortcut hiding a gap); still no climate/biome/
+  caves/ores/structures/vegetation stages (brief section 21's later
+  pipeline items, Phases 39-41).
 
 ### Phase 37
 

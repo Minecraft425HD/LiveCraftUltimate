@@ -69,12 +69,41 @@ f32 fractal_noise(u32 seed, f32 x, f32 z) {
     return total / amplitude_sum;
 }
 
-// Phase 37: recentered on kSeaLevel (0) instead of the old always-
-// positive kBaseHeight=32 - real dry land above, real lake/ocean
-// basins below, rather than a world that was always entirely land no
-// matter how "low" a column's noise sampled.
-constexpr i32 kBaseHeight = kSeaLevel;
-constexpr i32 kHeightVariation = 20;
+// Phase 38: two genuinely separate noise stages, matching brief
+// section 21's own pipeline naming ("kontinental -> terrain") for
+// real instead of just as a comment on one combined noise sample.
+//
+//   - Continental (kContinentalNoiseScale, ~85% of a chunk-edge's
+//     worth of blocks per lattice cell - a much lower frequency than
+//     the terrain-detail layer below): a broad, slowly-varying
+//     "how much landmass is here" value in [0, 1) that alone decides
+//     two things per column - the base elevation before any local
+//     detail (kDeepOceanBase for continental=0 up to kHighlandBase
+//     for continental=1), and how much room local detail gets to work
+//     with (kMinMountainAmplitude..kMaxMountainAmplitude) - a coastal
+//     /oceanic area is capped to gentle relief regardless of what the
+//     detail layer samples there, while a highland area can swing
+//     into real mountain-sized peaks and valleys.
+//   - Terrain detail (kNoiseScale, the original Phase 3 frequency,
+//     unchanged): the same 4-octave fractal_noise as before, now
+//     scaled by the continental-driven amplitude above instead of a
+//     single fixed kHeightVariation everywhere - this is what actually
+//     produces mountain-shaped relief in highland regions and keeps
+//     ocean/coastal regions comparatively flat, rather than the same
+//     uniform bumpiness Phase 37 (and every earlier phase) generated
+//     regardless of where a column was.
+//
+// A different seed offset per stage (kContinentalSeedOffset) keeps the
+// two noise fields statistically independent - without it, "how
+// mountainous" and "the mountain shape itself" would correlate through
+// the exact same lattice, producing visible, unnatural alignment
+// between coastlines and ridge lines.
+constexpr f32 kContinentalNoiseScale = 0.0015f;
+constexpr u32 kContinentalSeedOffset = 747796405u;
+constexpr i32 kDeepOceanBase = -14;
+constexpr i32 kHighlandBase = 10;
+constexpr f32 kMinMountainAmplitude = 4.0f;
+constexpr f32 kMaxMountainAmplitude = 20.0f;
 constexpr f32 kNoiseScale = 0.01f;
 
 // How many layers of `subsurface_block` sit directly beneath the
@@ -88,8 +117,23 @@ constexpr i32 kSubsurfaceDepth = 3;
 }  // namespace
 
 i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
-    const f32 n = fractal_noise(seed, static_cast<f32>(world_x) * kNoiseScale, static_cast<f32>(world_z) * kNoiseScale);
-    return kBaseHeight + static_cast<i32>((n - 0.5f) * 2.0f * static_cast<f32>(kHeightVariation));
+    const f32 x = static_cast<f32>(world_x);
+    const f32 z = static_cast<f32>(world_z);
+
+    // Continental stage: broad, low-frequency "how much landmass"
+    // value - decides the base elevation and how tall local relief is
+    // allowed to get (see the constants' own doc comment above).
+    const f32 continental = fractal_noise(seed + kContinentalSeedOffset, x * kContinentalNoiseScale,
+                                           z * kContinentalNoiseScale);
+    const f32 base_elevation = lerp(static_cast<f32>(kDeepOceanBase), static_cast<f32>(kHighlandBase), continental);
+    const f32 mountain_amplitude = lerp(kMinMountainAmplitude, kMaxMountainAmplitude, continental);
+
+    // Terrain stage: the original Phase 3 detail noise, unchanged in
+    // frequency - only its amplitude now varies with continentalness
+    // instead of being the same fixed kHeightVariation everywhere.
+    const f32 detail = fractal_noise(seed, x * kNoiseScale, z * kNoiseScale);
+
+    return static_cast<i32>(base_elevation + (detail - 0.5f) * 2.0f * mountain_amplitude);
 }
 
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, voxel::BlockId surface_block,

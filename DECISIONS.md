@@ -2532,3 +2532,100 @@ seed), this falls back to (0,0) anyway - honestly documented as a
 fallback rather than an infinite/unbounded search or a crash. Not
 fixed further; a real problem only for a seed nobody has actually hit
 in practice.
+
+## 2026-09-11 — Continental noise decides base elevation AND local-detail amplitude, not just elevation (Phase 38)
+
+**Context:** Phase 3's original worldgen (and Phase 37's sea-level
+recentering of it) used exactly one noise sample per column - a single
+4-octave fractal sum, directly mapped to height. That produces
+uniformly bumpy terrain everywhere: a coastal column and a far-inland
+column have the exact same *amount* of local height variation, just
+centered at a different average. Real mountainous terrain doesn't work
+that way - flat coastal plains and jagged inland peaks coexist in the
+same world, at genuinely different local roughness, not just different
+elevation.
+
+**Decision:** add a second, much-lower-frequency noise stage
+("continental", brief section 21's own name for it) that modulates
+*both* the existing detail noise's average value (base elevation) and
+its amplitude (how much local relief it's allowed to produce) per
+column. A coastal/oceanic column (`continental` near 0) gets a low
+`kMinMountainAmplitude` ceiling regardless of what the detail noise
+itself samples there - genuinely flat, not just low; a highland column
+(`continental` near 1) gets `kMaxMountainAmplitude`, letting the same
+detail noise swing into real mountain-sized peaks and valleys.
+
+**Why modulate the existing detail layer instead of adding a third
+independent "ruggedness" noise:** simpler and cheaper (one fewer noise
+evaluation per column), and it keeps the *shape* of local terrain
+(which ridges and valleys go where) fully determined by the original
+detail noise's own smoothness/continuity properties (already verified
+by `AdjacentColumnsAreSmoothNotRandom`) - only its scale changes
+region to region, not its underlying pattern. A genuinely separate
+ruggedness field would be a reasonable alternative for a later,
+dedicated terrain-quality pass, not obviously wrong, just more moving
+parts than this phase's scope needs.
+
+**Why a real dedicated `kContinentalSeedOffset`, not the same seed as
+the detail layer:** without it, "how mountainous is this region" and
+"what does the terrain actually look like here" would sample the
+exact same lattice at different frequencies - octave-summed fractal
+noise already avoids this within itself (each octave gets its own
+seed offset, see `fractal_noise`'s own comment), and the same
+reasoning applies across stages: two noise fields built from the same
+lattice would show visible correlation (e.g., ridge lines always
+running parallel to coastlines) that isn't geologically meaningful,
+just an artifact of reusing the same randomness source.
+
+**Deliberately not a full ridged-multifractal or erosion-simulated
+mountain algorithm:** those are real, well-known techniques for more
+convincing mountain shapes (sharp ridges via `1 - |noise|`,
+hydraulic/thermal erosion passes, etc.), but are a materially larger
+scope than "continental noise decides how much relief a region gets" -
+this phase's brief item. A straightforward amplitude-modulated
+two-stage composition is the honest, scoped version of "continental/
+mountain terrain," not a shortcut hiding a gap; a more sophisticated
+shaping pass is real, well-scoped future work if ever prioritized, not
+silently deferred without a plan.
+
+## 2026-09-11 — Spawn search radius rewritten for continental noise's much larger wavelength (found and fixed in the same phase, Phase 38)
+
+**Context:** Phase 37 added `find_dry_spawn_column` with `kMaxRadius =
+64`, sized against the single-frequency noise that existed at the
+time (dry/wet transitions roughly every ~100 blocks, so a 64-block
+search radius reliably found land). Phase 38's continental noise
+(`kContinentalNoiseScale = 0.0015`, ~666-block wavelength) varies far
+more slowly - land/ocean boundaries can now be many hundreds of blocks
+apart, so a 64-block search can legitimately never leave the ocean
+basin it started in.
+
+**Found for real, not hypothetically:** running the client after
+implementing the continental noise stage showed spawn column (0,0)
+being selected despite `terrain_height(1337, 0, 0) = -10` (underwater)
+- the search was silently falling back to (0,0) itself, exactly the
+scenario `find_dry_spawn_column`'s own fallback comment already
+anticipated as "statistically implausible... but honestly handled." A
+direct standalone check confirmed seed 1337 genuinely needs radius 84
+to find any dry land at all - not implausible, just larger than the
+old radius allowed.
+
+**Decision:** raise `kMaxRadius` to 1024 (over one full continental
+wavelength in every direction) on both `VoxelClient` and
+`VoxelServer`, and rewrite the ring search itself from an O(ring-area)
+re-scanned square (the original iterated the full `(2r+1)^2` cell
+grid at every radius, skipping all but the ~`8r` boundary cells via a
+`continue`) to an O(ring-perimeter) walk that only ever visits the new
+ring's actual boundary cells. Without that rewrite, a 1024-radius
+worst case would mean summing `(2r+1)^2` for r=1..1024 - tens of
+millions of wasted iterations; the perimeter-only version keeps even
+that worst case proportional to `1024^2`, confirmed fast in a real
+run (full search + chunk load + spawn completed in 0.23s wall-clock
+for seed 1337's actual radius-84 case).
+
+**Lesson worth naming:** a search radius tuned against one noise
+model's characteristic scale silently stops being valid when that
+scale changes - not a coding bug, a coupling this phase's own change
+introduced without immediately re-deriving the dependent constant.
+Caught here by actually running the client after the worldgen change,
+not by code review alone; a reminder for any future phase that touches
+`kContinentalNoiseScale` again to re-check this radius against it.

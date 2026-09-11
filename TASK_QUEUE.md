@@ -1368,6 +1368,55 @@ water's surface (treated opaque like any other solid block - an
 honest consequence of the existing binary light model, not a new
 simplification invented for this phase).
 
+## Phase 38 — Continental/mountain terrain
+
+Two genuinely separate noise stages, matching brief section 21's own
+pipeline naming for real, plus a real bug this same change surfaced
+and fixed.
+
+- [x] **Continental noise**: new low-frequency layer
+  (`kContinentalNoiseScale`, ~666-block wavelength vs. the terrain
+  layer's ~100-block one) - decides a column's base elevation
+  (`kDeepOceanBase`..`kHighlandBase`) and how much amplitude the
+  existing 4-octave detail noise gets to work with
+  (`kMinMountainAmplitude`..`kMaxMountainAmplitude`). Coastal/oceanic
+  columns stay flat regardless of what the detail layer samples;
+  highland columns get real mountain-sized relief. A separate
+  `kContinentalSeedOffset` keeps the two fields statistically
+  independent.
+- [x] **Terrain (detail) noise**: the original Phase 3 layer,
+  frequency unchanged, now amplitude-scaled by continentalness instead
+  of one fixed `kHeightVariation` everywhere.
+- [x] **Found and fixed in the same phase**: `find_dry_spawn_column`'s
+  search radius (64, sized for the old single-frequency noise) could
+  now legitimately never leave one giant ocean basin - confirmed for
+  real (seed 1337 needed radius 84, not implausible as originally
+  assumed). Fixed by raising `kMaxRadius` to 1024 on both
+  `VoxelClient`/`VoxelServer` and rewriting the ring search from
+  O(ring-area) (re-scanning the full square, skipping most cells) to
+  O(ring-perimeter) (only the new ring's boundary), keeping the worst
+  case fast.
+- [x] 1 worldgen test's height-range bounds widened (measured
+  empirically via a real 20-seed sweep: [-15,20], set to [-20,30] for
+  headroom); 1 new test (`LocalRoughnessVariesAcrossRegions`)
+  confirming local terrain roughness now genuinely varies by region.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn
+  column (-84,-84) found for seed 1337 in 0.23s wall-clock, dry land,
+  full sky light 5 blocks above), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs, and a real two-process
+  networked run where client and server independently compute the
+  identical spawn column and the server-reconciled position lands on
+  dry land, zero warnings/errors.
+
+`ctest` 394/394 (bgfx, up from 393) / 391/391 (non-bgfx, up from 390).
+
+Honestly scoped: **what the new mountain/continental terrain shape
+actually looks like on a real GPU/display is still NOT VERIFIED —
+ENVIRONMENT LIMITATION**; no ridged-multifractal/erosion mountain
+shaping (a deliberately scoped, honest simplification, not a shortcut
+hiding a gap - see DECISIONS.md); still no climate/biome/caves/ores/
+structures/vegetation stages (Phases 39-41).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

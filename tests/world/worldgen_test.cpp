@@ -1,7 +1,10 @@
 #include "lcu/world/worldgen.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <unordered_map>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -32,17 +35,60 @@ TEST(Worldgen, DifferentSeedsProduceDifferentTerrainSomewhere) {
 }
 
 TEST(Worldgen, HeightStaysWithinAReasonableRange) {
-    // Phase 37: centered on kSeaLevel (0), analytically bounded to
-    // +/-20 (kHeightVariation in worldgen.cpp) - some margin beyond
-    // that for the 4-octave fractal sum's own floating-point rounding,
-    // not because the range itself is looser now.
+    // Phase 38: continental-amplitude-modulated terrain - the
+    // analytical worst case (deepest ocean base minus its own amplitude,
+    // or highest highland base plus its own amplitude, see worldgen.cpp's
+    // kDeepOceanBase/kHighlandBase/kMin-/kMaxMountainAmplitude) is wider
+    // than what the smoothed multi-octave noise actually reaches in
+    // practice (both stages would have to hit their own extreme
+    // simultaneously) - a real 20-seed, wide-area sweep measured
+    // [-15, 20], so these bounds keep real headroom without being loose
+    // enough to miss an actual regression.
     for (lcu::i32 x = -200; x <= 200; x += 37) {
         for (lcu::i32 z = -200; z <= 200; z += 41) {
             const lcu::i32 h = terrain_height(7, x, z);
-            EXPECT_GE(h, -25) << "at (" << x << "," << z << ")";
-            EXPECT_LE(h, 25) << "at (" << x << "," << z << ")";
+            EXPECT_GE(h, -20) << "at (" << x << "," << z << ")";
+            EXPECT_LE(h, 30) << "at (" << x << "," << z << ")";
         }
     }
+}
+
+TEST(Worldgen, LocalRoughnessVariesAcrossRegions) {
+    // Phase 38's real, observable new behavior: terrain is no longer
+    // uniformly bumpy everywhere the way Phase 37's single fixed-
+    // amplitude noise was - a low-continentalness (coastal/oceanic)
+    // region should be comparatively flat, a high-continentalness
+    // (highland) region comparatively rugged. Real proxy, without
+    // needing to reach into the anonymous-namespace continental noise
+    // directly: sample many widely-spaced local neighborhoods' own
+    // height range (max-min within an 8x8 grid of nearby columns) and
+    // confirm that range itself varies meaningfully from window to
+    // window - under the old uniform-amplitude model this would stay
+    // roughly constant (only small per-sample noise), never swinging
+    // between a genuinely flat window and a genuinely rugged one.
+    constexpr lcu::u32 kSeed = 99;
+    std::vector<lcu::i32> local_ranges;
+    for (lcu::i32 cx = -15; cx <= 15; ++cx) {
+        for (lcu::i32 cz = -15; cz <= 15; ++cz) {
+            const lcu::i32 base_x = cx * 40;
+            const lcu::i32 base_z = cz * 40;
+            lcu::i32 local_min = std::numeric_limits<lcu::i32>::max();
+            lcu::i32 local_max = std::numeric_limits<lcu::i32>::min();
+            for (lcu::i32 dx = 0; dx < 8; ++dx) {
+                for (lcu::i32 dz = 0; dz < 8; ++dz) {
+                    const lcu::i32 h = terrain_height(kSeed, base_x + dx * 4, base_z + dz * 4);
+                    local_min = std::min(local_min, h);
+                    local_max = std::max(local_max, h);
+                }
+            }
+            local_ranges.push_back(local_max - local_min);
+        }
+    }
+    const lcu::i32 flattest = *std::min_element(local_ranges.begin(), local_ranges.end());
+    const lcu::i32 roughest = *std::max_element(local_ranges.begin(), local_ranges.end());
+    EXPECT_GT(roughest - flattest, 8) << "flattest local window range=" << flattest
+                                       << ", roughest=" << roughest
+                                       << " - local terrain roughness should vary meaningfully across regions";
 }
 
 TEST(Worldgen, AdjacentColumnsAreSmoothNotRandom) {

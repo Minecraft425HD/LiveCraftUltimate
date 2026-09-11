@@ -82,25 +82,42 @@ constexpr lcu::u32 kWorldSeed = 1337;
 // exist yet. Same seed, same deterministic search, so client and
 // server agree on where "spawn" is without needing to send it over
 // the wire.
+//
+// kMaxRadius (Phase 38): worldgen's continental noise stage varies at
+// a much lower frequency than this search radius was originally sized
+// for (~666-block wavelength - see worldgen.cpp's kContinentalNoise
+// Scale) - confirmed via a real search for seed 1337 needing radius 84
+// to find any dry land at all. 1024 gives real headroom; an O(ring-
+// perimeter) search (only the new ring's boundary, not a re-scanned
+// square) keeps even the worst case a fast, one-time startup cost.
 struct SpawnColumn {
     lcu::i32 x = 0;
     lcu::i32 z = 0;
 };
 
 SpawnColumn find_dry_spawn_column(lcu::u32 seed) {
-    if (lcu::world::worldgen::terrain_height(seed, 0, 0) >= lcu::world::worldgen::kSeaLevel) {
+    const auto is_dry = [seed](lcu::i32 x, lcu::i32 z) {
+        return lcu::world::worldgen::terrain_height(seed, x, z) >= lcu::world::worldgen::kSeaLevel;
+    };
+    if (is_dry(0, 0)) {
         return {0, 0};
     }
-    constexpr lcu::i32 kMaxRadius = 64;
+    constexpr lcu::i32 kMaxRadius = 1024;
     for (lcu::i32 radius = 1; radius <= kMaxRadius; ++radius) {
         for (lcu::i32 x = -radius; x <= radius; ++x) {
-            for (lcu::i32 z = -radius; z <= radius; ++z) {
-                if (std::max(std::abs(x), std::abs(z)) != radius) {
-                    continue;
-                }
-                if (lcu::world::worldgen::terrain_height(seed, x, z) >= lcu::world::worldgen::kSeaLevel) {
-                    return {x, z};
-                }
+            if (is_dry(x, -radius)) {
+                return {x, -radius};
+            }
+            if (is_dry(x, radius)) {
+                return {x, radius};
+            }
+        }
+        for (lcu::i32 z = -radius + 1; z <= radius - 1; ++z) {
+            if (is_dry(-radius, z)) {
+                return {-radius, z};
+            }
+            if (is_dry(radius, z)) {
+                return {radius, z};
             }
         }
     }

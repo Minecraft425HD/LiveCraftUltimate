@@ -34,8 +34,9 @@ propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 **Phase 33 (VoxelClient integration + smooth lighting)**,
 **Phase 34 (torch block + lighting benchmarks)**, **Phase 35
 (chunk unload marks neighbors dirty)**, **Phase 36 (entity boxes +
-extended debug overlay)**, and **Phase 37 (sea level at y=0 + water
-block/rendering)** are done; see
+extended debug overlay)**, **Phase 37 (sea level at y=0 + water
+block/rendering)**, and **Phase 38 (continental/mountain terrain)**
+are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1267,6 +1268,46 @@ current/buoyancy/swimming physics; no beach/sand shoreline transition;
 sky light still stops entirely at water's surface (treated opaque like
 any other solid block, an honest consequence of the existing binary
 light model).
+
+**Phase 38 (continental/mountain terrain)**: two genuinely separate
+worldgen noise stages, matching brief section 21's own "kontinental ->
+terrain" pipeline naming for real. A new low-frequency continental
+layer (`kContinentalNoiseScale`, ~666-block wavelength) decides both a
+column's base elevation (`kDeepOceanBase`..`kHighlandBase`) and how
+much amplitude the existing 4-octave detail noise gets to work with
+(`kMinMountainAmplitude`..`kMaxMountainAmplitude`) - coastal/oceanic
+columns stay flat regardless of what the detail layer samples,
+highland columns get real mountain-sized relief. A separate
+`kContinentalSeedOffset` keeps the two noise fields statistically
+independent.
+
+Found and fixed in the same phase: `find_dry_spawn_column`'s search
+radius (64, sized for the old single-frequency noise) could now
+legitimately never leave one giant ocean basin - confirmed for real
+(seed 1337 needed radius 84 to find any dry land at all). Fixed by
+raising `kMaxRadius` to 1024 on both `VoxelClient`/`VoxelServer` and
+rewriting the ring search from O(ring-area) (re-scanning the full
+square, skipping most cells) to O(ring-perimeter) (only the new
+ring's boundary), keeping even the worst case a fast one-time startup
+cost (confirmed via a real run completing in 0.23s wall-clock).
+
+1 worldgen test's height-range bounds widened (measured empirically
+via a real 20-seed sweep: [-15,20], set to [-20,30] for headroom); 1
+new test (`LocalRoughnessVariesAcrossRegions`) confirming local
+terrain roughness now genuinely varies by region, unlike the old
+uniform-amplitude model. Verified via a real `LCU_BUILD_SHADER_
+TOOLS=ON` run (spawn column (-84,-84) found for seed 1337, dry land,
+full sky light), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+`LCU_VERIFY_CRAFT` runs, and a real two-process networked run with
+matching independently-computed spawn columns, zero warnings/errors.
+`ctest` 394/394 (bgfx, up from 393) / 391/391 (non-bgfx, up from 390).
+
+Honestly scoped: **what the new mountain/continental terrain shape
+actually looks like on a real GPU/display is still NOT VERIFIED —
+ENVIRONMENT LIMITATION**; no ridged-multifractal/erosion mountain
+shaping (a deliberately scoped, honest simplification, not a shortcut
+hiding a gap - see DECISIONS.md); still no climate/biome/caves/ores/
+structures/vegetation stages (Phases 39-41).
 
 ## Build Status
 
