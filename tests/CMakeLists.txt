@@ -78,6 +78,15 @@ if(TARGET Lcu::Rendering)
     target_link_libraries(VoxelTests PRIVATE Lcu::Rendering)
 endif()
 
+# MenuStack (Phase 46) is pure logic - no bgfx needed to test its
+# navigation/layout/hit-testing - so this is built alongside
+# Lcu::Platform's own tests, in both the bgfx and non-bgfx configs (see
+# engine/ui/CMakeLists.txt).
+if(TARGET Lcu::Ui)
+    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
+endif()
+
 # Waveform/positional-audio math is pure logic (no real audio device
 # needed); only built alongside engine/audio (LCU_BUILD_CLIENT - see
 # engine/audio/CMakeLists.txt).

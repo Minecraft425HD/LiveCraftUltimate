@@ -39,8 +39,9 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 **Phase 39 (biomes)**, **Phase 40 (caves + ores)**, **Phase 41
 (vegetation)**, **Phase 42 (documentation update)**, **Phase 43
 (input overhaul + mouse look + Minecraft-parity defaults)**,
-**Phase 44 (2D UI framework)**, and **Phase 45 (persistent options)**
-are done; see "Reality Audit" and
+**Phase 44 (2D UI framework)**, **Phase 45 (persistent options)**, and
+**Phase 46 (menu framework: pause/options/controls)** are done; see
+"Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
 cross-chunk global lighting with real performance constraints,
@@ -1605,6 +1606,78 @@ camera's projection - NOT VERIFIED, deferred** (nothing currently
 reads it for rendering; wiring it in with no menu to change it would
 be speculative and unverifiable, so it stays honestly unused until
 Phase 46 gives it a real consumer).
+
+**Phase 46 (menu framework: pause/options/controls)**: real
+`engine/ui::MenuStack` - stacked `MenuScreen`s (title + `MenuItem` rows,
+each with a real `on_activate`/`on_adjust` callback), pure logic with
+zero SDL/bgfx dependency (`engine/ui` now builds under `LCU_BUILD_CLIENT`
+unconditionally, not only `LCU_ENABLE_BGFX` - see DECISIONS.md), so it's
+tested in both the bgfx and non-bgfx configs. `menu_item_layout`/
+`menu_item_at_point` compute each row's real pixel rect from screen size
+alone - the one shared source of truth both drawing and real mouse
+hit-testing read from.
+
+ESC in-game now opens a real Pause screen (Zurueck zum Spiel/Optionen/
+Steuerung/Beenden) instead of only releasing mouse capture, and a
+non-empty `menu_stack` genuinely pauses movement/physics/AI/day-night -
+verified via a real headless run holding `MoveForward` down across the
+pause (position provably unchanged) then again after closing it
+(position provably changed). Network *receive* deliberately keeps
+running while paused, a real, documented deviation from the phase's own
+literal "network pauses too" wording (see DECISIONS.md: halting it
+risked the connection reading as dead by the time the player unpauses) -
+only this client's own outgoing input actually pauses.
+
+Real Options screen (mouse sensitivity/FOV via the existing `LookLeft`/
+`LookRight` actions as +/-, HUD/debug-overlay toggles, save-on-leave).
+**FOV is now genuinely applied to the camera's projection matrix** -
+closes the exact gap Phase 45 deliberately left open. Real Controls
+screen: every rebindable `Action` listed, Enter/click enters a real
+"waiting for input" capture (new `lcu::platform::poll_any_pressed_key`/
+`is_escape_key`, reading real SDL keyboard/mouse state directly - the
+whole point is binding a key nothing uses yet), a release-then-press
+debounce (`rebind_ready`) stops the activating key from immediately
+binding itself, Reset restores every default. New `Action::MenuConfirm`
+(Enter) - both it and `Action::Escape` are deliberately excluded from
+the rebind list.
+
+**A real use-after-free was found and fixed this phase, not just
+theorized about.** A `MenuItem`'s own callback lives inside the
+`MenuScreen` currently on top of the stack; the first implementation
+popped/pushed `menu_stack` directly from inside such a callback,
+destroying (or, for push, potentially reallocating) that very screen -
+including the closure still executing - while it was still running.
+Headless testing with the new `LCU_VERIFY_MENU` hook reproduced this as
+a real segfault. Fixed by deferring every such mutation through a
+`pending_menu_action`, processed once per frame after
+`activate_selected()`/`adjust_selected()` have fully returned - see
+DECISIONS.md for the complete story, including why this needed a
+real crash to surface rather than being caught by inspection alone.
+
+`LCU_VERIFY_MENU` (new): pause/resume with provable movement gating,
+real navigation via edge-detected `LookDown`/`MenuConfirm`, a real
+two-step sensitivity adjustment confirmed by inspecting the saved
+`options.txt` (`0.0022` -> `0.0026`, exactly two real `+0.0002` steps).
+Deliberately does not exercise the controls screen's rebind capture -
+`poll_any_pressed_key` reads real SDL hardware state this sandbox's
+dummy input driver never produces, the same category of gap Phase 43's
+own mouse-look verification already has. 21 new unit tests. Verified
+via the `LCU_VERIFY_MENU` run above, real `LCU_VERIFY_BREAK_PLACE`/
+`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase 45),
+a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader
+programs all still `valid=true`), and a real two-process networked run
+(zero warnings/errors/rejects, matching spawn columns). `ctest`
+455/455 (bgfx, up from 436) / 447/447 (non-bgfx, up from 428).
+
+Honestly scoped: the menu's real on-screen appearance is still **NOT
+VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+pipeline runs, not that it looks right); the controls screen's rebind
+capture is real, reviewed code but **NOT VERIFIED against a real
+keyboard/mouse** (see above); no live Renderdistanz control (deferred,
+PARTIAL - `load_settings.radius_xz` is `const`, live re-streaming is a
+real, separate structural change this phase's own directive explicitly
+allows deferring - see DECISIONS.md); no chat, no multiplayer UI, no
+advancements (out of scope per this phase's own directive).
 
 ## Build Status
 

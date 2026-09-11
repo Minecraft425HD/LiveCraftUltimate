@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <random>
 
 #include "game/components/ai_wander.h"
@@ -46,6 +47,7 @@
 #include "lcu/replication/position_interpolator.h"
 #include "lcu/replication/prediction_buffer.h"
 #include "lcu/serialization/chunk_serializer.h"
+#include "lcu/ui/menu_stack.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/voxel/chunk_coord.h"
@@ -68,6 +70,7 @@
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
 #include "lcu/ui/debug_overlay.h"
+#include "lcu/ui/menu_renderer.h"
 #endif
 
 namespace {
@@ -217,6 +220,39 @@ constexpr lcu::u64 kVerifyPlaceFrame = 6;
 // proves PlaceBlock now places whatever's selected, not just the
 // hardcoded game:stone default - see "Hotbar item selection" below.
 constexpr lcu::u64 kVerifyCycleHotbarFrame = 5;
+
+// A third, independent headless hook (LCU_VERIFY_MENU, Phase 46): opens
+// the pause menu, holds MoveForward while paused (must NOT move the
+// player - the whole point of this check), navigates into Options,
+// adjusts mouse sensitivity, saves back out to the pause screen, closes
+// the menu, then holds MoveForward again while resumed (must move the
+// player this time) - a real, end-to-end exercise of "menu open ==
+// simulation paused" and real menu navigation, not a mock of either.
+constexpr lcu::u64 kVerifyMenuOpenFrame = 5;
+constexpr lcu::u64 kVerifyMenuMoveWhilePausedStart = 6;
+constexpr lcu::u64 kVerifyMenuMoveWhilePausedEnd = 35;
+constexpr lcu::u64 kVerifyMenuNavigateToOptionsFrame = 40;
+constexpr lcu::u64 kVerifyMenuOpenOptionsFrame = 41;
+// Every one of the single-frame presses below needs at least one real
+// released frame before the next press of the *same* action - edge
+// detection compares against the PREVIOUS frame's InputState, so two
+// presses of the same action on directly adjacent frame numbers would
+// never produce a second real edge (this was a genuine bug caught by
+// this exact hook during headless testing - see DECISIONS.md).
+constexpr lcu::u64 kVerifyMenuAdjustSensitivityFrame1 = 42;
+constexpr lcu::u64 kVerifyMenuAdjustSensitivityFrame2 = 44;
+// 4 LookDown presses (one every other frame) to reach "Zurueck", the
+// 5th row (index 4) of the 5-item Options screen, from its default
+// selection (index 0) - see build_options_screen's own item order
+// below.
+constexpr lcu::u64 kVerifyMenuNavigateToBackFrame1 = 46;
+constexpr lcu::u64 kVerifyMenuNavigateToBackFrame2 = 48;
+constexpr lcu::u64 kVerifyMenuNavigateToBackFrame3 = 50;
+constexpr lcu::u64 kVerifyMenuNavigateToBackFrame4 = 52;
+constexpr lcu::u64 kVerifyMenuActivateBackFrame = 54;
+constexpr lcu::u64 kVerifyMenuCloseFrame = 56;
+constexpr lcu::u64 kVerifyMenuMoveWhileResumedStart = 58;
+constexpr lcu::u64 kVerifyMenuMoveWhileResumedEnd = 87;
 
 // A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
 // breaks the grass block the player spawns on, then the dirt block
@@ -1342,6 +1378,18 @@ int main() {
     lcu::f32 last_known_fps = 0.0f;  // updated only on frame_stats' periodic reports (see below); drives the on-screen debug overlay
 #endif
 
+    // Headless verification hook for the pause menu (Phase 46): drives
+    // ESC/navigate/adjust/ESC through InputState the same way every
+    // other LCU_VERIFY_* hook drives real gameplay actions - see the
+    // frame-numbered block below. Deliberately does NOT try to exercise
+    // the controls screen's "press any key to rebind" capture: that
+    // reads real SDL keyboard/mouse hardware state directly
+    // (poll_any_pressed_key), which the dummy video/input driver this
+    // sandbox runs under never actually produces (same real, honest gap
+    // Phase 43's own mouse-look verification already has - see
+    // DECISIONS.md).
+    const bool verify_menu = std::getenv("LCU_VERIFY_MENU") != nullptr;
+
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
     const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
     int verify_craft_step = 0;
@@ -1370,31 +1418,376 @@ int main() {
     lcu::u64 frame = 0;
     auto last_tick = std::chrono::steady_clock::now();
 
+    // Real pause menu (Phase 46, brief section 60's menu framework):
+    // ESC in-game now opens this instead of only releasing mouse
+    // capture (Phase 43's own behavior stays as a side effect - opening
+    // the menu still needs the cursor free to click rows). `menu_stack`
+    // being non-empty *is* "paused" - there is no separate bool to ever
+    // drift out of sync with it (see the `paused` local computed fresh
+    // every frame below).
+    lcu::ui::MenuStack menu_stack;
+    bool quit_requested = false;
+
+    // Real "press any key to rebind" capture (Phase 46's controls
+    // screen): set by a row's on_activate, consumed by
+    // lcu::platform::poll_any_pressed_key() below once per frame while
+    // true. ESC cancels without changing the binding (see is_escape_key
+    // below) - it does not also pop the controls screen the way it
+    // normally would, so accidentally hitting ESC to cancel a capture
+    // doesn't also kick the player back to the pause screen.
+    bool waiting_for_rebind = false;
+    bool rebind_ready = false;
+    lcu::platform::Action rebind_action = lcu::platform::Action::Jump;
+    lcu::usize rebind_slot = 0;
+
+    // Real per-frame-deferred menu-stack mutation (Phase 46): a
+    // MenuItem callback (on_activate/on_adjust) is invoked FROM INSIDE
+    // that same item's own storage - it lives in the MenuScreen
+    // currently on top of menu_stack. Popping/pushing/clearing
+    // menu_stack DIRECTLY from within such a callback would destroy (or,
+    // for push_back, potentially reallocate and move) that very
+    // MenuScreen - including the closure currently executing - while
+    // its own code is still running, a real use-after-free (this was
+    // reproduced as a real, verified segfault during headless testing
+    // before this fix - see DECISIONS.md). So every callback below that
+    // needs to change which screen is on top only ever *records* what
+    // to do here; the actual push/pop/clear happens once, after
+    // activate_selected()/adjust_selected() has fully returned, back in
+    // the main loop where nothing is executing from the old screen's
+    // storage anymore.
+    std::function<void()> pending_menu_action;
+
+    // Forward-declared as std::function (not auto/lambda) so
+    // build_options_screen/build_controls_screen can reference
+    // themselves (to rebuild their own screen after a value changes) -
+    // a plain lambda can't reference itself by name before it's fully
+    // defined, a mutable std::function variable can.
+    std::function<lcu::ui::MenuScreen()> build_pause_screen;
+    std::function<lcu::ui::MenuScreen()> build_options_screen;
+    std::function<lcu::ui::MenuScreen()> build_controls_screen;
+
+    build_pause_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Pause";
+        screen.items.push_back(
+            {"Zurueck zum Spiel", "", [&]() { pending_menu_action = [&]() { menu_stack.clear(); }; }, nullptr});
+        screen.items.push_back({"Optionen", "",
+                                 [&]() { pending_menu_action = [&]() { menu_stack.push(build_options_screen()); }; },
+                                 nullptr});
+        screen.items.push_back({"Steuerung", "",
+                                 [&]() { pending_menu_action = [&]() { menu_stack.push(build_controls_screen()); }; },
+                                 nullptr});
+        screen.items.push_back({"Beenden", "", [&]() { quit_requested = true; }, nullptr});
+        return screen;
+    };
+
+    build_options_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Optionen";
+
+        // Schedules this same screen to be rebuilt from `options`'
+        // current values, re-selecting whatever row was selected before
+        // - the simplest real way to keep every row's displayed
+        // value_text in sync with the option it names, at the cost of
+        // reconstructing a handful of small MenuItems on every change
+        // (real, not noticeable - these screens are a few rows, not
+        // thousands). Deferred via pending_menu_action, not run
+        // immediately - see its own doc comment above for why.
+        const auto schedule_rebuild = [&]() {
+            pending_menu_action = [&]() {
+                const lcu::usize index = menu_stack.top().selected_index;
+                menu_stack.pop();
+                menu_stack.push(build_options_screen());
+                menu_stack.select_index(index);
+            };
+        };
+
+        lcu::ui::MenuItem sensitivity;
+        sensitivity.label = "Maus-Empfindlichkeit";
+        sensitivity.value_text = fmt::format("{:.4f}", options.mouse_sensitivity);
+        sensitivity.on_adjust = [&, schedule_rebuild](lcu::i32 direction) {
+            options.mouse_sensitivity =
+                std::clamp(options.mouse_sensitivity + static_cast<lcu::f32>(direction) * 0.0002f, 0.0002f, 0.02f);
+            schedule_rebuild();
+        };
+        screen.items.push_back(std::move(sensitivity));
+
+        lcu::ui::MenuItem fov;
+        fov.label = "Sichtfeld (FOV)";
+        fov.value_text = std::to_string(options.fov);
+        fov.on_adjust = [&, schedule_rebuild](lcu::i32 direction) {
+            options.fov = std::clamp(options.fov + direction * 5, 30, 110);
+            schedule_rebuild();
+        };
+        screen.items.push_back(std::move(fov));
+
+        lcu::ui::MenuItem hud;
+        hud.label = "HUD";
+        hud.value_text = options.hud_enabled ? "AN" : "AUS";
+        hud.on_activate = [&, schedule_rebuild]() {
+            options.hud_enabled = !options.hud_enabled;
+            schedule_rebuild();
+        };
+        screen.items.push_back(std::move(hud));
+
+        lcu::ui::MenuItem debug_overlay;
+        debug_overlay.label = "Debug-Overlay";
+        debug_overlay.value_text = options.debug_overlay_enabled ? "AN" : "AUS";
+        debug_overlay.on_activate = [&, schedule_rebuild]() {
+            options.debug_overlay_enabled = !options.debug_overlay_enabled;
+            schedule_rebuild();
+        };
+        screen.items.push_back(std::move(debug_overlay));
+
+        // Real "Renderdistanz" is deliberately NOT a row here - the
+        // streaming radius (`load_settings.radius_xz` below) is `const`
+        // and re-streaming/unloading on a live radius change is a real,
+        // separate structural change this phase's own directive allows
+        // deferring as PARTIAL (see DECISIONS.md) rather than shipping
+        // a +/- row that would visibly do nothing.
+        lcu::ui::MenuItem back;
+        back.label = "Zurueck";
+        back.on_activate = [&]() {
+            options.save(options_path);
+            LCU_LOG_INFO("Saved options to \"{}\"", options_path);
+            pending_menu_action = [&]() { menu_stack.pop(); };
+        };
+        screen.items.push_back(std::move(back));
+
+        return screen;
+    };
+
+    build_controls_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Steuerung";
+
+        for (lcu::usize i = 0; i < static_cast<lcu::usize>(lcu::platform::Action::Count); ++i) {
+            const auto action = static_cast<lcu::platform::Action>(i);
+            // Escape/MenuConfirm are deliberately not listed - real
+            // menu-meta actions, not rebindable from this screen (see
+            // their own doc comments in input.h).
+            if (action == lcu::platform::Action::Escape || action == lcu::platform::Action::MenuConfirm) {
+                continue;
+            }
+            lcu::ui::MenuItem item;
+            item.label = lcu::platform::action_name(action);
+            item.value_text = lcu::platform::physical_key_name(options.key_bindings.bindings_for(action)[0]);
+            item.on_activate = [&, action]() {
+                waiting_for_rebind = true;
+                rebind_ready = false;
+                rebind_action = action;
+                rebind_slot = 0;
+                LCU_LOG_INFO("Waiting for a new binding for {} (ESC cancels)...",
+                             lcu::platform::action_name(action));
+            };
+            screen.items.push_back(std::move(item));
+        }
+
+        lcu::ui::MenuItem reset;
+        reset.label = "Reset";
+        reset.on_activate = [&]() {
+            options.key_bindings.reset_to_defaults();
+            LCU_LOG_INFO("Controls reset to defaults");
+            pending_menu_action = [&]() {
+                const lcu::usize index = menu_stack.top().selected_index;
+                menu_stack.pop();
+                menu_stack.push(build_controls_screen());
+                menu_stack.select_index(index);
+            };
+        };
+        screen.items.push_back(std::move(reset));
+
+        lcu::ui::MenuItem back;
+        back.label = "Zurueck";
+        back.on_activate = [&]() {
+            options.save(options_path);
+            LCU_LOG_INFO("Saved options to \"{}\"", options_path);
+            pending_menu_action = [&]() { menu_stack.pop(); };
+        };
+        screen.items.push_back(std::move(back));
+
+        return screen;
+    };
+
     while (window.pump_events()) {
         input_backend.update(options.key_bindings, input);
 
-        // Real mouse-capture management (Phase 43): ESC/Tab or losing
-        // window focus releases capture; clicking while free re-captures
-        // it. The re-capture click must not ALSO register as a break/
-        // place action the same frame - a real game treats "the click
-        // that got focus back" as consumed by that alone, not a
-        // double-purpose input - so suppress_click_for_recapture is
-        // threaded down to interact_pressed/place_pressed's own
-        // edge-detection below.
+        // LCU_VERIFY_MENU (Phase 46) - overrides real (always-unpressed
+        // under this sandbox's dummy input driver) polled state with
+        // synthetic edges, same as every other LCU_VERIFY_* hook. Placed
+        // here, right after input_backend.update() and before the real
+        // escape/menu-navigation logic below, so those real code paths
+        // see this frame's synthetic input the same way they'd see a
+        // real key press - not one frame late.
+        if (verify_menu) {
+            input.set_down(lcu::platform::Action::Escape,
+                            frame == kVerifyMenuOpenFrame || frame == kVerifyMenuCloseFrame);
+            input.set_down(lcu::platform::Action::MoveForward,
+                            (frame >= kVerifyMenuMoveWhilePausedStart && frame <= kVerifyMenuMoveWhilePausedEnd) ||
+                                (frame >= kVerifyMenuMoveWhileResumedStart && frame <= kVerifyMenuMoveWhileResumedEnd));
+            input.set_down(lcu::platform::Action::LookDown,
+                            frame == kVerifyMenuNavigateToOptionsFrame || frame == kVerifyMenuNavigateToBackFrame1 ||
+                                frame == kVerifyMenuNavigateToBackFrame2 || frame == kVerifyMenuNavigateToBackFrame3 ||
+                                frame == kVerifyMenuNavigateToBackFrame4);
+            input.set_down(lcu::platform::Action::LookRight, frame == kVerifyMenuAdjustSensitivityFrame1 ||
+                                                                    frame == kVerifyMenuAdjustSensitivityFrame2);
+            input.set_down(lcu::platform::Action::MenuConfirm,
+                            frame == kVerifyMenuOpenOptionsFrame || frame == kVerifyMenuActivateBackFrame);
+            if (frame == kVerifyMenuMoveWhilePausedStart) {
+                LCU_LOG_INFO("Menu verify: player position before paused-movement attempt: ({:.2f}, {:.2f}, {:.2f})",
+                             player.aabb.center().x, player.aabb.center().y, player.aabb.center().z);
+            }
+            if (frame == kVerifyMenuMoveWhilePausedEnd) {
+                LCU_LOG_INFO("Menu verify: player position after paused-movement attempt (should be unchanged): "
+                             "({:.2f}, {:.2f}, {:.2f})",
+                             player.aabb.center().x, player.aabb.center().y, player.aabb.center().z);
+            }
+            if (frame == kVerifyMenuMoveWhileResumedStart) {
+                LCU_LOG_INFO(
+                    "Menu verify: player position before resumed-movement attempt: ({:.2f}, {:.2f}, {:.2f})",
+                    player.aabb.center().x, player.aabb.center().y, player.aabb.center().z);
+            }
+            if (frame == kVerifyMenuMoveWhileResumedEnd) {
+                LCU_LOG_INFO("Menu verify: player position after resumed-movement attempt (should have moved): "
+                             "({:.2f}, {:.2f}, {:.2f})",
+                             player.aabb.center().x, player.aabb.center().y, player.aabb.center().z);
+            }
+        }
+
+        // Real mouse-capture management (Phase 43, extended Phase 46):
+        // ESC/Tab or losing window focus releases capture; clicking
+        // while free re-captures it. The re-capture click must not ALSO
+        // register as a break/place action the same frame - a real game
+        // treats "the click that got focus back" as consumed by that
+        // alone, not a double-purpose input - so
+        // suppress_click_for_recapture is threaded down to
+        // interact_pressed/place_pressed's own edge-detection below.
         const bool escape_pressed =
             input.is_down(lcu::platform::Action::Escape) && !previous_input.is_down(lcu::platform::Action::Escape);
-        if (escape_pressed && window.relative_mouse_mode()) {
-            window.set_relative_mouse_mode(false);
+
+        // Real "press any key to rebind" capture (Phase 46's controls
+        // screen) - polled once per frame, before the pause-toggle
+        // logic below, so the very ESC press that cancels a capture
+        // never also closes the whole menu that same frame. Requires
+        // the physical keyboard/mouse to read fully released at least
+        // once after entering this mode (rebind_ready) before accepting
+        // a real capture - otherwise the same Enter/click that opened
+        // "waiting for input" would immediately bind itself, since
+        // poll_any_pressed_key() sees currently-held state, not edges.
+        if (waiting_for_rebind) {
+            const lcu::platform::PhysicalKey polled = lcu::platform::poll_any_pressed_key();
+            if (!rebind_ready) {
+                if (polled == lcu::platform::kUnboundKey) {
+                    rebind_ready = true;
+                }
+            } else if (polled != lcu::platform::kUnboundKey) {
+                if (lcu::platform::is_escape_key(polled)) {
+                    LCU_LOG_INFO("Rebind cancelled");
+                } else {
+                    options.key_bindings.bind(rebind_action, rebind_slot, polled);
+                    LCU_LOG_INFO("Bound {} to {}", lcu::platform::action_name(rebind_action),
+                                 lcu::platform::physical_key_name(polled));
+                    if (!menu_stack.empty()) {
+                        const lcu::usize index = menu_stack.top().selected_index;
+                        menu_stack.pop();
+                        menu_stack.push(build_controls_screen());
+                        menu_stack.select_index(index);
+                    }
+                }
+                waiting_for_rebind = false;
+                rebind_ready = false;
+            }
+        }
+
+        // ESC opens the pause menu from gameplay, or pops one screen
+        // back while a menu is already open (popping the last screen
+        // closes it and re-captures the mouse) - see Phase 46's own
+        // directive. Suppressed while actively capturing a rebind so
+        // ESC cancels that instead (handled above).
+        if (escape_pressed && !waiting_for_rebind) {
+            if (menu_stack.empty()) {
+                menu_stack.push(build_pause_screen());
+                window.set_relative_mouse_mode(false);
+            } else {
+                menu_stack.pop();
+                if (menu_stack.empty()) {
+                    window.set_relative_mouse_mode(true);
+                }
+            }
         }
         if (window.consume_focus_lost() && window.relative_mouse_mode()) {
             window.set_relative_mouse_mode(false);
         }
         bool suppress_click_for_recapture = false;
-        if (!window.relative_mouse_mode() &&
+        if (menu_stack.empty() && !window.relative_mouse_mode() &&
             (input.is_down(lcu::platform::Action::Interact) || input.is_down(lcu::platform::Action::PlaceBlock))) {
             window.set_relative_mouse_mode(true);
             suppress_click_for_recapture = true;
         }
+
+        // Real menu navigation (Phase 46): while a menu is open, the
+        // existing LookUp/Down/Left/Right actions (already bound to the
+        // arrow keys, see input.h's own doc comment on why they still
+        // exist alongside mouse-look) drive selection/value-adjustment
+        // instead of the camera, MenuConfirm (Enter) activates the
+        // selected row, and a real click hit-tests against the row the
+        // cursor is actually over (menu_item_at_point) rather than
+        // whatever happens to be selected. Escape is handled above
+        // (pop/close), not here.
+        if (!menu_stack.empty() && !waiting_for_rebind) {
+            if (input.is_down(lcu::platform::Action::LookUp) && !previous_input.is_down(lcu::platform::Action::LookUp)) {
+                menu_stack.move_selection(-1);
+            }
+            if (input.is_down(lcu::platform::Action::LookDown) &&
+                !previous_input.is_down(lcu::platform::Action::LookDown)) {
+                menu_stack.move_selection(1);
+            }
+            if (input.is_down(lcu::platform::Action::LookLeft) &&
+                !previous_input.is_down(lcu::platform::Action::LookLeft)) {
+                menu_stack.adjust_selected(-1);
+            }
+            if (input.is_down(lcu::platform::Action::LookRight) &&
+                !previous_input.is_down(lcu::platform::Action::LookRight)) {
+                menu_stack.adjust_selected(1);
+            }
+            if (input.is_down(lcu::platform::Action::MenuConfirm) &&
+                !previous_input.is_down(lcu::platform::Action::MenuConfirm)) {
+                menu_stack.activate_selected();
+            }
+            if (input.is_down(lcu::platform::Action::Interact) &&
+                !previous_input.is_down(lcu::platform::Action::Interact)) {
+                const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
+                const auto hit_index =
+                    lcu::ui::menu_item_at_point(menu_stack.top(), static_cast<lcu::u32>(window.width()),
+                                                 static_cast<lcu::u32>(window.height()), mouse_pos.x, mouse_pos.y);
+                if (hit_index) {
+                    menu_stack.select_index(*hit_index);
+                    menu_stack.activate_selected();
+                }
+            }
+            const lcu::f32 menu_wheel_delta = window.consume_wheel_delta_y();
+            if (menu_wheel_delta > 0.0f) {
+                menu_stack.move_selection(-1);
+            } else if (menu_wheel_delta < 0.0f) {
+                menu_stack.move_selection(1);
+            }
+        }
+
+        // Runs any menu_stack push/pop/clear a row's callback scheduled
+        // above (activate_selected()/adjust_selected() only ever record
+        // these via pending_menu_action, never mutate menu_stack
+        // directly - see its own doc comment for the real
+        // use-after-free this avoids). Safe here: activate_selected()/
+        // adjust_selected() have both fully returned by this point, so
+        // nothing is still executing from whichever screen is about to
+        // be popped/replaced.
+        if (pending_menu_action) {
+            const std::function<void()> action = std::move(pending_menu_action);
+            pending_menu_action = nullptr;
+            action();
+        }
+
+        const bool paused = !menu_stack.empty();
 
         if (verify_break_place) {
             input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
@@ -1676,307 +2069,325 @@ int main() {
                     }
                 }
             }
-        } else {
+        } else if (!paused) {
             game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
         }
-        day_night_cycle.update(delta_seconds);
-
-        // Real mouse-look (Phase 43) - applied additively alongside the
-        // arrow-key fallback below, not instead of it (see Action::LookUp's
-        // own doc comment in input.h). Only while the window actually owns
-        // capture, so a free/uncaptured mouse (e.g. right after alt-tabbing
-        // back, before the recapture click lands) never spuriously spins
-        // the camera from residual/incidental motion.
-        if (window.relative_mouse_mode()) {
-            camera.add_yaw_pitch(input.mouse_delta_x() * options.mouse_sensitivity,
-                                 -input.mouse_delta_y() * options.mouse_sensitivity);
+        // Real pause (Phase 46, brief section 60's menu framework:
+        // "game pauses (simulation, audio, network)"): everything from
+        // here through the end of this frame's break/place/craft/
+        // movement logic is real simulation, so it's skipped outright
+        // while a menu is open - the camera/world/inventory simply
+        // don't advance, not merely "the player can't act". The
+        // networked packet-*receive* loop above deliberately stays
+        // outside this gate even while paused (see DECISIONS.md): fully
+        // halting it risked the connection reading as dead (missed
+        // heartbeats/ChunkData) by the time the player unpauses - only
+        // this client's own *outgoing* input pauses (no predict_and_
+        // record/send call happens below), audio only in the sense that
+        // no new gameplay sound can trigger without the break/place
+        // logic that plays it running.
+        if (!paused) {
+            day_night_cycle.update(delta_seconds);
         }
 
-        if (input.is_down(lcu::platform::Action::LookLeft)) {
-            camera.add_yaw_pitch(-kLookSpeed * delta_seconds, 0.0f);
-        }
-        if (input.is_down(lcu::platform::Action::LookRight)) {
-            camera.add_yaw_pitch(kLookSpeed * delta_seconds, 0.0f);
-        }
-        if (input.is_down(lcu::platform::Action::LookUp)) {
-            camera.add_yaw_pitch(0.0f, kLookSpeed * delta_seconds);
-        }
-        if (input.is_down(lcu::platform::Action::LookDown)) {
-            camera.add_yaw_pitch(0.0f, -kLookSpeed * delta_seconds);
-        }
-
-        const lcu::math::Vec3 move_dir = lcu::player::movement_direction_from_input(input, camera);
-        const lcu::math::Vec3 horizontal_delta = move_dir * (kMoveSpeed * delta_seconds);
-
-        if (input.is_down(lcu::platform::Action::Jump)) {
-            lcu::physics::try_jump(player, physics_config);
-        }
-
-        if (networked) {
-            // Predict locally (so movement feels instant, not delayed by
-            // a round-trip to the server) and record the input for
-            // later reconciliation against the server's PlayerCorrection
-            // - see the PlayerCorrection handling above.
-            ++input_sequence;
-            player = player_predictor.predict_and_record(player, input_sequence, horizontal_delta, delta_seconds);
-            server_connection.send(lcu::network::Channel::UnreliableSequenced,
-                                    protocol::encode_player_input({input_sequence, horizontal_delta, delta_seconds}));
-        } else {
-            lcu::physics::apply_gravity(player, physics_config, delta_seconds);
-            lcu::physics::integrate_player(world, player, horizontal_delta, physics_config, delta_seconds, is_solid);
-        }
-
-        camera.position = {player.aabb.center().x, player.aabb.min.y + kEyeHeight, player.aabb.center().z};
-
-        const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(player.aabb.center());
-        if (current_center != last_streamed_center) {
-            stream_chunks_around(current_center);
-            unload_far_chunks(current_center);
-            LCU_LOG_INFO("Streaming center moved to ({},{},{}) - {} chunk(s) loaded", current_center.x,
-                         current_center.y, current_center.z, world.loaded_chunk_count());
-            last_streamed_center = current_center;
-        }
-
-        // Real mouse-wheel hotbar cycling (Phase 43): SDL only delivers
-        // wheel motion as discrete events (see Window::consume_wheel_delta_y),
-        // so this synthesizes a one-frame "pressed" pulse from it - the
-        // edge-detection below then fires exactly once per scroll notch,
-        // indistinguishable from a real key press (the same shape every
-        // LCU_VERIFY_* hook already uses to drive InputState directly).
-        const lcu::f32 wheel_delta_y = window.consume_wheel_delta_y();
-        if (wheel_delta_y > 0.0f) {
-            input.set_down(lcu::platform::Action::CycleHotbar, true);
-        } else if (wheel_delta_y < 0.0f) {
-            input.set_down(lcu::platform::Action::CycleHotbarPrev, true);
-        }
-
-        const auto hit = lcu::physics::raycast(world, camera.position, camera.forward(), kInteractRange, is_solid);
-
-        const bool interact_pressed = input.is_down(lcu::platform::Action::Interact) &&
-                                       !previous_input.is_down(lcu::platform::Action::Interact) &&
-                                       !suppress_click_for_recapture;
-        const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
-                                    !previous_input.is_down(lcu::platform::Action::PlaceBlock) &&
-                                    !suppress_click_for_recapture;
-        const bool pick_block_pressed = input.is_down(lcu::platform::Action::PickBlock) &&
-                                         !previous_input.is_down(lcu::platform::Action::PickBlock) &&
-                                         !suppress_click_for_recapture;
-        const bool cycle_hotbar_pressed = input.is_down(lcu::platform::Action::CycleHotbar) &&
-                                           !previous_input.is_down(lcu::platform::Action::CycleHotbar);
-        const bool cycle_hotbar_prev_pressed = input.is_down(lcu::platform::Action::CycleHotbarPrev) &&
-                                                !previous_input.is_down(lcu::platform::Action::CycleHotbarPrev);
-        const bool craft_pressed =
-            input.is_down(lcu::platform::Action::Craft) && !previous_input.is_down(lcu::platform::Action::Craft);
-
-        if (cycle_hotbar_pressed) {
-            selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
-            LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
-        }
-        if (cycle_hotbar_prev_pressed) {
-            selected_placeable_index =
-                (selected_placeable_index + placeable_items.size() - 1) % placeable_items.size();
-            LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
-        }
-
-        // Direct number-row hotbar selection (Phase 43): SelectHotbar1..9
-        // are declared consecutively in Action (see input.h), so this
-        // walks them as one contiguous range instead of 9 near-identical
-        // if-blocks. A slot with no matching placeable_items entry (5-9,
-        // today - only 4 placeable items exist) is a real, silent no-op,
-        // not a crash or a wraparound onto some other slot.
-        for (lcu::usize i = 0; i < 9; ++i) {
-            const auto slot_action =
-                static_cast<lcu::platform::Action>(static_cast<lcu::u8>(lcu::platform::Action::SelectHotbar1) + i);
-            if (input.is_down(slot_action) && !previous_input.is_down(slot_action)) {
-                if (i < placeable_items.size()) {
-                    selected_placeable_index = i;
-                    LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
-                }
-                break;
+        if (!paused) {
+            // Real mouse-look (Phase 43) - applied additively alongside the
+            // arrow-key fallback below, not instead of it (see Action::LookUp's
+            // own doc comment in input.h). Only while the window actually owns
+            // capture, so a free/uncaptured mouse (e.g. right after alt-tabbing
+            // back, before the recapture click lands) never spuriously spins
+            // the camera from residual/incidental motion.
+            if (window.relative_mouse_mode()) {
+                camera.add_yaw_pitch(input.mouse_delta_x() * options.mouse_sensitivity,
+                                     -input.mouse_delta_y() * options.mouse_sensitivity);
             }
-        }
 
-        if (pick_block_pressed && hit) {
-            // Real "middle-click to pick block" (Phase 43) - selects
-            // whichever placeable_items entry matches the looked-at
-            // block, without granting the item (the player still needs
-            // to actually hold it to place - see place_pressed below).
-            // A silent no-op if the block has no placeable entry (e.g.
-            // looking at an ore/cave-only block with no matching hotbar
-            // slot yet).
-            bool found_placeable = false;
-            for (lcu::usize i = 0; i < placeable_items.size(); ++i) {
-                if (placeable_items[i].block_id == hit->block) {
-                    selected_placeable_index = i;
-                    LCU_LOG_INFO("Picked block into hotbar: {}", placeable_items[selected_placeable_index].name);
-                    found_placeable = true;
+            if (input.is_down(lcu::platform::Action::LookLeft)) {
+                camera.add_yaw_pitch(-kLookSpeed * delta_seconds, 0.0f);
+            }
+            if (input.is_down(lcu::platform::Action::LookRight)) {
+                camera.add_yaw_pitch(kLookSpeed * delta_seconds, 0.0f);
+            }
+            if (input.is_down(lcu::platform::Action::LookUp)) {
+                camera.add_yaw_pitch(0.0f, kLookSpeed * delta_seconds);
+            }
+            if (input.is_down(lcu::platform::Action::LookDown)) {
+                camera.add_yaw_pitch(0.0f, -kLookSpeed * delta_seconds);
+            }
+
+            const lcu::math::Vec3 move_dir = lcu::player::movement_direction_from_input(input, camera);
+            const lcu::math::Vec3 horizontal_delta = move_dir * (kMoveSpeed * delta_seconds);
+
+            if (input.is_down(lcu::platform::Action::Jump)) {
+                lcu::physics::try_jump(player, physics_config);
+            }
+
+            if (networked) {
+                // Predict locally (so movement feels instant, not delayed by
+                // a round-trip to the server) and record the input for
+                // later reconciliation against the server's PlayerCorrection
+                // - see the PlayerCorrection handling above.
+                ++input_sequence;
+                player = player_predictor.predict_and_record(player, input_sequence, horizontal_delta, delta_seconds);
+                server_connection.send(lcu::network::Channel::UnreliableSequenced,
+                                        protocol::encode_player_input({input_sequence, horizontal_delta, delta_seconds}));
+            } else {
+                lcu::physics::apply_gravity(player, physics_config, delta_seconds);
+                lcu::physics::integrate_player(world, player, horizontal_delta, physics_config, delta_seconds, is_solid);
+            }
+
+            camera.position = {player.aabb.center().x, player.aabb.min.y + kEyeHeight, player.aabb.center().z};
+
+            const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(player.aabb.center());
+            if (current_center != last_streamed_center) {
+                stream_chunks_around(current_center);
+                unload_far_chunks(current_center);
+                LCU_LOG_INFO("Streaming center moved to ({},{},{}) - {} chunk(s) loaded", current_center.x,
+                             current_center.y, current_center.z, world.loaded_chunk_count());
+                last_streamed_center = current_center;
+            }
+
+            // Real mouse-wheel hotbar cycling (Phase 43): SDL only delivers
+            // wheel motion as discrete events (see Window::consume_wheel_delta_y),
+            // so this synthesizes a one-frame "pressed" pulse from it - the
+            // edge-detection below then fires exactly once per scroll notch,
+            // indistinguishable from a real key press (the same shape every
+            // LCU_VERIFY_* hook already uses to drive InputState directly).
+            const lcu::f32 wheel_delta_y = window.consume_wheel_delta_y();
+            if (wheel_delta_y > 0.0f) {
+                input.set_down(lcu::platform::Action::CycleHotbar, true);
+            } else if (wheel_delta_y < 0.0f) {
+                input.set_down(lcu::platform::Action::CycleHotbarPrev, true);
+            }
+
+            const auto hit = lcu::physics::raycast(world, camera.position, camera.forward(), kInteractRange, is_solid);
+
+            const bool interact_pressed = input.is_down(lcu::platform::Action::Interact) &&
+                                           !previous_input.is_down(lcu::platform::Action::Interact) &&
+                                           !suppress_click_for_recapture;
+            const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
+                                        !previous_input.is_down(lcu::platform::Action::PlaceBlock) &&
+                                        !suppress_click_for_recapture;
+            const bool pick_block_pressed = input.is_down(lcu::platform::Action::PickBlock) &&
+                                             !previous_input.is_down(lcu::platform::Action::PickBlock) &&
+                                             !suppress_click_for_recapture;
+            const bool cycle_hotbar_pressed = input.is_down(lcu::platform::Action::CycleHotbar) &&
+                                               !previous_input.is_down(lcu::platform::Action::CycleHotbar);
+            const bool cycle_hotbar_prev_pressed = input.is_down(lcu::platform::Action::CycleHotbarPrev) &&
+                                                    !previous_input.is_down(lcu::platform::Action::CycleHotbarPrev);
+            const bool craft_pressed =
+                input.is_down(lcu::platform::Action::Craft) && !previous_input.is_down(lcu::platform::Action::Craft);
+
+            if (cycle_hotbar_pressed) {
+                selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
+                LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+            }
+            if (cycle_hotbar_prev_pressed) {
+                selected_placeable_index =
+                    (selected_placeable_index + placeable_items.size() - 1) % placeable_items.size();
+                LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+            }
+
+            // Direct number-row hotbar selection (Phase 43): SelectHotbar1..9
+            // are declared consecutively in Action (see input.h), so this
+            // walks them as one contiguous range instead of 9 near-identical
+            // if-blocks. A slot with no matching placeable_items entry (5-9,
+            // today - only 4 placeable items exist) is a real, silent no-op,
+            // not a crash or a wraparound onto some other slot.
+            for (lcu::usize i = 0; i < 9; ++i) {
+                const auto slot_action =
+                    static_cast<lcu::platform::Action>(static_cast<lcu::u8>(lcu::platform::Action::SelectHotbar1) + i);
+                if (input.is_down(slot_action) && !previous_input.is_down(slot_action)) {
+                    if (i < placeable_items.size()) {
+                        selected_placeable_index = i;
+                        LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+                    }
                     break;
                 }
             }
-            if (!found_placeable) {
-                LCU_LOG_DEBUG("PickBlock: no placeable hotbar entry for block id {}", hit->block);
-            }
-        }
 
-        if (craft_pressed) {
-            // Quick-craft (Phase 23): auto-assembles a query grid from
-            // one of each *distinct* item type currently held (dedup by
-            // slot scan), then asks RecipeRegistry for a real match -
-            // not a graphical crafting-grid UI (no way to arrange items
-            // into specific cells exists yet - see DECISIONS.md). This
-            // only correctly represents a recipe needing exactly one of
-            // each distinct ingredient type (true of the one recipe
-            // registered above); it isn't a stand-in for a real grid
-            // that could hold >1 of the same item in different cells.
-            std::vector<lcu::items::ItemId> craft_grid;
-            for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
-                const lcu::items::ItemId slot_item = player_inventory.slot_at(slot).item;
-                if (slot_item == lcu::items::kNoItemId) {
-                    continue;
+            if (pick_block_pressed && hit) {
+                // Real "middle-click to pick block" (Phase 43) - selects
+                // whichever placeable_items entry matches the looked-at
+                // block, without granting the item (the player still needs
+                // to actually hold it to place - see place_pressed below).
+                // A silent no-op if the block has no placeable entry (e.g.
+                // looking at an ore/cave-only block with no matching hotbar
+                // slot yet).
+                bool found_placeable = false;
+                for (lcu::usize i = 0; i < placeable_items.size(); ++i) {
+                    if (placeable_items[i].block_id == hit->block) {
+                        selected_placeable_index = i;
+                        LCU_LOG_INFO("Picked block into hotbar: {}", placeable_items[selected_placeable_index].name);
+                        found_placeable = true;
+                        break;
+                    }
                 }
-                if (std::find(craft_grid.begin(), craft_grid.end(), slot_item) == craft_grid.end()) {
-                    craft_grid.push_back(slot_item);
+                if (!found_placeable) {
+                    LCU_LOG_DEBUG("PickBlock: no placeable hotbar entry for block id {}", hit->block);
                 }
             }
-            const lcu::items::ItemStack* result =
-                recipe_registry.find_match(craft_grid, static_cast<lcu::u32>(craft_grid.size()), 1);
-            if (result != nullptr) {
-                // Grid contents == the matched recipe's ingredient
-                // multiset exactly (matches_shapeless requires an exact
-                // multiset match) - since craft_grid holds exactly 1 of
-                // each distinct type by construction, consuming 1 of
-                // each entry consumes exactly what the recipe required,
-                // no more.
-                for (lcu::items::ItemId ingredient : craft_grid) {
-                    player_inventory.remove_item(ingredient, 1);
-                }
-                player_inventory.add_item(item_registry, *result);
-                LCU_LOG_INFO("Crafted {} {} (inventory: {})", result->count,
-                             item_registry.definition_of(result->item).namespaced_id,
-                             player_inventory.count_item(result->item));
-#if defined(LCU_ENABLE_SCRIPTING)
-                mod_event_bus.emit_item_crafted(result->item, result->count);
-#endif
-            } else {
-                LCU_LOG_INFO("No recipe matches your held items");
-            }
-        }
 
-        if (interact_pressed && hit && networked) {
-            // Server-authoritative: send the request and wait for the
-            // broadcast BlockChange to actually mutate this client's
-            // World (see the BlockChange case below) - this client never
-            // mutates its own World speculatively for a block edit the
-            // way it does for movement (see DECISIONS.md "block edits
-            // are not client-predicted").
-            LCU_LOG_INFO("Requesting break at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
-            server_connection.send(lcu::network::Channel::ReliableOrdered,
-                                    protocol::encode_block_action({protocol::BlockActionType::Break, hit->world.x,
-                                                                    hit->world.y, hit->world.z, 0}));
-            // Item pickup is client-authoritative and optimistic - it
-            // happens here, at request time, not in the BlockChange
-            // handler (which runs for every connected client on every
-            // edit, including other players' edits, with no way to
-            // tell "was this my own break"). The server independently
-            // tracks the same three items (Phase 19) and reconciles
-            // this optimistic guess via InventoryUpdate once its own
-            // outcome is known - see DECISIONS.md.
-            grant_item_for_broken_block(hit->block);
-        } else if (interact_pressed && hit) {
-            LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
-            const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
-            if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
-                const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
-                target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
-                const auto light_touched =
-                    update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
-                remesh_and_upload(split.chunk);
-                remesh_edit_neighbors(split.chunk, split.local, light_touched);
-#if defined(LCU_ENABLE_SCRIPTING)
-                mod_event_bus.emit_block_broken(hit->world.x, hit->world.y, hit->world.z, old_id);
-#endif
-                {
-                    const lcu::math::Vec3 block_center{static_cast<lcu::f32>(hit->world.x) + 0.5f,
-                                                         static_cast<lcu::f32>(hit->world.y) + 0.5f,
-                                                         static_cast<lcu::f32>(hit->world.z) + 0.5f};
-                    const lcu::audio::StereoGain pan =
-                        lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
-                    const lcu::f32 attenuation =
-                        lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
-                    audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
+            if (craft_pressed) {
+                // Quick-craft (Phase 23): auto-assembles a query grid from
+                // one of each *distinct* item type currently held (dedup by
+                // slot scan), then asks RecipeRegistry for a real match -
+                // not a graphical crafting-grid UI (no way to arrange items
+                // into specific cells exists yet - see DECISIONS.md). This
+                // only correctly represents a recipe needing exactly one of
+                // each distinct ingredient type (true of the one recipe
+                // registered above); it isn't a stand-in for a real grid
+                // that could hold >1 of the same item in different cells.
+                std::vector<lcu::items::ItemId> craft_grid;
+                for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
+                    const lcu::items::ItemId slot_item = player_inventory.slot_at(slot).item;
+                    if (slot_item == lcu::items::kNoItemId) {
+                        continue;
+                    }
+                    if (std::find(craft_grid.begin(), craft_grid.end(), slot_item) == craft_grid.end()) {
+                        craft_grid.push_back(slot_item);
+                    }
                 }
-                // The broken block hands the player its item - block-break's
-                // first real item consumer (see DECISIONS.md), a direct
-                // 1:1 block->item mapping (stone/grass/dirt as of Phase
-                // 17), not a loot-table system.
-                grant_item_for_broken_block(hit->block);
-            } else {
-                LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
+                const lcu::items::ItemStack* result =
+                    recipe_registry.find_match(craft_grid, static_cast<lcu::u32>(craft_grid.size()), 1);
+                if (result != nullptr) {
+                    // Grid contents == the matched recipe's ingredient
+                    // multiset exactly (matches_shapeless requires an exact
+                    // multiset match) - since craft_grid holds exactly 1 of
+                    // each distinct type by construction, consuming 1 of
+                    // each entry consumes exactly what the recipe required,
+                    // no more.
+                    for (lcu::items::ItemId ingredient : craft_grid) {
+                        player_inventory.remove_item(ingredient, 1);
+                    }
+                    player_inventory.add_item(item_registry, *result);
+                    LCU_LOG_INFO("Crafted {} {} (inventory: {})", result->count,
+                                 item_registry.definition_of(result->item).namespaced_id,
+                                 player_inventory.count_item(result->item));
+    #if defined(LCU_ENABLE_SCRIPTING)
+                    mod_event_bus.emit_item_crafted(result->item, result->count);
+    #endif
+                } else {
+                    LCU_LOG_INFO("No recipe matches your held items");
+                }
             }
-        }
 
-        const PlaceableItem& selected_placeable = placeable_items[selected_placeable_index];
-        if (place_pressed && hit && player_inventory.remove_item(selected_placeable.item_id, 1) == 1) {
-            const lcu::voxel::BlockWorldCoord place_pos{
-                hit->world.x + static_cast<lcu::i64>(hit->normal.x),
-                hit->world.y + static_cast<lcu::i64>(hit->normal.y),
-                hit->world.z + static_cast<lcu::i64>(hit->normal.z),
-            };
-            if (networked) {
-                // See the interact_pressed/BlockActionType::Break branch
-                // above - same server-authoritative pattern. The item is
-                // still consumed client-side immediately (no server-side
-                // inventory exists yet - see DECISIONS.md), so a request
-                // the server ends up rejecting (e.g. the target stopped
-                // being air by the time it's processed) currently isn't
-                // refunded; a real inventory-sync/rejection channel is a
-                // separate, larger feature.
-                LCU_LOG_INFO("Requesting place {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
-                             place_pos.x, place_pos.y, place_pos.z,
-                             player_inventory.count_item(selected_placeable.item_id));
+            if (interact_pressed && hit && networked) {
+                // Server-authoritative: send the request and wait for the
+                // broadcast BlockChange to actually mutate this client's
+                // World (see the BlockChange case below) - this client never
+                // mutates its own World speculatively for a block edit the
+                // way it does for movement (see DECISIONS.md "block edits
+                // are not client-predicted").
+                LCU_LOG_INFO("Requesting break at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
                 server_connection.send(lcu::network::Channel::ReliableOrdered,
-                                        protocol::encode_block_action({protocol::BlockActionType::Place, place_pos.x,
-                                                                        place_pos.y, place_pos.z,
-                                                                        selected_placeable.block_id}));
-            } else {
-                LCU_LOG_INFO("Placing {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
-                             place_pos.x, place_pos.y, place_pos.z,
-                             player_inventory.count_item(selected_placeable.item_id));
-                const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
+                                        protocol::encode_block_action({protocol::BlockActionType::Break, hit->world.x,
+                                                                        hit->world.y, hit->world.z, 0}));
+                // Item pickup is client-authoritative and optimistic - it
+                // happens here, at request time, not in the BlockChange
+                // handler (which runs for every connected client on every
+                // edit, including other players' edits, with no way to
+                // tell "was this my own break"). The server independently
+                // tracks the same three items (Phase 19) and reconciles
+                // this optimistic guess via InventoryUpdate once its own
+                // outcome is known - see DECISIONS.md.
+                grant_item_for_broken_block(hit->block);
+            } else if (interact_pressed && hit) {
+                LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
+                const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                     const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
-                    target->set_block(split.local.x, split.local.y, split.local.z, selected_placeable.block_id);
+                    target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
                     const auto light_touched =
-                        update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
+                        update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
                     remesh_and_upload(split.chunk);
                     remesh_edit_neighbors(split.chunk, split.local, light_touched);
-                    if (selected_placeable.block_id == torch_id) {
-                        // Real confirmation a placed light source actually
-                        // lit itself (Phase 34) - not test-only scaffolding,
-                        // this fires for any real torch placement, headless
-                        // verification included.
-                        const auto placed_light = world_light.block_light_at(
-                            split.chunk, static_cast<lcu::i32>(split.local.x), static_cast<lcu::i32>(split.local.y),
-                            static_cast<lcu::i32>(split.local.z));
-                        LCU_LOG_INFO("Placed game:torch at world ({}, {}, {}): block_light={}", place_pos.x,
-                                     place_pos.y, place_pos.z, placed_light.value_or(0));
-                    }
+    #if defined(LCU_ENABLE_SCRIPTING)
+                    mod_event_bus.emit_block_broken(hit->world.x, hit->world.y, hit->world.z, old_id);
+    #endif
                     {
-                        const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
-                                                             static_cast<lcu::f32>(place_pos.y) + 0.5f,
-                                                             static_cast<lcu::f32>(place_pos.z) + 0.5f};
+                        const lcu::math::Vec3 block_center{static_cast<lcu::f32>(hit->world.x) + 0.5f,
+                                                             static_cast<lcu::f32>(hit->world.y) + 0.5f,
+                                                             static_cast<lcu::f32>(hit->world.z) + 0.5f};
                         const lcu::audio::StereoGain pan =
                             lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
                         const lcu::f32 attenuation =
                             lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
-                        audio_engine.play(place_sound, {pan.left * attenuation, pan.right * attenuation});
+                        audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
                     }
+                    // The broken block hands the player its item - block-break's
+                    // first real item consumer (see DECISIONS.md), a direct
+                    // 1:1 block->item mapping (stone/grass/dirt as of Phase
+                    // 17), not a loot-table system.
+                    grant_item_for_broken_block(hit->block);
                 } else {
-                    LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
-                    player_inventory.add_item(item_registry, {selected_placeable.item_id, 1});
+                    LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
                 }
             }
-        }
+
+            const PlaceableItem& selected_placeable = placeable_items[selected_placeable_index];
+            if (place_pressed && hit && player_inventory.remove_item(selected_placeable.item_id, 1) == 1) {
+                const lcu::voxel::BlockWorldCoord place_pos{
+                    hit->world.x + static_cast<lcu::i64>(hit->normal.x),
+                    hit->world.y + static_cast<lcu::i64>(hit->normal.y),
+                    hit->world.z + static_cast<lcu::i64>(hit->normal.z),
+                };
+                if (networked) {
+                    // See the interact_pressed/BlockActionType::Break branch
+                    // above - same server-authoritative pattern. The item is
+                    // still consumed client-side immediately (no server-side
+                    // inventory exists yet - see DECISIONS.md), so a request
+                    // the server ends up rejecting (e.g. the target stopped
+                    // being air by the time it's processed) currently isn't
+                    // refunded; a real inventory-sync/rejection channel is a
+                    // separate, larger feature.
+                    LCU_LOG_INFO("Requesting place {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
+                                 place_pos.x, place_pos.y, place_pos.z,
+                                 player_inventory.count_item(selected_placeable.item_id));
+                    server_connection.send(lcu::network::Channel::ReliableOrdered,
+                                            protocol::encode_block_action({protocol::BlockActionType::Place, place_pos.x,
+                                                                            place_pos.y, place_pos.z,
+                                                                            selected_placeable.block_id}));
+                } else {
+                    LCU_LOG_INFO("Placing {} at world ({}, {}, {}) (inventory: {})", selected_placeable.name,
+                                 place_pos.x, place_pos.y, place_pos.z,
+                                 player_inventory.count_item(selected_placeable.item_id));
+                    const auto split = lcu::voxel::world_to_chunk_and_local(place_pos, lcu::voxel::Chunk::kEdgeLength);
+                    if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                        const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                        target->set_block(split.local.x, split.local.y, split.local.z, selected_placeable.block_id);
+                        const auto light_touched =
+                            update_lighting_for_edit(split.chunk, split.local, old_id, selected_placeable.block_id);
+                        remesh_and_upload(split.chunk);
+                        remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                        if (selected_placeable.block_id == torch_id) {
+                            // Real confirmation a placed light source actually
+                            // lit itself (Phase 34) - not test-only scaffolding,
+                            // this fires for any real torch placement, headless
+                            // verification included.
+                            const auto placed_light = world_light.block_light_at(
+                                split.chunk, static_cast<lcu::i32>(split.local.x), static_cast<lcu::i32>(split.local.y),
+                                static_cast<lcu::i32>(split.local.z));
+                            LCU_LOG_INFO("Placed game:torch at world ({}, {}, {}): block_light={}", place_pos.x,
+                                         place_pos.y, place_pos.z, placed_light.value_or(0));
+                        }
+                        {
+                            const lcu::math::Vec3 block_center{static_cast<lcu::f32>(place_pos.x) + 0.5f,
+                                                                 static_cast<lcu::f32>(place_pos.y) + 0.5f,
+                                                                 static_cast<lcu::f32>(place_pos.z) + 0.5f};
+                            const lcu::audio::StereoGain pan =
+                                lcu::audio::compute_stereo_pan(camera.position, camera.right(), block_center);
+                            const lcu::f32 attenuation =
+                                lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
+                            audio_engine.play(place_sound, {pan.left * attenuation, pan.right * attenuation});
+                        }
+                    } else {
+                        LCU_LOG_DEBUG("Place target's chunk isn't loaded, refunding the item");
+                        player_inventory.add_item(item_registry, {selected_placeable.item_id, 1});
+                    }
+                }
+            }
+        }  // if (!paused)
 
         previous_input = input;
 
@@ -1994,7 +2405,16 @@ int main() {
         const lcu::math::Mat4 view = camera.view_matrix();
         const lcu::f32 aspect =
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
-        const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(1.0f, aspect, 0.1f, 500.0f);
+        // Real FOV (Phase 46 - closes the gap Phase 45 deliberately left
+        // open: options.fov was persisted but never actually read for
+        // rendering until this phase's Options screen gave it a real,
+        // in-game-visible consumer - see DECISIONS.md). options.fov is
+        // stored in degrees (matching the options.txt example in Phase
+        // 45's own directive and every real settings UI convention),
+        // converted to radians here since Mat4::perspective's own
+        // contract takes fov_y_radians.
+        const lcu::f32 fov_y_radians = static_cast<lcu::f32>(options.fov) * (3.14159265358979323846f / 180.0f);
+        const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(fov_y_radians, aspect, 0.1f, 500.0f);
 
         // Real per-frame draw-call count (Phase 36, brief section 60's
         // debug overlay) - incremented only when a submit_*() call
@@ -2092,6 +2512,17 @@ int main() {
                                      screen_center_y - kCrosshairSize / 2.0f, kCrosshairThickness, kCrosshairSize,
                                      kCrosshairColor);
         }
+
+        // Real pause/options/controls menu (Phase 46) - its backdrop/
+        // selection-highlight quads queue into this same batch as the
+        // crosshair above (one real draw call for both), its row labels
+        // are drawn separately, after draw_debug_overlay below (see
+        // menu_renderer.h's own doc comment for why the quad- and
+        // text-drawing halves can't happen at the same call site here).
+        if (!menu_stack.empty()) {
+            lcu::ui::queue_menu_backdrop(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
+        }
+
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
         renderer.flush_ui_quads(ui2d_program);
         if (ui_had_quads && bgfx::isValid(ui2d_program)) {
@@ -2110,6 +2541,13 @@ int main() {
                 {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
                  job_system.unfinished_job_count()});
         }
+        // After the debug overlay, not before - draw_menu_labels clears
+        // and re-owns the same bgfx debug-text buffer the overlay just
+        // wrote to (see its own doc comment), so this ordering is real,
+        // not incidental.
+        if (!menu_stack.empty()) {
+            lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
+        }
         renderer.end_frame();
 #endif
 
@@ -2124,6 +2562,10 @@ int main() {
         ++frame;
         if (max_frames && frame >= *max_frames) {
             LCU_LOG_INFO("LCU_MAX_FRAMES reached ({} frames), exiting", frame);
+            break;
+        }
+        if (quit_requested) {
+            LCU_LOG_INFO("Quit requested from pause menu, exiting");
             break;
         }
     }

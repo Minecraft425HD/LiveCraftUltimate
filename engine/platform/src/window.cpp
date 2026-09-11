@@ -144,4 +144,11 @@ std::string Window::executable_base_path() {
     return base != nullptr ? std::string(base) : std::string();
 }
 
+Window::MousePosition Window::mouse_position() {
+    float x = 0.0f;
+    float y = 0.0f;
+    SDL_GetMouseState(&x, &y);
+    return {x, y};
+}
+
 }  // namespace lcu::platform

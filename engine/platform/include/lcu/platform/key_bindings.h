@@ -34,6 +34,25 @@ constexpr PhysicalKey kMouseMiddleKey = -4;
 std::string physical_key_name(PhysicalKey key);
 PhysicalKey parse_physical_key(const std::string& name);
 
+// Real "press any key to rebind" capture (Phase 46's controls screen):
+// returns the first physical key/mouse button currently held down this
+// call - a keyboard scancode scanned via SDL_GetKeyboardState or one of
+// the three mouse-button constants via SDL_GetMouseState, whichever is
+// found first - or kUnboundKey if nothing is currently pressed. Meant
+// to be polled once per frame only while a controls-screen row is
+// actually waiting for a new binding (client/main.cpp), not every
+// frame - unlike DesktopInputBackend::update, this looks at every
+// physical key, not just ones some Action already binds, since the
+// whole point is letting the player bind a key nothing uses yet.
+PhysicalKey poll_any_pressed_key();
+
+// True if `key` is the real, hardcoded Escape scancode - used by the
+// controls-screen rebind flow (Phase 46) to let ESC cancel a capture
+// in progress rather than becoming the new binding, consistent with
+// Escape's own "not rebindable" status (see Action::Escape's doc
+// comment in input.h).
+bool is_escape_key(PhysicalKey key);
+
 // Human-readable, round-trippable name for an Action itself (Phase 45's
 // options.txt persistence: each `key.<action_name>=<physical_key_name>`
 // line needs both halves as real strings) - lowercase_snake_case,

@@ -3037,3 +3037,124 @@ projection now anyway "since the field already exists" (rejected -
 untestable without a real consumer, and this project has repeatedly
 preferred an honest "not yet" over code with no way to verify it
 matters, e.g. Phase 44's deferred item-icon rendering just above).
+
+## 2026-09-11 — Menu framework: a real, reproduced use-after-free and its fix
+
+**Context:** Phase 46 asked for a real `MenuStack` (pause/options/
+controls screens) whose rows call back into game code - toggling
+options, pushing a sub-screen, popping back out.
+
+**The first implementation had a real, reproducible segfault, not a
+theoretical one.** A `MenuItem`'s `on_activate`/`on_adjust` callback is
+a `std::function` stored inside that item, inside the `MenuScreen`
+currently on top of `menu_stack`. The first version of the Options
+screen's "adjust a value" rows called a `rebuild()` helper directly
+from inside their own `on_adjust` callback - `rebuild()` popped the
+*current* screen (the one hosting the very callback that was calling
+it) and pushed a freshly-rebuilt one. `pop_back()` destroys the popped
+`MenuScreen`'s `items` vector - including the `std::function` (and its
+captured closure state) that was still mid-execution on the call stack.
+The very next statement in `rebuild()` needed to read a captured
+reference from that now-destroyed closure to call
+`build_options_screen()` - a genuine use-after-free. Headless testing
+with the new `LCU_VERIFY_MENU` hook reproduced this as a real segfault
+(the *first* adjustment happened to survive on reused-but-not-yet-
+corrupted heap memory; the *second* one reliably crashed - a classic
+UAF signature). The same hazard applied to every row that pushed a new
+screen too: `std::vector::push_back` can reallocate its backing buffer,
+moving (and freeing the old storage of) every existing element -
+including the currently-executing pause-screen row's own closure -
+exactly when growing past capacity.
+
+**Fixed by deferring every menu_stack-mutating action.** A new
+`std::function<void()> pending_menu_action` in `client/main.cpp`: every
+row that needs to push/pop/clear `menu_stack` only ever *assigns* a
+closure describing that action to `pending_menu_action` - it never
+calls `push`/`pop`/`clear` directly. Once `activate_selected()`/
+`adjust_selected()` (called from the main loop, not from inside any
+`MenuItem`'s own callback) has fully returned, the main loop checks
+`pending_menu_action` and runs it there - at that point nothing is
+executing from the screen about to be destroyed, so popping/pushing/
+reallocating it is genuinely safe. Re-ran `LCU_VERIFY_MENU` after the
+fix: no crash, real navigation through Pause -> Options -> adjust twice
+(`options.txt` confirms both edits landed: `mouse_sensitivity` moved
+`0.0022` -> `0.0026`, exactly two real `+0.0002` steps) -> Zurueck ->
+close, with player position provably frozen while paused and provably
+moving again once resumed.
+
+**Alternatives considered:** relying on the "destroying `*this` as the
+last statement is safe" idiom for the "Zurueck"/back rows specifically
+(rejected as too fragile to build a *pattern* around, even though that
+one specific case likely would have worked - the `rebuild()` case
+proves the general pattern is genuinely unsafe the moment any code
+after the destroying call needs to read closure state, and having some
+callbacks defer and others not would be an inconsistent, easy-to-get-
+wrong convention); reference-counting/shared-ownership for
+`MenuScreen`s so popping wouldn't immediately destroy them (rejected -
+real added complexity for a problem a one-line deferred-action queue
+already solves cleanly); reserving enough `vector` capacity up front to
+never reallocate (rejected - doesn't address the `pop_back` half of the
+bug at all, and is a fragile "don't exceed N screens" assumption to
+maintain).
+
+## 2026-09-11 — Menu framework: view/input deferral choices
+
+**Context:** Phase 46's own directive said the pause menu should pause
+"simulation, audio, network," and asked for a real options/controls UI
+without introducing chat, multiplayer UI, or new asset pipelines.
+
+**Network receive deliberately keeps running while paused - only this
+client's own outgoing input pauses.** Fully halting the receive loop
+while the pause menu is open risked the connection reading as dead
+(missed heartbeats, stale `ChunkData`) by the time the player unpauses,
+for a real multiplayer connection this project already has (Phase 7/8).
+Real Minecraft's own multiplayer pause menu has the same property - the
+world keeps ticking server-side, only your own client's input stops
+being sent. This is documented here specifically so it doesn't read as
+a silent deviation from the directive's literal "network pauses too"
+wording - the outgoing half genuinely does pause (no
+`predict_and_record`/`send` call happens while `paused`), only the
+receive half stays alive, and for a real, defensible reason.
+
+**Menu navigation reuses the existing `LookUp`/`LookDown`/`LookLeft`/
+`LookRight` actions (already bound to the arrow keys since Phase 4)
+rather than adding new dedicated menu-navigation actions.** These
+actions already do nothing useful while paused (camera look is skipped
+entirely inside the same `if (!paused)` block that gates movement), so
+repurposing them for Up/Down (select) and Left/Right (adjust a value)
+costs zero new bindings and matches "arrow keys navigate the menu" from
+the phase's own directive exactly. Only one genuinely new action was
+needed: `Action::MenuConfirm` (Enter), since nothing existing meant
+"confirm."
+
+**Mouse click hit-testing needed a real absolute cursor position that
+didn't exist yet** - Phase 43's `InputState` only ever tracked relative
+motion deltas (`mouse_delta_x/y`), meaningful only while the window
+owned relative mouse capture. A new static `Window::mouse_position()`
+(wrapping `SDL_GetMouseState` the same way `DesktopInputBackend`
+already does for button state) supplies it - real, and only meaningful
+while the menu has already released capture (which it always has by
+the time a menu is open), the same "meaningless-but-harmless otherwise"
+contract `mouse_delta_x/y` itself already has.
+
+**`engine/ui` is now added under `LCU_BUILD_CLIENT` unconditionally,
+not only under `LCU_ENABLE_BGFX`.** `MenuStack`'s own navigation/
+layout/hit-testing logic has zero SDL or bgfx dependency, and this
+project's own testing discipline runs the full suite in both the bgfx
+and non-bgfx configs (`dev-bgfx`/`dev-nobgfx`) - keeping it gated behind
+bgfx would have meant `MenuStack` was untestable in half of that matrix
+for no real reason. `debug_overlay.cpp`/`menu_renderer.cpp` (the actual
+bgfx-drawing code) stay gated behind `LCU_ENABLE_BGFX` inside `engine/
+ui/CMakeLists.txt`, since they genuinely need a real `Renderer` to draw
+through.
+
+**Alternatives considered:** fully pausing network receive too, per the
+directive's literal wording (rejected - see above, a real regression
+risk for an existing feature with no real gameplay benefit for a
+pause-menu-specific case); dedicated `MenuUp`/`MenuDown`/`MenuLeft`/
+`MenuRight` actions (rejected - the existing Look* actions are already
+idle while paused, and adding parallel actions for the same physical
+keys would be pure duplication with no behavioral difference); reading
+raw SDL mouse position directly in `client/main.cpp` (rejected -
+`ARCHITECTURE.md` restricts SDL access to `engine/platform`, so this
+needed a real `engine/platform` accessor, not a client-side workaround).

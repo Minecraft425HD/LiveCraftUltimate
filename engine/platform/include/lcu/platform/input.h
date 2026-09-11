@@ -88,6 +88,14 @@ enum class Action : u8 {
     // Phase 46 controls-*menu* choice (simply never listing it as
     // editable), not an architectural restriction here.
     Escape,
+    // Enter/Return (Phase 46) - confirms/activates the currently
+    // selected row in a MenuStack screen (engine/ui/menu_stack.h).
+    // Deliberately still a real KeyBindings entry rather than a
+    // hardcoded scancode check, same reasoning as Escape's own doc
+    // comment above; also "not rebindable" as a Phase 46 controls-menu
+    // choice (never listed as editable), not an architectural
+    // restriction here.
+    MenuConfirm,
     Count,
 };
 

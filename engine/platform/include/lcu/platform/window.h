@@ -75,6 +75,20 @@ class Window : public NonCopyable {
     // exists.
     static std::string executable_base_path();
 
+    // Absolute cursor position, in window pixels from the top-left
+    // (SDL/mouse convention, same origin submit_ui_quad already uses) -
+    // only meaningful while relative_mouse_mode() is false (Phase 46's
+    // pause menu mouse hit-testing: ESC already releases capture before
+    // the menu needs a real click position, see client/main.cpp). Real
+    // SDL_GetMouseState under the hood, the same call
+    // DesktopInputBackend already uses for button state - no live
+    // Window needed, so this is static like executable_base_path().
+    struct MousePosition {
+        f32 x = 0.0f;
+        f32 y = 0.0f;
+    };
+    static MousePosition mouse_position();
+
    private:
     SDL_Window* handle_ = nullptr;
     i32 width_ = 0;

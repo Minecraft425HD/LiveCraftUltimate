@@ -41,6 +41,31 @@ PhysicalKey parse_physical_key(const std::string& name) {
     return code != SDL_SCANCODE_UNKNOWN ? static_cast<PhysicalKey>(code) : kUnboundKey;
 }
 
+PhysicalKey poll_any_pressed_key() {
+    int num_keys = 0;
+    const bool* keys = SDL_GetKeyboardState(&num_keys);
+    if (keys != nullptr) {
+        for (int i = 0; i < num_keys; ++i) {
+            if (keys[i]) {
+                return static_cast<PhysicalKey>(i);
+            }
+        }
+    }
+    const SDL_MouseButtonFlags buttons = SDL_GetMouseState(nullptr, nullptr);
+    if ((buttons & SDL_BUTTON_LMASK) != 0) {
+        return kMouseLeftKey;
+    }
+    if ((buttons & SDL_BUTTON_RMASK) != 0) {
+        return kMouseRightKey;
+    }
+    if ((buttons & SDL_BUTTON_MMASK) != 0) {
+        return kMouseMiddleKey;
+    }
+    return kUnboundKey;
+}
+
+bool is_escape_key(PhysicalKey key) { return key == static_cast<PhysicalKey>(SDL_SCANCODE_ESCAPE); }
+
 namespace {
 // One row per Action (Phase 45) - the real bidirectional name table
 // action_name/parse_action_name below share, so the two directions can
@@ -81,6 +106,7 @@ constexpr ActionNameEntry kActionNames[] = {
     {Action::SwapOffhand, "swap_offhand"},
     {Action::Craft, "craft"},
     {Action::Escape, "escape"},
+    {Action::MenuConfirm, "menu_confirm"},
 };
 }  // namespace
 
@@ -170,6 +196,7 @@ void KeyBindings::reset_to_defaults() {
     set(Action::Craft, SDL_SCANCODE_C);
     bindings_[static_cast<usize>(Action::Escape)][0] = SDL_SCANCODE_ESCAPE;
     bindings_[static_cast<usize>(Action::Escape)][1] = SDL_SCANCODE_TAB;
+    set(Action::MenuConfirm, SDL_SCANCODE_RETURN);
 
     // Arrow-key look fallback - unchanged (see Action::LookUp's own doc
     // comment in input.h for why this stays alongside real mouse-look).
