@@ -2,7 +2,63 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58
+
+### Phase 58
+
+- **Real character model**: `engine/assets::skin_texture.{h,cpp}` - a
+  procedurally-generated 64x64 player skin in the real Minecraft
+  "modern" (dual-arm/dual-leg) UV layout, 36 named per-face regions
+  (`SkinRegion`), own texture/sampler slot. `Renderer` gains
+  `submit_textured_box` (draws an arbitrary, not-necessarily-axis-
+  aligned box from 8 caller-supplied world-space corners, independent
+  UV rect per face) plus real `rotate_yaw`/`rotate_pitch`/
+  `character_part_corners` math in `client/main.cpp` (yaw/pitch derived
+  to reproduce `FirstPersonCamera::forward()` bit-for-bit).
+- **First-person arm**: replaces the flat 2D hand icon (Phase 48) with
+  a small 3D box held in view-space, textured with the current hotbar
+  item's own atlas UV (not the skin) - the same swing animation as
+  before, now a real position/orientation offset instead of a 2D quad
+  offset.
+- **Third-person body**: a real 6-box Steve-like model (head, torso, 2
+  arms, 2 legs) - legs/arms swing in a real, frame-rate-independent
+  walk cycle (`walk_cycle_phase` advances by distance travelled, not
+  wall-clock time); head follows real camera pitch, body yaw follows
+  camera yaw (a documented simplification of MC's own head/body-yaw-lag
+  system - see DECISIONS.md). Every part's own real dimensions are
+  Minecraft's own per-part pixel sizes, uniformly scaled so the whole
+  stack fits exactly inside `kPlayerHeight` (1.8 blocks).
+- **Real 3-way F5 perspective cycle**: First-Person -> Third-Person-
+  Behind -> Third-Person-Front -> First-Person, closing the previously
+  documented "no third-person-front, no player model to look at" PARTIAL.
+- **AABB verified, not changed**: `kPlayerHalfWidth`/`kPlayerHeight`/
+  `kEyeHeight` already held the exact real Minecraft values (0.3/1.8/
+  1.62) from earlier phases - Phase 58.1 needed no numeric change, only
+  confirmation and the real work built on top of them above.
+- Verified via real headless runs (`Player skin: skin_texture_valid=
+  true`), a real extended `LCU_VERIFY_HUD` run (now presses F5 three
+  times, cycling through all three perspectives and exercising every
+  one of `submit_textured_box`'s 7 real per-frame call sites - the arm
+  box plus all 6 body-part boxes), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_HEALTH`/`LCU_VERIFY_MENU`/`LCU_VERIFY_INVENTORY`/
+  `LCU_VERIFY_WORKBENCH`/`LCU_VERIFY_CRAFT`/`LCU_VERIFY_TORCH`
+  regression runs (all still complete their full frame counts cleanly),
+  and a real `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files were
+  touched this phase - `submit_textured_box` reuses `vs_sky.sc`/
+  `fs_sky.sc` unchanged - so this just confirms the existing pipeline
+  still compiles/links against the new caller). 12 new unit tests
+  (`SkinTextureConstants`, `SkinUvRange.*` incl. 5 exact-coordinate
+  checks against the brief's own example regions, `GenerateDefaultSkin
+  Pixels.*`). `ctest` 587/587 (bgfx, up from 575) / 579/579 (non-bgfx,
+  up from 567).
+- Honestly scoped: what the real character model/skin actually looks
+  like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; body yaw follows camera yaw directly rather than a real
+  independent, lagging body-facing direction (see DECISIONS.md); no
+  idle/breathing animation for the player (that's Phase 59's own NPC
+  job per the brief's own phasing); no third-person camera collision
+  (the existing `kThirdPersonDistance` gap noted since Phase 47 is
+  unchanged).
 
 ### Phase 57
 

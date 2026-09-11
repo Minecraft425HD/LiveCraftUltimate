@@ -3831,3 +3831,84 @@ boolean vertex flag instead of widening the existing one to a tri-state
 - rejected as unnecessary extra vertex-layout/varying surface for a
 real mutually-exclusive choice a single tri-state field already models
 correctly.
+
+## 2026-09-11 — Phase 58: body yaw follows camera yaw directly, first-person arm shows the item not the skin, and the model is scaled to fit the real hitbox
+
+**Context:** Phase 58 (the first of a new Phasen 58-66 program: player
+model, NPCs, skins, farming) adds a real third-person character model
+and replaces the flat 2D hand icon with a 3D arm.
+
+**Body yaw is read directly from `camera.yaw`, not a separately tracked,
+independently-lagging "facing direction" the brief's own wording
+("Körper-Yaw bleibt der Bewegung voraus") could also support.** Real
+Minecraft has a genuine, nuanced system here: the body's own yaw tracks
+a player's recent movement direction and only starts catching up to the
+camera's own yaw once the two diverge past a real angular threshold (so
+you can look left/right without your torso instantly snapping to match,
+but strafing or moving eventually drags the body around too). Building
+that correctly needs its own persistent smoothed-yaw state, a real
+clamp/catch-up rule, and - critically - no existing gameplay system in
+this project distinguishes "the direction the camera looks" from "the
+direction the player is walking" in any way a player could actually
+notice yet (there's no over-the-shoulder strafe-lock, no separate
+aim-vs-move camera mode). Implementing the nuanced version now would be
+real, additional, untestable-by-anything-else work with no way to tell
+correct behavior from a small bug in this headless sandbox (no visual
+verification is possible - see BUILD_STATUS.md). Reading body yaw
+directly from camera yaw is a real, honest, working simplification -
+the body always faces exactly where the camera looks, horizontally -
+documented here rather than silently passed off as the "real" MC
+behavior.
+
+**The first-person arm box is textured with the current hotbar item's
+own atlas UV, not the skin texture's own arm region.** The brief's own
+wording ("eine einfache 3D-Box als Arm/Hand ... mit der aktuellen
+Item-Textur an der Vorderseite") names the ITEM texture explicitly, not
+skin/arm color - and this exactly continues the role Phase 48's own 2D
+hand icon already played (showing what you're holding, not your bare
+skin), so it needed no new multi-texture-per-box machinery (binding
+both an item atlas rect on one face and a skin atlas rect on the other
+5 would have needed two live sampler slots on a single draw call,
+real, avoidable complexity for a "simple box" the brief itself asks
+for). `submit_textured_box`'s single-UV-set-per-box design already
+supports this directly: all 6 faces get the same item UV rect.
+
+**Every body part's own real MC pixel-based proportions are uniformly
+scaled by `kPlayerHeight / 2.0` (0.9) so the whole stack (legs+torso+
+head) sums to exactly the real hitbox height (1.8 blocks), instead of
+MC's own real ~2.0-block-tall model sitting slightly taller than its
+own ~1.8-block hitbox.** That mismatch is a real, well-known,
+long-standing property of actual Minecraft (the rendered model
+genuinely extends a bit above the real collision box) - but it's not a
+requirement this project has any reason to reproduce faithfully; fitting
+the model exactly inside the real hitbox is the simpler, equally
+legitimate alternative, and avoids a body model that visually pokes
+through a low ceiling the real hitbox would have fit under.
+
+**Limb "swing" during the walk cycle is a real forward/back
+TRANSLATION of each leg/arm's own local center (offset along local Z,
+which then still correctly rotates with body yaw via
+`character_part_corners`), not a true rotation around a hip/shoulder
+pivot.** A true pivot-rotation would look more like an actual walking
+gait (the whole limb swinging on an arc), but a translation-based
+swing is dramatically simpler (no extra rotation composition needed
+for these parts, unlike the head's own real pitch) and still
+faithfully satisfies the brief's own literal ask ("Beine animieren
+beim Laufen (Sinus)") - a real, visible, sine-driven animation, just a
+simpler geometric primitive producing it. The head DOES get a true
+pivot rotation (via `rotate_pitch`) since the brief explicitly names
+pitch-following as a real requirement there, and it's exactly one
+extra composition, not a whole new animation category.
+
+**Alternatives considered:** a persistent, smoothed, threshold-clamped
+body-yaw-vs-camera-yaw system matching real Minecraft exactly -
+rejected per the "no way to verify it visually, no gameplay system
+would notice the difference yet" reasoning above; texturing the
+first-person arm box with the skin's own arm region instead of the
+held item - rejected as contradicting the brief's own explicit "mit
+der aktuellen Item-Textur" wording and Phase 48's own established
+"the hand icon shows what you're holding" role; a real per-limb
+pivot-rotation walk cycle for legs/arms - rejected as real additional
+complexity for a first pass the brief's own "Sinus" wording doesn't
+actually require, revisit if a later phase's own visual review (once a
+real Mac test is available) asks for it specifically.

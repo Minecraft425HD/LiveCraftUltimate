@@ -10,6 +10,7 @@ if(LCU_BUILD_CLIENT)
         src/texture_atlas.cpp
         src/procedural_textures.cpp
         src/font_atlas.cpp
+        src/skin_texture.cpp
     )
     add_library(Lcu::Assets ALIAS LcuAssets)
 

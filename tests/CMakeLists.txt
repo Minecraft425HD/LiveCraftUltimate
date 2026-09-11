@@ -97,7 +97,7 @@ endif()
 # bgfx and non-bgfx configs, same as Lcu::Ui above.
 if(TARGET Lcu::Assets)
     target_sources(VoxelTests PRIVATE assets/texture_atlas_test.cpp assets/procedural_textures_test.cpp
-                                       assets/font_atlas_test.cpp)
+                                       assets/font_atlas_test.cpp assets/skin_texture_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Assets)
 endif()
 

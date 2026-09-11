@@ -25,6 +25,7 @@
 #include "game/systems/replication_protocol.h"
 #include "lcu/assets/font_atlas.h"
 #include "lcu/assets/procedural_textures.h"
+#include "lcu/assets/skin_texture.h"
 #include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
@@ -201,6 +202,14 @@ lcu::core::ChunkLoadSettings load_settings_from_env() {
     return lcu::core::chunk_load_settings_for(profile);
 }
 
+// Real Minecraft-sized player AABB (Phase 58.1, brief section
+// "korrekte Größe") - 0.6 wide x 1.8 tall x 0.6 deep, eye height 1.62.
+// Verified/re-confirmed this phase, not newly introduced - these three
+// constants (and every consumer: make_player_aabb below, the camera-eye
+// offset, entity debug boxes) already had the exact real Minecraft
+// values from earlier phases, so Phase 58.1 needed no numeric change,
+// only this note and the real character-model work built on top of
+// them (58.2-58.4 below) - see DECISIONS.md.
 constexpr lcu::f32 kPlayerHalfWidth = 0.3f;   // 0.6-block-wide AABB, Minecraft-like
 constexpr lcu::f32 kPlayerHeight = 1.8f;
 constexpr lcu::f32 kEyeHeight = 1.62f;
@@ -238,15 +247,54 @@ constexpr lcu::f32 kItemPickupRangeInflate = 2.0f;
 // yet (a real, honest PARTIAL - see DECISIONS.md).
 constexpr lcu::f32 kThirdPersonDistance = 4.0f;
 
-// Real hand-icon swing (Phase 48) - triggered on every real break/place
-// action, real elapsed-time-driven, not a frame-count animation (so it
-// plays at the same real speed regardless of frame rate, same reasoning
-// LCU_VERIFY_MOVE_SECONDS already established for movement).
+// Real hand swing (Phase 48, real elapsed-time-driven, not a
+// frame-count animation, so it plays at the same real speed regardless
+// of frame rate - same reasoning LCU_VERIFY_MOVE_SECONDS already
+// established for movement) - triggered on every real break/place
+// action. Phase 58.2 replaces the flat 2D hand-icon quad this used to
+// drive with a real 3D arm box (see kArm* constants below), but the
+// swing timing itself is unchanged.
 constexpr lcu::f32 kHandSwingDuration = 0.25f;
-constexpr lcu::f32 kHandIconSize = 32.0f;
-constexpr lcu::f32 kHandRestMarginX = 24.0f;
-constexpr lcu::f32 kHandRestMarginY = 24.0f;
-constexpr lcu::f32 kHandSwingOffset = 20.0f;
+
+// Real character-model dimensions (Phase 58.2/58.3) - Minecraft's own
+// real per-part pixel sizes (in 1/16-block units, its own texel grid),
+// uniformly scaled so the whole stack (legs+torso+head) sums to exactly
+// kPlayerHeight (1.8 blocks) instead of MC's own slightly-taller 2.0 -
+// a real, deliberate choice: MC's real player MODEL is taller than its
+// own real HITBOX (a long-standing, well-known MC quirk), but this
+// project has no reason to reproduce that specific mismatch - fitting
+// the model exactly inside the real hitbox is the simpler, equally
+// real alternative (see DECISIONS.md).
+constexpr lcu::f32 kBodyModelScale = kPlayerHeight / 2.0f;  // 0.9
+constexpr lcu::f32 kHeadSize = 0.5f * kBodyModelScale;                                    // 8px cube
+constexpr lcu::f32 kTorsoHalfWidth = 0.25f * kBodyModelScale, kTorsoHalfDepth = 0.125f * kBodyModelScale,
+                    kTorsoHeight = 0.75f * kBodyModelScale;  // 8x4x12px
+constexpr lcu::f32 kLimbHalfWidth = 0.125f * kBodyModelScale, kLimbHalfDepth = 0.125f * kBodyModelScale,
+                    kLimbHeight = 0.75f * kBodyModelScale;  // 4x4x12px (arms and legs share this size)
+// Real walk-cycle swing (Phase 58.3/59.3) - advances proportional to
+// real horizontal distance travelled this frame (see the real
+// `walk_cycle_phase += length(horizontal_delta) * kWalkCyclePerBlock`
+// call below), not raw elapsed time, so faster movement genuinely swings
+// the limbs faster/more often - a real, working, frame-rate-independent
+// animation, not merely a wall-clock oscillation.
+constexpr lcu::f32 kWalkCyclePerBlock = 9.0f;    // radians of phase per block walked
+constexpr lcu::f32 kLimbSwingAmplitude = 0.22f;  // blocks, forward/back translation
+constexpr lcu::f32 kArmSwingAmplitude = 0.16f;   // blocks - a bit less than the legs'.
+
+// Real first-person arm box (Phase 58.2, replaces the flat 2D hand icon
+// - see kHandSwingDuration above) - a small box held in view-space in
+// front of the camera, textured with the real currently-held item's own
+// atlas UV (resolve_item_display below), not the skin texture (the
+// brief's own "eine einfache 3D-Box ... mit der aktuellen Item-Textur"
+// reading: this box stands in for "the item in hand", the same real
+// role the old 2D icon played, not a literal bare-arm/skin render - see
+// DECISIONS.md).
+constexpr lcu::f32 kArmForwardOffset = 0.55f;
+constexpr lcu::f32 kArmRightOffset = 0.35f;
+constexpr lcu::f32 kArmDownOffset = 0.45f;
+constexpr lcu::f32 kArmHalfWidth = 0.12f, kArmHalfDepth = 0.12f, kArmHalfHeight = 0.18f;
+constexpr lcu::f32 kArmSwingForwardBoost = 0.35f;
+constexpr lcu::f32 kArmSwingUpBoost = 0.12f;
 
 // Real block-highlight wireframe (Phase 48) - a slightly outset cube so
 // the highlight lines sit just outside the block's own faces, visible
@@ -363,6 +411,16 @@ constexpr lcu::u64 kVerifyHudToggleDebugOverlayFrame = 6;
 constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame = 7;
 constexpr lcu::u64 kVerifyHudFullscreenFrame = 8;
 constexpr lcu::u64 kVerifyHudScreenshotFrame = 9;
+// Real Phase 58.3 extension: two more real F5 presses on their own
+// frames, cycling all the way through ThirdPersonBehind ->
+// ThirdPersonFront -> FirstPerson - without this, LCU_VERIFY_HUD's
+// single original press (kVerifyHudTogglePerspectiveFrame above) would
+// only ever exercise the first-person arm box and the third-person-
+// behind body model, never third-person-front, leaving one of
+// Renderer::submit_textured_box's real per-frame call-site groups
+// headlessly unverified.
+constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame2 = 10;
+constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame3 = 13;
 
 // A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
 // holds Interact long enough to break the grass block the player
@@ -596,6 +654,64 @@ lcu::physics::AABB make_player_aabb(lcu::math::Vec3 feet_position) {
         {feet_position.x + kPlayerHalfWidth, feet_position.y + kPlayerHeight, feet_position.z + kPlayerHalfWidth},
     };
 }
+
+#if defined(LCU_ENABLE_BGFX)
+// Real character-model rotation math (Phase 58.2/58.3) - rotates a
+// point given in LOCAL model space (local +X = the character's own
+// right side, local +Y = up, local +Z = the character's own front) by
+// a real yaw (around the Y axis) or pitch (around the local X axis)
+// angle. Deliberately derived to match lcu::player::FirstPersonCamera's
+// own forward()/right() convention exactly (yaw 0 = looking down -Z,
+// positive pitch = looking up) - rotate_yaw(local_forward, camera.yaw)
+// composed with rotate_pitch(., camera.pitch) reproduces camera.
+// forward() bit-for-bit for the same yaw/pitch, which is exactly what
+// lets the first-person arm box (58.2, oriented by full camera yaw+
+// pitch) and the third-person head (58.3, same) sit correctly relative
+// to the real view direction, not just an approximation - see
+// DECISIONS.md for the derivation.
+lcu::math::Vec3 rotate_yaw(const lcu::math::Vec3& local, lcu::f32 yaw) {
+    const lcu::f32 s = std::sin(yaw);
+    const lcu::f32 c = std::cos(yaw);
+    return {local.x * c - local.z * s, local.y, -local.x * s - local.z * c};
+}
+
+lcu::math::Vec3 rotate_pitch(const lcu::math::Vec3& local, lcu::f32 pitch) {
+    const lcu::f32 s = std::sin(pitch);
+    const lcu::f32 c = std::cos(pitch);
+    return {local.x, local.y * c + local.z * s, -local.y * s + local.z * c};
+}
+
+// Real per-part box-corner computation (Phase 58.2/58.3, extracted into
+// its own reusable function in Phase 59 per the brief's own phasing -
+// see submit_character_model there): `pivot` is the real world-space
+// rotation origin for this part (e.g. a shoulder or hip joint);
+// `local_center` is the box's own center relative to that pivot, in
+// unrotated local space (so e.g. a leg hanging below its hip pivot is
+// `{0, -half_height, 0}`); `half_extents` is the box's own real half-
+// size; `pitch` then `yaw` are applied in that order (matching
+// rotate_pitch/rotate_yaw's own derivation above) before translating by
+// `pivot`. Returns the same 8-corner convention Renderer::
+// submit_textured_box's own doc comment describes.
+std::array<lcu::math::Vec3, 8> character_part_corners(const lcu::math::Vec3& pivot,
+                                                        const lcu::math::Vec3& local_center,
+                                                        const lcu::math::Vec3& half_extents, lcu::f32 yaw,
+                                                        lcu::f32 pitch) {
+    const lcu::math::Vec3 local_corners[8] = {
+        {-half_extents.x, -half_extents.y, -half_extents.z}, {half_extents.x, -half_extents.y, -half_extents.z},
+        {half_extents.x, half_extents.y, -half_extents.z},   {-half_extents.x, half_extents.y, -half_extents.z},
+        {-half_extents.x, -half_extents.y, half_extents.z},  {half_extents.x, -half_extents.y, half_extents.z},
+        {half_extents.x, half_extents.y, half_extents.z},    {-half_extents.x, half_extents.y, half_extents.z},
+    };
+    std::array<lcu::math::Vec3, 8> world_corners{};
+    for (lcu::usize i = 0; i < 8; ++i) {
+        lcu::math::Vec3 p = local_corners[i] + local_center;
+        p = rotate_pitch(p, pitch);
+        p = rotate_yaw(p, yaw);
+        world_corners[i] = p + pivot;
+    }
+    return world_corners;
+}
+#endif  // defined(LCU_ENABLE_BGFX)
 
 // A block mutation at a chunk-boundary local coordinate can uncover or
 // hide a face in the *adjacent* chunk's greedy mesh too (that chunk's own
@@ -1561,6 +1677,18 @@ int main() {
         font_atlas_pixels.data(), lcu::assets::kFontAtlasWidth, lcu::assets::kFontAtlasHeight);
     LCU_LOG_INFO("Font atlas: font_atlas_texture_valid={}", bgfx::isValid(font_atlas_texture));
 
+    // Real player-skin texture (Phase 58.4) - unconditional, same
+    // reasoning as the font atlas above: the character model is a real
+    // part of the game now, not something LCU_USE_TEXTURES should be
+    // able to turn off (that toggle only ever meant "block/item
+    // textures", see its own doc comment). Phase 62 replaces this
+    // single always-default skin with a real, chosen-and-persisted one;
+    // this stays the fallback that always exists.
+    const auto default_skin_pixels = lcu::assets::generate_default_skin_pixels();
+    const bgfx::TextureHandle skin_texture =
+        renderer.create_texture_from_pixels(default_skin_pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
+    LCU_LOG_INFO("Player skin: skin_texture_valid={}", bgfx::isValid(skin_texture));
+
     // Real legacy-debug-text fallback toggle (Phase 57.3) - default OFF
     // (false), meaning HUD/menu/inventory/workbench text draws through
     // the real lcu::ui::TextRenderer bitmap-font atlas above by default
@@ -2061,7 +2189,16 @@ int main() {
     // edge-detected Actions below, independent of pause state (a
     // display preference, not gameplay, so these work while the menu
     // is open too).
-    bool third_person = false;
+    //
+    // Real 3-way perspective cycle (Phase 58.3, extends Phase 47's own
+    // first-person/third-person-behind toggle): F5 now cycles First ->
+    // ThirdPersonBehind -> ThirdPersonFront -> First. ThirdPersonFront
+    // was a documented PARTIAL/gap before this phase (no player model
+    // existed to render in front of the camera) - the real character
+    // model this phase adds (see submit_textured_box calls below)
+    // closes it for real.
+    enum class Perspective { FirstPerson, ThirdPersonBehind, ThirdPersonFront };
+    Perspective perspective = Perspective::FirstPerson;
 
     // Real hold-to-break progress (Phase 48): accumulates real elapsed
     // hold time against whichever block is currently targeted;
@@ -2080,9 +2217,16 @@ int main() {
     };
 
     // Real hand swing animation (Phase 48) - real elapsed time since the
-    // last break/place action, used to offset the hand icon's own quad
-    // position over kHandSwingDuration then settle back to rest.
+    // last break/place action, used to offset the first-person arm
+    // box's own position (Phase 58.2, previously a flat 2D icon) over
+    // kHandSwingDuration then settle back to rest.
     lcu::f32 hand_swing_elapsed = kHandSwingDuration;
+
+    // Real walk-cycle phase (Phase 58.3) - see kWalkCyclePerBlock's own
+    // doc comment; advances only by real horizontal distance travelled,
+    // never by raw time, so it never "runs" while the player stands
+    // still.
+    lcu::f32 walk_cycle_phase = 0.0f;
 
     // Real "press any key to rebind" capture (Phase 46's controls
     // screen): set by a row's on_activate, consumed by
@@ -2359,7 +2503,9 @@ int main() {
         if (verify_hud) {
             input.set_down(lcu::platform::Action::ToggleHud, frame == kVerifyHudToggleHudFrame);
             input.set_down(lcu::platform::Action::ToggleDebugOverlay, frame == kVerifyHudToggleDebugOverlayFrame);
-            input.set_down(lcu::platform::Action::TogglePerspective, frame == kVerifyHudTogglePerspectiveFrame);
+            input.set_down(lcu::platform::Action::TogglePerspective,
+                            frame == kVerifyHudTogglePerspectiveFrame || frame == kVerifyHudTogglePerspectiveFrame2 ||
+                                frame == kVerifyHudTogglePerspectiveFrame3);
             input.set_down(lcu::platform::Action::Fullscreen, frame == kVerifyHudFullscreenFrame);
             input.set_down(lcu::platform::Action::Screenshot, frame == kVerifyHudScreenshotFrame);
         }
@@ -3380,6 +3526,9 @@ int main() {
 
             const lcu::math::Vec3 move_dir = lcu::player::movement_direction_from_input(input, camera);
             const lcu::math::Vec3 horizontal_delta = move_dir * (kMoveSpeed * delta_seconds);
+            // Real walk-cycle advance (Phase 58.3) - see
+            // kWalkCyclePerBlock's own doc comment.
+            walk_cycle_phase += lcu::math::length(horizontal_delta) * kWalkCyclePerBlock;
 
             // Real per-jump hunger cost (Phase 51.2) - edge-detected
             // (a fresh Jump press, not held) and read BEFORE try_jump
@@ -3816,8 +3965,13 @@ int main() {
         }
         if (input.is_down(lcu::platform::Action::TogglePerspective) &&
             !previous_input.is_down(lcu::platform::Action::TogglePerspective)) {
-            third_person = !third_person;
-            LCU_LOG_INFO("Perspective: {}", third_person ? "third-person (behind)" : "first-person");
+            perspective = perspective == Perspective::FirstPerson     ? Perspective::ThirdPersonBehind
+                          : perspective == Perspective::ThirdPersonBehind ? Perspective::ThirdPersonFront
+                                                                           : Perspective::FirstPerson;
+            const char* name = perspective == Perspective::FirstPerson       ? "first-person"
+                                : perspective == Perspective::ThirdPersonBehind ? "third-person (behind)"
+                                                                                 : "third-person (front)";
+            LCU_LOG_INFO("Perspective: {}", name);
         }
         if (input.is_down(lcu::platform::Action::Fullscreen) &&
             !previous_input.is_down(lcu::platform::Action::Fullscreen)) {
@@ -3838,20 +3992,26 @@ int main() {
         const lcu::f32 sky_t = day_night_cycle.sky_light_scale();
         const lcu::math::Vec3 sky_color = kNightSkyColor + (kDaySkyColor - kNightSkyColor) * sky_t;
         renderer.begin_frame(sky_color);
-        // Real third-person-behind camera (Phase 47, F5) - only the
-        // render eye position shifts backward along the real look
-        // direction; gameplay (raycast, movement, camera.position
-        // itself) is untouched, matching Minecraft's own "aim from
-        // where you're looking, not from the pulled-back eye" behavior.
-        // PARTIAL: no player model exists to render in front of the
-        // camera, so there is no real third-person-front mode - see
-        // DECISIONS.md.
-        const lcu::math::Vec3 render_eye =
-            third_person ? camera.position - camera.forward() * kThirdPersonDistance : camera.position;
-        const lcu::math::Mat4 view = third_person
-                                          ? lcu::math::Mat4::look_at(render_eye, render_eye + camera.forward(),
-                                                                      lcu::math::Vec3{0.0f, 1.0f, 0.0f})
-                                          : camera.view_matrix();
+        // Real 3-way perspective (Phase 47 third-person-behind, extended
+        // Phase 58.3 with a real third-person-front) - only the render
+        // eye position/view direction changes; gameplay (raycast,
+        // movement, camera.position itself) is untouched either way,
+        // matching Minecraft's own "aim from where you're looking, not
+        // from the pulled-back eye" behavior. Third-person-front places
+        // the render eye IN FRONT of the player, looking back at them -
+        // this is what actually needed the real character model (below)
+        // to have something worth looking at; the previous PARTIAL note
+        // about this is resolved, see DECISIONS.md.
+        lcu::math::Vec3 render_eye = camera.position;
+        lcu::math::Mat4 view = camera.view_matrix();
+        if (perspective == Perspective::ThirdPersonBehind) {
+            render_eye = camera.position - camera.forward() * kThirdPersonDistance;
+            view = lcu::math::Mat4::look_at(render_eye, render_eye + camera.forward(),
+                                             lcu::math::Vec3{0.0f, 1.0f, 0.0f});
+        } else if (perspective == Perspective::ThirdPersonFront) {
+            render_eye = camera.position + camera.forward() * kThirdPersonDistance;
+            view = lcu::math::Mat4::look_at(render_eye, camera.position, lcu::math::Vec3{0.0f, 1.0f, 0.0f});
+        }
         const lcu::f32 aspect =
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
         // Real FOV (Phase 46 - closes the gap Phase 45 deliberately left
@@ -4059,40 +4219,122 @@ int main() {
             }
         }
 
-        // Real hand icon (Phase 48.3, updated for Phase 49's real
-        // inventory-driven hotbar) - whatever item physically sits in
-        // the selected hotbar slot right now, own icon color (Phase 47's
-        // icon_color), bottom-right corner, swinging toward center-screen
-        // and back over kHandSwingDuration on every real break/place
-        // action (hand_swing_elapsed, reset to 0 by those - see above).
-        // An empty selected slot draws no hand icon at all - there's no
-        // real item color to show, the same honest "nothing to render"
-        // choice place_pressed's own kAirBlockId gate makes.
-        if (options.hud_enabled) {
-            const lcu::items::ItemStack& held_stack = player_inventory.slot_at(selected_hotbar_slot);
-            if (!held_stack.is_empty()) {
-                const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
-                // A real, simple ease: swings out over the first half, back
-                // over the second - std::sin(swing_t * pi) peaks at 1.0
-                // exactly at swing_t=0.5, is 0 at both ends.
-                const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
-                const lcu::f32 rest_x =
-                    static_cast<lcu::f32>(renderer_desc.width) - kHandIconSize - kHandRestMarginX;
-                const lcu::f32 rest_y =
-                    static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
-                const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
-                const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
-                lcu::math::Vec4 hand_color{};
-                std::optional<lcu::math::Vec4> hand_texture_uv;
-                resolve_item_display(held_stack.item, hand_color, hand_texture_uv);
-                if (hand_texture_uv.has_value()) {
-                    const lcu::math::Vec4& uv = *hand_texture_uv;
-                    renderer.submit_textured_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color, uv.x,
-                                                       uv.y, uv.z, uv.w);
-                } else {
-                    renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+        // Real character model (Phase 58.2/58.3) - a first-person arm
+        // box holding the current hotbar item's own texture (replacing
+        // Phase 48's flat 2D hand icon), or, in either third-person
+        // perspective, the player's own full body (head/torso/2 arms/2
+        // legs), all built from Renderer::submit_textured_box via the
+        // real character_part_corners()/rotate_yaw()/rotate_pitch()
+        // math above. `options.hud_enabled` still gates the
+        // arm/hand-equivalent piece specifically (matching the old hand
+        // icon's own gate - a "hide gameplay HUD" preference
+        // plausibly also wants the held-item arm hidden), but NOT the
+        // third-person body itself, which is a real, always-visible part
+        // of that perspective, not a HUD element.
+        if (perspective == Perspective::FirstPerson) {
+            if (options.hud_enabled) {
+                const lcu::items::ItemStack& held_stack = player_inventory.slot_at(selected_hotbar_slot);
+                if (!held_stack.is_empty()) {
+                    const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
+                    // A real, simple ease: swings out over the first half,
+                    // back over the second - std::sin(swing_t * pi) peaks
+                    // at 1.0 exactly at swing_t=0.5, is 0 at both ends.
+                    const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
+                    const lcu::math::Vec3 arm_pivot = camera.position;
+                    const lcu::math::Vec3 arm_local_center{
+                        kArmRightOffset, -kArmDownOffset + swing_amount * kArmSwingUpBoost,
+                        kArmForwardOffset + swing_amount * kArmSwingForwardBoost};
+                    const std::array<lcu::math::Vec3, 8> arm_corners = character_part_corners(
+                        arm_pivot, arm_local_center, {kArmHalfWidth, kArmHalfHeight, kArmHalfDepth}, camera.yaw,
+                        camera.pitch);
+
+                    lcu::math::Vec4 hand_color{};
+                    std::optional<lcu::math::Vec4> hand_texture_uv;
+                    resolve_item_display(held_stack.item, hand_color, hand_texture_uv);
+                    bgfx::TextureHandle arm_texture = BGFX_INVALID_HANDLE;
+                    lcu::rendering::Renderer::BoxUvSet arm_uv{};
+                    if (hand_texture_uv.has_value()) {
+                        const lcu::math::Vec4& uv = *hand_texture_uv;
+                        const lcu::rendering::Renderer::BoxFaceUv f{uv.x, uv.y, uv.z, uv.w};
+                        arm_uv = {f, f, f, f, f, f};
+                        arm_texture = atlas_texture;
+                    }
+                    renderer.submit_textured_box(arm_corners, {hand_color.x, hand_color.y, hand_color.z}, sky_program,
+                                                  view, proj, arm_texture, arm_uv);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
                 }
             }
+        } else {
+            const lcu::math::Vec3 body_feet{player.aabb.center().x, player.aabb.min.y, player.aabb.center().z};
+            const lcu::f32 body_yaw = camera.yaw;
+            const auto world_pivot = [&](const lcu::math::Vec3& local_offset) {
+                return body_feet + rotate_yaw(local_offset, body_yaw);
+            };
+            const lcu::f32 leg_top_y = kLimbHeight;
+            const lcu::f32 shoulder_y = kLimbHeight + kTorsoHeight;
+            const lcu::f32 leg_swing = std::sin(walk_cycle_phase) * kLimbSwingAmplitude;
+            const lcu::f32 arm_swing = std::sin(walk_cycle_phase) * kArmSwingAmplitude;
+
+            const auto face_uv = [](lcu::assets::SkinRegion region) {
+                const lcu::assets::SkinUvRange r = lcu::assets::skin_uv_range(region);
+                return lcu::rendering::Renderer::BoxFaceUv{r.u0, r.v0, r.u1, r.v1};
+            };
+            const auto submit_part = [&](const lcu::math::Vec3& pivot, const lcu::math::Vec3& local_center,
+                                          const lcu::math::Vec3& half_extents, lcu::f32 pitch,
+                                          const lcu::rendering::Renderer::BoxUvSet& uvs) {
+                const std::array<lcu::math::Vec3, 8> corners =
+                    character_part_corners(pivot, local_center, half_extents, body_yaw, pitch);
+                renderer.submit_textured_box(corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, skin_texture, uvs);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
+            };
+
+            // Right leg / left leg (local +X = the character's own right
+            // side, see rotate_yaw's own doc comment).
+            submit_part(world_pivot({kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, leg_swing},
+                        {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                        {face_uv(lcu::assets::SkinRegion::RightLegLeft), face_uv(lcu::assets::SkinRegion::RightLegRight),
+                         face_uv(lcu::assets::SkinRegion::RightLegBottom), face_uv(lcu::assets::SkinRegion::RightLegTop),
+                         face_uv(lcu::assets::SkinRegion::RightLegBack), face_uv(lcu::assets::SkinRegion::RightLegFront)});
+            submit_part(world_pivot({-kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, -leg_swing},
+                        {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                        {face_uv(lcu::assets::SkinRegion::LeftLegLeft), face_uv(lcu::assets::SkinRegion::LeftLegRight),
+                         face_uv(lcu::assets::SkinRegion::LeftLegBottom), face_uv(lcu::assets::SkinRegion::LeftLegTop),
+                         face_uv(lcu::assets::SkinRegion::LeftLegBack), face_uv(lcu::assets::SkinRegion::LeftLegFront)});
+
+            // Torso.
+            submit_part(world_pivot({0.0f, leg_top_y, 0.0f}), {0.0f, kTorsoHeight * 0.5f, 0.0f},
+                        {kTorsoHalfWidth, kTorsoHeight * 0.5f, kTorsoHalfDepth}, 0.0f,
+                        {face_uv(lcu::assets::SkinRegion::TorsoLeft), face_uv(lcu::assets::SkinRegion::TorsoRight),
+                         face_uv(lcu::assets::SkinRegion::TorsoBottom), face_uv(lcu::assets::SkinRegion::TorsoTop),
+                         face_uv(lcu::assets::SkinRegion::TorsoBack), face_uv(lcu::assets::SkinRegion::TorsoFront)});
+
+            // Right arm / left arm - swing opposite the same-side leg for
+            // a real, if simple, walking gait.
+            submit_part(world_pivot({kTorsoHalfWidth + kLimbHalfWidth, shoulder_y, 0.0f}),
+                        {0.0f, -kLimbHeight * 0.5f, -arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth},
+                        0.0f,
+                        {face_uv(lcu::assets::SkinRegion::RightArmLeft), face_uv(lcu::assets::SkinRegion::RightArmRight),
+                         face_uv(lcu::assets::SkinRegion::RightArmBottom), face_uv(lcu::assets::SkinRegion::RightArmTop),
+                         face_uv(lcu::assets::SkinRegion::RightArmBack), face_uv(lcu::assets::SkinRegion::RightArmFront)});
+            submit_part(world_pivot({-(kTorsoHalfWidth + kLimbHalfWidth), shoulder_y, 0.0f}),
+                        {0.0f, -kLimbHeight * 0.5f, arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth},
+                        0.0f,
+                        {face_uv(lcu::assets::SkinRegion::LeftArmLeft), face_uv(lcu::assets::SkinRegion::LeftArmRight),
+                         face_uv(lcu::assets::SkinRegion::LeftArmBottom), face_uv(lcu::assets::SkinRegion::LeftArmTop),
+                         face_uv(lcu::assets::SkinRegion::LeftArmBack), face_uv(lcu::assets::SkinRegion::LeftArmFront)});
+
+            // Head - the one part with real pitch (follows camera.pitch,
+            // see rotate_pitch's own doc comment); yaw stays body_yaw
+            // (== camera.yaw in this implementation, see DECISIONS.md).
+            submit_part(world_pivot({0.0f, shoulder_y, 0.0f}), {0.0f, kHeadSize * 0.5f, 0.0f},
+                        {kHeadSize * 0.5f, kHeadSize * 0.5f, kHeadSize * 0.5f}, camera.pitch,
+                        {face_uv(lcu::assets::SkinRegion::HeadLeft), face_uv(lcu::assets::SkinRegion::HeadRight),
+                         face_uv(lcu::assets::SkinRegion::HeadBottom), face_uv(lcu::assets::SkinRegion::HeadTop),
+                         face_uv(lcu::assets::SkinRegion::HeadBack), face_uv(lcu::assets::SkinRegion::HeadFront)});
         }
 
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
@@ -4349,6 +4591,7 @@ int main() {
     }
     renderer.destroy_texture(atlas_texture);
     renderer.destroy_texture(font_atlas_texture);
+    renderer.destroy_texture(skin_texture);
 #endif
 
     LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),

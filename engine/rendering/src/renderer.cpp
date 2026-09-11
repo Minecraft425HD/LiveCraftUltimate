@@ -432,6 +432,92 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     bgfx::submit(0, program);
 }
 
+void Renderer::submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
+                                    bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
+                                    bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    struct BoxVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
+    };
+
+    const bool use_texture = bgfx::isValid(atlas_texture);
+    const f32 use_texture_value = use_texture ? 1.0f : 0.0f;
+
+    // Same corner indices/winding submit_solid_box's own min/max-derived
+    // table uses, but 4 fresh vertices per face (not 8 shared corners)
+    // so each face can carry its own independent UV rect - see this
+    // function's own doc comment in renderer.h.
+    const auto face = [&](u32 i0, u32 i1, u32 i2, u32 i3, const BoxFaceUv& uv) {
+        const math::Vec3& p0 = corners[i0];
+        const math::Vec3& p1 = corners[i1];
+        const math::Vec3& p2 = corners[i2];
+        const math::Vec3& p3 = corners[i3];
+        return std::array<BoxVertex, 4>{
+            BoxVertex{p0.x, p0.y, p0.z, color.x, color.y, color.z, uv.u0, uv.v0, use_texture_value},
+            BoxVertex{p1.x, p1.y, p1.z, color.x, color.y, color.z, uv.u1, uv.v0, use_texture_value},
+            BoxVertex{p2.x, p2.y, p2.z, color.x, color.y, color.z, uv.u1, uv.v1, use_texture_value},
+            BoxVertex{p3.x, p3.y, p3.z, color.x, color.y, color.z, uv.u0, uv.v1, use_texture_value},
+        };
+    };
+
+    const std::array<std::array<BoxVertex, 4>, 6> faces = {
+        face(0, 1, 2, 3, uvs.neg_z),  // -Z (min.z) face
+        face(5, 4, 7, 6, uvs.pos_z),  // +Z (max.z) face
+        face(4, 0, 3, 7, uvs.neg_x),  // -X (min.x) face
+        face(1, 5, 6, 2, uvs.pos_x),  // +X (max.x) face
+        face(4, 5, 1, 0, uvs.neg_y),  // -Y (min.y) face
+        face(3, 2, 6, 7, uvs.pos_y),  // +Y (max.y) face
+    };
+
+    std::array<BoxVertex, 24> vertices{};
+    for (u32 f = 0; f < 6; ++f) {
+        for (u32 v = 0; v < 4; ++v) {
+            vertices[f * 4 + v] = faces[f][v];
+        }
+    }
+    std::array<u16, 36> indices{};
+    for (u32 f = 0; f < 6; ++f) {
+        const u16 base = static_cast<u16>(f * 4);
+        const u16 face_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                      base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+        std::memcpy(&indices[f * 6], face_indices, sizeof(face_indices));
+    }
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
+        .end();
+
+    if (bgfx::getAvailTransientVertexBuffer(24, layout) < 24 || bgfx::getAvailTransientIndexBuffer(36) < 36) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 24, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 36);
+    std::memcpy(tvb.data, vertices.data(), vertices.size() * sizeof(BoxVertex));
+    std::memcpy(tib.data, indices.data(), indices.size() * sizeof(u16));
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    if (use_texture) {
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS);
+    bgfx::submit(0, program);
+}
+
 void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
                                        f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
                                        const math::Mat4& view, const math::Mat4& proj,

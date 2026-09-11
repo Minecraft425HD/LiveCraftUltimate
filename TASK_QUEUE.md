@@ -2404,6 +2404,43 @@ glyph shapes are plain geometric block letters, not refined typography;
 no kerning (fixed monospace advance only, by design). This closes out
 the Phase 53-57 program in full.
 
+## Phase 58 — MC-sized player + visible body + skin
+
+- [x] `kPlayerHalfWidth`/`kPlayerHeight`/`kEyeHeight` verified already
+  Minecraft-correct (0.3/1.8/1.62) - no numeric change needed.
+- [x] New `engine/assets::skin_texture.{h,cpp}` - real 64x64 procedural
+  skin, real Minecraft "modern" dual-arm/dual-leg UV layout, 36 named
+  per-face regions.
+- [x] New `Renderer::submit_textured_box` - arbitrary 8-corner box,
+  independent UV per face, reuses `vs_sky.sc`/`fs_sky.sc` unchanged.
+- [x] Real `rotate_yaw`/`rotate_pitch`/`character_part_corners` math in
+  `client/main.cpp`, derived to reproduce `FirstPersonCamera::
+  forward()` exactly for the same yaw/pitch.
+- [x] First-person hand icon (Phase 48) replaced by a real 3D arm box,
+  textured with the held item's own atlas UV (not the skin).
+- [x] Third-person: real 6-box Steve-like body (head/torso/2 arms/2
+  legs); frame-rate-independent walk-cycle limb swing; head follows
+  camera pitch; body yaw follows camera yaw (documented simplification);
+  whole model scaled to fit exactly inside the 1.8-block hitbox.
+- [x] Real 3-way F5 perspective cycle (First/ThirdBehind/ThirdFront),
+  closing the previous "no third-person-front" PARTIAL.
+- [x] 12 new unit tests (`SkinTextureConstants`, `SkinUvRange.*`,
+  `GenerateDefaultSkinPixels.*`).
+- [x] Verified via real headless runs, a real extended `LCU_VERIFY_HUD`
+  run (3 F5 presses cycling all 3 perspectives, exercising all 7
+  real per-frame `submit_textured_box` call sites), real
+  `LCU_VERIFY_BREAK_PLACE`/`HEALTH`/`MENU`/`INVENTORY`/`WORKBENCH`/
+  `CRAFT`/`TORCH` regression runs, and a real `LCU_BUILD_SHADER_TOOLS=
+  ON` build.
+
+`ctest` 587/587 (bgfx, up from 575) / 579/579 (non-bgfx, up from 567).
+
+Honestly scoped: what the real character model/skin looks like on a
+real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+body yaw has no real independent lag behind camera yaw; no idle/
+breathing animation for the player (Phase 59's own NPC job); no
+third-person camera collision (pre-existing gap, unchanged).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

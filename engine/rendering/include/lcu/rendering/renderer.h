@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -183,6 +184,42 @@ class Renderer : public NonCopyable {
                                  const math::Mat4& view, const math::Mat4& proj,
                                  bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, f32 u0 = 0.0f,
                                  f32 v0 = 0.0f, f32 u1 = 1.0f, f32 v1 = 1.0f);
+
+    // One face's real UV rect for submit_textured_box below.
+    struct BoxFaceUv {
+        f32 u0 = 0.0f;
+        f32 v0 = 0.0f;
+        f32 u1 = 1.0f;
+        f32 v1 = 1.0f;
+    };
+    // All 6 real faces of a box (Phase 58, the player/NPC character
+    // model + first-person arm) - unlike submit_solid_box's shared 8
+    // corners, each face gets its OWN 4 vertices so it can carry its own
+    // independent UV rect (a real Minecraft-format skin needs a
+    // different texture region per face, e.g. a torso's front is not
+    // its back - see lcu::assets::skin_texture.h).
+    struct BoxUvSet {
+        BoxFaceUv neg_x, pos_x, neg_y, pos_y, neg_z, pos_z;
+    };
+
+    // Draws an arbitrary (not necessarily axis-aligned) textured box
+    // from 8 real world-space corners the caller already computed
+    // (Phase 58) - `corners` follows the exact same index convention
+    // submit_solid_box's own `min`/`max` corner table uses (0..3 the
+    // "negative Z" face, 4..7 the "positive Z" face, in the same
+    // min/min/min .. max/max/max winding order), so any code that
+    // already knows how to build an axis-aligned box's 8 corners can
+    // feed this directly. Rotation (a character model's own body-yaw/
+    // head-pitch) is entirely the CALLER's job - this function only
+    // ever draws the 8 positions it's handed, using the exact same
+    // vs_sky.sc/fs_sky.sc pipeline/texture-binding contract
+    // submit_world_billboard already established (an invalid
+    // `atlas_texture` draws flat `color` instead, same honest
+    // fallback). Real depth test against terrain, no depth write - same
+    // reasoning every other per-frame world-space primitive here gives.
+    void submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
+                              bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
+                              bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs);
 
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in

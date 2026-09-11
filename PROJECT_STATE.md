@@ -56,9 +56,17 @@ represents a block)**, and **Phase 57 (a real, own-design procedurally-
 generated bitmap-font atlas + `engine::ui::TextRenderer`, now the
 default way HUD/menu/inventory/workbench labels draw, with bgfx's old
 debug-text buffer kept as a real `LCU_LEGACY_DEBUG_TEXT=1` fallback)**
-are done - this closes out the fourth user-directed program (Phases
+are done - this closed out the fourth user-directed program (Phases
 53-57: texture atlas, procedural MC-style textures, blocks/items on the
-atlas, a bitmap font + real text renderer) in full. See
+atlas, a bitmap font + real text renderer) in full. A fifth
+user-directed program (Phases 58-66: player model, visible NPCs, crack
+textures, transparent water, a real skin system, and full farming) is
+now in progress - **Phase 58 (a real Minecraft-proportioned 6-box
+Steve-like character model, a real procedurally-generated 64x64 skin in
+the actual MC UV layout, a first-person item-textured arm box replacing
+the old flat hand icon, and a real 3-way F5 perspective cycle)** is
+done - see TASK_QUEUE.md for per-phase detail as each of the remaining
+8 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2508,6 +2516,19 @@ None currently tracked.
   DECISIONS.md. Real leaf transparency has the identical shape of gap
   (`game:leaves`'s alpha-0 holes render solid in-chunk too, unaffected
   by Phase 56 since chunk rendering is a separate shader).
+- The Phase 58 character model's body yaw reads directly from
+  `camera.yaw` (the body always faces exactly where the camera looks,
+  horizontally) rather than a real independent, movement-driven facing
+  direction that lags behind the camera the way actual Minecraft's own
+  body/head yaw system does - a real, deliberate simplification (no
+  gameplay system in this project yet distinguishes "look direction"
+  from "movement direction" in any way a player could notice), see
+  DECISIONS.md. The player gets no idle/breathing animation (Phase 59
+  adds that for NPCs specifically, per the brief's own phasing - the
+  player itself still doesn't get one). Third-person camera distance
+  (`kThirdPersonDistance`) still has no real wall-collision pull-in - a
+  pre-existing gap from Phase 47, unchanged by Phase 58's own real
+  third-person-front addition.
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No
