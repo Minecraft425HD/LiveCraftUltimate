@@ -64,9 +64,14 @@ textures, transparent water, a real skin system, and full farming) is
 now in progress - **Phase 58 (a real Minecraft-proportioned 6-box
 Steve-like character model, a real procedurally-generated 64x64 skin in
 the actual MC UV layout, a first-person item-textured arm box replacing
-the old flat hand icon, and a real 3-way F5 perspective cycle)** is
-done - see TASK_QUEUE.md for per-phase detail as each of the remaining
-8 phases lands. See
+the old flat hand icon, and a real 3-way F5 perspective cycle)** and
+**Phase 59 (the 3 real `AIWander` entities now render as real visible
+Steve-like NPCs via `submit_character_model` - Phase 58's own body
+rendering, extracted and reused - with real wander-direction facing and
+walk/idle animation; debug wireframe boxes became a real toggle,
+default off)** are done - see TASK_QUEUE.md for per-phase detail as
+each of the remaining
+7 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2529,6 +2534,16 @@ None currently tracked.
   (`kThirdPersonDistance`) still has no real wall-collision pull-in - a
   pre-existing gap from Phase 47, unchanged by Phase 58's own real
   third-person-front addition.
+- The Phase 59 NPC walk-cycle animation speed is a fixed real constant
+  (`kNpcWalkCycleFrequency`), not scaled by each real `AIWander::
+  speed` - every NPC's legs swing at the same rate regardless of how
+  fast that specific NPC is actually moving, a real, deliberate
+  simplification (see DECISIONS.md; adding a real per-NPC rate would
+  mean exposing gameplay movement state to rendering purely for a
+  cosmetic need). Real networked remote-player avatars still have no
+  visible character model (only local `AIWander` NPCs do) - a remote
+  player still renders as, at most, a debug wireframe box when
+  `options.debug_overlay_enabled` is on, nothing at all otherwise.
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No

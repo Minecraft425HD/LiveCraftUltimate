@@ -3912,3 +3912,67 @@ pivot-rotation walk cycle for legs/arms - rejected as real additional
 complexity for a first pass the brief's own "Sinus" wording doesn't
 actually require, revisit if a later phase's own visual review (once a
 real Mac test is available) asks for it specifically.
+
+## 2026-09-11 — Phase 59: NPC animation runs on a real time clock, not a distance clock, and debug boxes fold into an existing toggle
+
+**Context:** Phase 59 extracts Phase 58's own inline third-person body
+rendering into `submit_character_model` and reuses it for the 3 real
+`AIWander` entities that have existed since Phase 6, giving them a real
+visible Steve-like body for the first time.
+
+**NPC walk-cycle/idle animation is driven by a new real elapsed-time
+clock (`npc_animation_time`), not the player's own real distance-driven
+`walk_cycle_phase`.** The player's own walk cycle can afford to be
+distance-driven because `client/main.cpp` already computes the local
+player's own exact per-frame `horizontal_delta` right where the camera/
+movement code lives. `game::systems::update_ai_wander` (in `game/
+systems`, a different module, by design decoupled from rendering - see
+that system's own earlier DECISIONS.md entry) has no equivalent
+per-frame distance value exposed back to the renderer; adding one would
+mean either growing `AIWander` itself with a new "how far did I move
+this tick" field purely for a cosmetic animation need, or duplicating
+the system's own internal movement math in the renderer to recompute
+it - both real, avoidable coupling for what a real, simpler elapsed-
+time clock already achieves honestly: `npc_animation_time` advances
+only while unpaused (so NPCs don't animate while the simulation itself
+is frozen), and every NPC's own walk-cycle frequency
+(`kNpcWalkCycleFrequency`) is a fixed constant rather than scaled by
+that NPC's own real `AIWander::speed` - a real, visible walk animation,
+just not individually speed-matched per NPC. Revisit if `AIWander`
+itself ever needs a real per-entity speed variation feature for
+gameplay reasons (at which point exposing it to the renderer stops
+being purely cosmetic plumbing).
+
+**Debug wireframe boxes (Phase 36) became a real toggle by folding into
+the EXISTING `options.debug_overlay_enabled` (F3) flag, not a new
+dedicated keybind/persisted option.** The brief's own 59.4 asks only for
+"ein Toggle, standardmäßig aus" without naming a specific control;
+`debug_overlay_enabled` already is exactly that - a real, persisted,
+already-bound "show debug visualization" preference that already
+defaults to `false` - so reusing it needed zero new `Action`s, zero new
+`Options` fields, and zero new menu rows, while still giving a real,
+working, discoverable toggle. A brand-new keybind/option would have
+been real, unnecessary surface area for a preference that's already a
+natural fit for an existing one.
+
+**Real networked remote-player avatars are out of this phase's own
+scope - only local `AIWander` NPCs get the real character model.** The
+brief's own wording ("Sichtbare NPCs" / "die 3 Entities") names the
+wandering AI specifically; multiplayer's own remote-player rendering is
+a materially different, larger feature (a real skin per connected
+player, synced over the network, not a locally-spawned NPC with a
+locally-assigned default skin) that this directive's own Phasen 58-66
+scope never separately names. Remote entities keep exactly their
+previous debug-wireframe-box representation, just now gated behind the
+same real toggle instead of being unconditionally drawn - a real,
+documented, honest scope boundary, not a silently dropped feature.
+
+**Alternatives considered:** growing `AIWander` with a real per-tick
+distance-moved field so NPC animation could match the player's own
+distance-driven scheme exactly - rejected as real, avoidable coupling
+between a gameplay component and a purely cosmetic rendering need (see
+above); a brand-new "Debug-Boxen" keybind/option separate from the
+existing debug overlay - rejected as unneeded surface area duplicating
+an already-correct existing toggle; extending Phase 59 to also render
+real networked remote-player avatars - rejected as materially larger
+scope the brief itself doesn't name for this phase.

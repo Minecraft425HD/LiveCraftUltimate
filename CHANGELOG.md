@@ -2,7 +2,51 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59
+
+### Phase 59
+
+- **Real visible NPCs**: `submit_character_model` (Phase 58's own
+  third-person body rendering) extracted into a real, reusable
+  function - the local player's own third-person body and every
+  wandering AI entity now go through the exact same function, just
+  fed different position/yaw/pitch/walk-phase. The 3 AI entities
+  spawned since Phase 6 now render as real Steve-like figures, not
+  invisible logic-only points.
+- **Real NPC facing + animation**: each NPC's own yaw is derived from
+  its real `AIWander::target` direction (faces where it's walking, not
+  a fixed default); a real walk-cycle limb swing plays while
+  `wait_seconds <= 0` (moving), a real small head-wobble idle animation
+  plays while `wait_seconds > 0` (waiting) - both driven by a new
+  `npc_animation_time` real elapsed-time clock (advances only while
+  unpaused), since NPC movement (unlike the player's own) has no
+  per-frame distance delta exposed back to the renderer to drive an
+  exact walk-cycle from.
+- **Debug wireframe boxes are now a real toggle, default off**: bundled
+  into the existing `options.debug_overlay_enabled` (F3) flag rather
+  than a new dedicated keybind - it was already a real "show debug
+  visualization" preference with exactly the right default. Real
+  remote-player avatars (networked mode) stay out of this phase's own
+  scope (the brief names AI wander entities specifically); remote
+  entities keep their previous debug-box-only representation, now
+  gated behind the same toggle instead of always-on.
+- Verified via real headless runs (default run logs "Spawned 3
+  wandering AI entities" as before, now rendered as real models every
+  frame), real `LCU_VERIFY_HUD`/`BREAK_PLACE`/`HEALTH`/`MENU`/
+  `INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH` regression runs (all still
+  complete their full frame counts cleanly), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files touched -
+  `submit_character_model` reuses Phase 58's own `submit_textured_box`
+  unchanged). `ctest` 587/587 (bgfx) / 579/579 (non-bgfx) - unchanged
+  counts, real-rendering wiring on top of Phase 58's already-tested
+  math/primitives, not new pure-logic surface.
+- Honestly scoped: what real NPCs look like walking around on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; NPC
+  walk-cycle speed is a fixed real constant (`kNpcWalkCycleFrequency`),
+  not derived from each NPC's own real `AIWander::speed` (a real,
+  documented simplification, see DECISIONS.md); no player-vs-NPC
+  collision (unchanged, pre-existing "collision with player still
+  inactive" behavior per the brief's own note).
 
 ### Phase 58
 

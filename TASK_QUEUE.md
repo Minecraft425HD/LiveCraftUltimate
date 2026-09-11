@@ -2441,6 +2441,39 @@ body yaw has no real independent lag behind camera yaw; no idle/
 breathing animation for the player (Phase 59's own NPC job); no
 third-person camera collision (pre-existing gap, unchanged).
 
+## Phase 59 — Visible NPCs
+
+- [x] `submit_character_model` (Phase 58's own inline third-person body
+  rendering) extracted into a real, reusable function - the local
+  player's own third-person body and every real `AIWander` entity now
+  go through it.
+- [x] Each NPC's own yaw derived from its real `AIWander::target`
+  direction; real walk-cycle limb swing while `wait_seconds <= 0`, real
+  small head-wobble idle animation while `wait_seconds > 0`, both
+  driven by a new `npc_animation_time` real elapsed-time clock.
+- [x] Debug wireframe boxes (Phase 36) are now a real toggle, default
+  off - bundled into the existing `options.debug_overlay_enabled` (F3)
+  flag, no new keybind.
+- [x] Real networked remote-player avatars stay out of scope (the brief
+  names AI wander entities specifically) - remote entities keep their
+  previous debug-box-only representation, now gated behind the same
+  toggle.
+- [x] Verified via real headless runs (default run still logs "Spawned
+  3 wandering AI entities", now rendered as real models every frame),
+  real `LCU_VERIFY_HUD`/`BREAK_PLACE`/`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH` regression runs, and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 587/587 (bgfx) / 579/579 (non-bgfx) - unchanged counts,
+real-rendering wiring on top of Phase 58's already-tested math/
+primitives, not new pure-logic surface.
+
+Honestly scoped: what real NPCs look like walking around on a real
+GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; NPC
+walk-cycle speed is a fixed constant, not derived from each NPC's own
+real `AIWander::speed`; no player-vs-NPC collision (unchanged,
+pre-existing).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

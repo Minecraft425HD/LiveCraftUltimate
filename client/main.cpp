@@ -281,6 +281,13 @@ constexpr lcu::f32 kWalkCyclePerBlock = 9.0f;    // radians of phase per block w
 constexpr lcu::f32 kLimbSwingAmplitude = 0.22f;  // blocks, forward/back translation
 constexpr lcu::f32 kArmSwingAmplitude = 0.16f;   // blocks - a bit less than the legs'.
 
+// Real NPC animation (Phase 59.3) - npc_animation_time-driven (see that
+// variable's own doc comment for why NPCs use a time clock rather than
+// the player's own distance-driven kWalkCyclePerBlock).
+constexpr lcu::f32 kNpcWalkCycleFrequency = 6.0f;          // radians of phase per real second while wandering.
+constexpr lcu::f32 kNpcIdleHeadWobbleFrequency = 1.3f;     // radians per real second while idling.
+constexpr lcu::f32 kNpcIdleHeadWobbleAmplitude = 0.12f;    // radians (a small, real head nod).
+
 // Real first-person arm box (Phase 58.2, replaces the flat 2D hand icon
 // - see kHandSwingDuration above) - a small box held in view-space in
 // front of the camera, textured with the real currently-held item's own
@@ -710,6 +717,82 @@ std::array<lcu::math::Vec3, 8> character_part_corners(const lcu::math::Vec3& piv
         world_corners[i] = p + pivot;
     }
     return world_corners;
+}
+
+// Real, reusable character-model rendering (Phase 58, extracted into
+// its own function this phase per the brief's own phasing) - draws a
+// real 6-box Steve-like model (head/torso/2 arms/2 legs) at
+// `feet_position`, facing `body_yaw`, head additionally tilted by
+// `head_pitch`, limbs swinging by a real `walk_phase` (see
+// kWalkCyclePerBlock's own doc comment - callers own advancing this at
+// whatever rate is right for them: the local player advances it by
+// real distance travelled, Phase 59's own NPCs by real elapsed wander
+// time, since neither shares the other's own movement-speed
+// bookkeeping). The one real caller-visible difference from Phase 58's
+// own original inline version: this takes `skin_texture` as a
+// parameter rather than reading a client-local variable, so a future
+// caller (e.g. a Phase 62 NPC with its own distinct skin) can pass a
+// different real texture per entity.
+void submit_character_model(lcu::rendering::Renderer& renderer, bgfx::TextureHandle skin_texture,
+                             bgfx::ProgramHandle sky_program, const lcu::math::Mat4& view, const lcu::math::Mat4& proj,
+                             const lcu::math::Vec3& feet_position, lcu::f32 body_yaw, lcu::f32 head_pitch,
+                             lcu::f32 walk_phase, lcu::u32& draw_calls) {
+    const auto world_pivot = [&](const lcu::math::Vec3& local_offset) {
+        return feet_position + rotate_yaw(local_offset, body_yaw);
+    };
+    const lcu::f32 leg_top_y = kLimbHeight;
+    const lcu::f32 shoulder_y = kLimbHeight + kTorsoHeight;
+    const lcu::f32 leg_swing = std::sin(walk_phase) * kLimbSwingAmplitude;
+    const lcu::f32 arm_swing = std::sin(walk_phase) * kArmSwingAmplitude;
+
+    const auto face_uv = [](lcu::assets::SkinRegion region) {
+        const lcu::assets::SkinUvRange r = lcu::assets::skin_uv_range(region);
+        return lcu::rendering::Renderer::BoxFaceUv{r.u0, r.v0, r.u1, r.v1};
+    };
+    const auto submit_part = [&](const lcu::math::Vec3& pivot, const lcu::math::Vec3& local_center,
+                                  const lcu::math::Vec3& half_extents, lcu::f32 pitch,
+                                  const lcu::rendering::Renderer::BoxUvSet& uvs) {
+        const std::array<lcu::math::Vec3, 8> corners =
+            character_part_corners(pivot, local_center, half_extents, body_yaw, pitch);
+        renderer.submit_textured_box(corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, skin_texture, uvs);
+        if (bgfx::isValid(sky_program)) {
+            ++draw_calls;
+        }
+    };
+
+    submit_part(world_pivot({kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, leg_swing},
+                {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::RightLegLeft), face_uv(lcu::assets::SkinRegion::RightLegRight),
+                 face_uv(lcu::assets::SkinRegion::RightLegBottom), face_uv(lcu::assets::SkinRegion::RightLegTop),
+                 face_uv(lcu::assets::SkinRegion::RightLegBack), face_uv(lcu::assets::SkinRegion::RightLegFront)});
+    submit_part(world_pivot({-kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, -leg_swing},
+                {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::LeftLegLeft), face_uv(lcu::assets::SkinRegion::LeftLegRight),
+                 face_uv(lcu::assets::SkinRegion::LeftLegBottom), face_uv(lcu::assets::SkinRegion::LeftLegTop),
+                 face_uv(lcu::assets::SkinRegion::LeftLegBack), face_uv(lcu::assets::SkinRegion::LeftLegFront)});
+
+    submit_part(world_pivot({0.0f, leg_top_y, 0.0f}), {0.0f, kTorsoHeight * 0.5f, 0.0f},
+                {kTorsoHalfWidth, kTorsoHeight * 0.5f, kTorsoHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::TorsoLeft), face_uv(lcu::assets::SkinRegion::TorsoRight),
+                 face_uv(lcu::assets::SkinRegion::TorsoBottom), face_uv(lcu::assets::SkinRegion::TorsoTop),
+                 face_uv(lcu::assets::SkinRegion::TorsoBack), face_uv(lcu::assets::SkinRegion::TorsoFront)});
+
+    submit_part(world_pivot({kTorsoHalfWidth + kLimbHalfWidth, shoulder_y, 0.0f}),
+                {0.0f, -kLimbHeight * 0.5f, -arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::RightArmLeft), face_uv(lcu::assets::SkinRegion::RightArmRight),
+                 face_uv(lcu::assets::SkinRegion::RightArmBottom), face_uv(lcu::assets::SkinRegion::RightArmTop),
+                 face_uv(lcu::assets::SkinRegion::RightArmBack), face_uv(lcu::assets::SkinRegion::RightArmFront)});
+    submit_part(world_pivot({-(kTorsoHalfWidth + kLimbHalfWidth), shoulder_y, 0.0f}),
+                {0.0f, -kLimbHeight * 0.5f, arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::LeftArmLeft), face_uv(lcu::assets::SkinRegion::LeftArmRight),
+                 face_uv(lcu::assets::SkinRegion::LeftArmBottom), face_uv(lcu::assets::SkinRegion::LeftArmTop),
+                 face_uv(lcu::assets::SkinRegion::LeftArmBack), face_uv(lcu::assets::SkinRegion::LeftArmFront)});
+
+    submit_part(world_pivot({0.0f, shoulder_y, 0.0f}), {0.0f, kHeadSize * 0.5f, 0.0f},
+                {kHeadSize * 0.5f, kHeadSize * 0.5f, kHeadSize * 0.5f}, head_pitch,
+                {face_uv(lcu::assets::SkinRegion::HeadLeft), face_uv(lcu::assets::SkinRegion::HeadRight),
+                 face_uv(lcu::assets::SkinRegion::HeadBottom), face_uv(lcu::assets::SkinRegion::HeadTop),
+                 face_uv(lcu::assets::SkinRegion::HeadBack), face_uv(lcu::assets::SkinRegion::HeadFront)});
 }
 #endif  // defined(LCU_ENABLE_BGFX)
 
@@ -2228,6 +2311,17 @@ int main() {
     // still.
     lcu::f32 walk_cycle_phase = 0.0f;
 
+    // Real NPC animation clock (Phase 59.3) - unlike the player's own
+    // walk_cycle_phase (driven by real distance travelled, since the
+    // player's own per-frame movement delta is already computed
+    // locally), NPC wander movement happens inside
+    // game::systems::update_ai_wander with no per-entity distance
+    // bookkeeping exposed back to the renderer - a real elapsed-time
+    // clock is the honest alternative available here, advancing only
+    // while unpaused (so NPCs don't visibly "walk in place" while the
+    // menu/inventory is open and the simulation itself is frozen).
+    lcu::f32 npc_animation_time = 0.0f;
+
     // Real "press any key to rebind" capture (Phase 46's controls
     // screen): set by a row's on_activate, consumed by
     // lcu::platform::poll_any_pressed_key() below once per frame while
@@ -3408,6 +3502,7 @@ int main() {
             }
         } else if (!paused) {
             game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
+            npc_animation_time += delta_seconds;
         }
         // Real pause (Phase 46, brief section 60's menu framework:
         // "game pauses (simulation, audio, network)"): everything from
@@ -4105,22 +4200,31 @@ int main() {
             }
         }
 
-        // Entity debug boxes (Phase 36, brief section 60) - a real
-        // AABB per visible entity, reusing make_player_aabb (the exact
-        // same box shape the player's own collision already uses; AI/
-        // remote entity Position is a feet position too, same
-        // convention the spawn code already established). Drawn via
-        // the sky program (position+flat-color, no lighting concept -
-        // see submit_wireframe_box's doc comment) since a dedicated
-        // debug shader would be the same shader twice for no reason.
+        // Entity rendering (Phase 36 debug boxes, real visible NPC
+        // models since Phase 59) - `entity_count` itself (fed to the
+        // debug overlay's own stats) is always accurate regardless of
+        // what's actually drawn below; only the VISUALS are gated.
+        // Debug wireframe boxes (Phase 36) are now a real toggle,
+        // default off (Phase 59.4) - bundled into the existing
+        // `options.debug_overlay_enabled` (F3) flag rather than a new
+        // dedicated keybind, since it's already a real "show debug
+        // visualization" preference with exactly this default.
         lcu::u32 entity_count = 0;
         if (networked) {
+            // Real remote-player avatars are out of this phase's own
+            // scope (the brief's own "sichtbare NPCs" names AI wander
+            // entities specifically, not networked remote players -
+            // see DECISIONS.md); remote entities keep the same debug
+            // wireframe box every entity had before this phase, now
+            // gated behind the same real toggle.
             for (const auto& [entity_index, interpolator] : remote_entity_interpolators) {
                 const lcu::math::Vec3 pos = interpolator.interpolated_position(network_clock);
-                const lcu::physics::AABB box = make_player_aabb(pos);
-                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
-                if (bgfx::isValid(sky_program)) {
-                    ++draw_calls;
+                if (options.debug_overlay_enabled) {
+                    const lcu::physics::AABB box = make_player_aabb(pos);
+                    renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
                 }
                 ++entity_count;
             }
@@ -4128,11 +4232,42 @@ int main() {
             for (const lcu::ecs::EntityId& entity :
                  entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
                 const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
-                const lcu::physics::AABB box = make_player_aabb(pos);
-                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
-                if (bgfx::isValid(sky_program)) {
-                    ++draw_calls;
+                const game::components::AIWander* wander = entity_registry.get_component<game::components::AIWander>(entity);
+
+                if (options.debug_overlay_enabled) {
+                    const lcu::physics::AABB box = make_player_aabb(pos);
+                    renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
                 }
+
+                // Real NPC character model (Phase 59.1/59.2) - the exact
+                // same submit_character_model the local player's own
+                // third-person body uses (Phase 58's own extraction),
+                // just fed this NPC's own real position/facing instead.
+                const bool idle = wander != nullptr && wander->wait_seconds > 0.0f;
+                lcu::f32 npc_yaw = 0.0f;
+                if (wander != nullptr && !idle) {
+                    // Faces its own real wander target - see rotate_yaw's
+                    // own doc comment for the derivation (this is its
+                    // exact inverse: direction vector -> yaw).
+                    const lcu::f32 dx = wander->target.x - pos.x;
+                    const lcu::f32 dz = wander->target.z - pos.z;
+                    npc_yaw = std::atan2(-dx, -dz);
+                }
+                // Real idle animation (Phase 59.3: "leichtes Atmen,
+                // kleiner Kopf-Wackler") - a small real head-pitch
+                // oscillation while idling, driven by the same real
+                // npc_animation_time clock the walk cycle itself uses
+                // while moving, at a much slower/smaller amplitude.
+                const lcu::f32 idle_head_pitch =
+                    idle ? std::sin(npc_animation_time * kNpcIdleHeadWobbleFrequency) * kNpcIdleHeadWobbleAmplitude
+                         : 0.0f;
+                const lcu::f32 npc_walk_phase = idle ? 0.0f : npc_animation_time * kNpcWalkCycleFrequency;
+                submit_character_model(renderer, skin_texture, sky_program, view, proj, pos, npc_yaw,
+                                        idle_head_pitch, npc_walk_phase, draw_calls);
+
                 ++entity_count;
             }
         }
@@ -4268,73 +4403,8 @@ int main() {
             }
         } else {
             const lcu::math::Vec3 body_feet{player.aabb.center().x, player.aabb.min.y, player.aabb.center().z};
-            const lcu::f32 body_yaw = camera.yaw;
-            const auto world_pivot = [&](const lcu::math::Vec3& local_offset) {
-                return body_feet + rotate_yaw(local_offset, body_yaw);
-            };
-            const lcu::f32 leg_top_y = kLimbHeight;
-            const lcu::f32 shoulder_y = kLimbHeight + kTorsoHeight;
-            const lcu::f32 leg_swing = std::sin(walk_cycle_phase) * kLimbSwingAmplitude;
-            const lcu::f32 arm_swing = std::sin(walk_cycle_phase) * kArmSwingAmplitude;
-
-            const auto face_uv = [](lcu::assets::SkinRegion region) {
-                const lcu::assets::SkinUvRange r = lcu::assets::skin_uv_range(region);
-                return lcu::rendering::Renderer::BoxFaceUv{r.u0, r.v0, r.u1, r.v1};
-            };
-            const auto submit_part = [&](const lcu::math::Vec3& pivot, const lcu::math::Vec3& local_center,
-                                          const lcu::math::Vec3& half_extents, lcu::f32 pitch,
-                                          const lcu::rendering::Renderer::BoxUvSet& uvs) {
-                const std::array<lcu::math::Vec3, 8> corners =
-                    character_part_corners(pivot, local_center, half_extents, body_yaw, pitch);
-                renderer.submit_textured_box(corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, skin_texture, uvs);
-                if (bgfx::isValid(sky_program)) {
-                    ++draw_calls;
-                }
-            };
-
-            // Right leg / left leg (local +X = the character's own right
-            // side, see rotate_yaw's own doc comment).
-            submit_part(world_pivot({kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, leg_swing},
-                        {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
-                        {face_uv(lcu::assets::SkinRegion::RightLegLeft), face_uv(lcu::assets::SkinRegion::RightLegRight),
-                         face_uv(lcu::assets::SkinRegion::RightLegBottom), face_uv(lcu::assets::SkinRegion::RightLegTop),
-                         face_uv(lcu::assets::SkinRegion::RightLegBack), face_uv(lcu::assets::SkinRegion::RightLegFront)});
-            submit_part(world_pivot({-kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, -leg_swing},
-                        {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
-                        {face_uv(lcu::assets::SkinRegion::LeftLegLeft), face_uv(lcu::assets::SkinRegion::LeftLegRight),
-                         face_uv(lcu::assets::SkinRegion::LeftLegBottom), face_uv(lcu::assets::SkinRegion::LeftLegTop),
-                         face_uv(lcu::assets::SkinRegion::LeftLegBack), face_uv(lcu::assets::SkinRegion::LeftLegFront)});
-
-            // Torso.
-            submit_part(world_pivot({0.0f, leg_top_y, 0.0f}), {0.0f, kTorsoHeight * 0.5f, 0.0f},
-                        {kTorsoHalfWidth, kTorsoHeight * 0.5f, kTorsoHalfDepth}, 0.0f,
-                        {face_uv(lcu::assets::SkinRegion::TorsoLeft), face_uv(lcu::assets::SkinRegion::TorsoRight),
-                         face_uv(lcu::assets::SkinRegion::TorsoBottom), face_uv(lcu::assets::SkinRegion::TorsoTop),
-                         face_uv(lcu::assets::SkinRegion::TorsoBack), face_uv(lcu::assets::SkinRegion::TorsoFront)});
-
-            // Right arm / left arm - swing opposite the same-side leg for
-            // a real, if simple, walking gait.
-            submit_part(world_pivot({kTorsoHalfWidth + kLimbHalfWidth, shoulder_y, 0.0f}),
-                        {0.0f, -kLimbHeight * 0.5f, -arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth},
-                        0.0f,
-                        {face_uv(lcu::assets::SkinRegion::RightArmLeft), face_uv(lcu::assets::SkinRegion::RightArmRight),
-                         face_uv(lcu::assets::SkinRegion::RightArmBottom), face_uv(lcu::assets::SkinRegion::RightArmTop),
-                         face_uv(lcu::assets::SkinRegion::RightArmBack), face_uv(lcu::assets::SkinRegion::RightArmFront)});
-            submit_part(world_pivot({-(kTorsoHalfWidth + kLimbHalfWidth), shoulder_y, 0.0f}),
-                        {0.0f, -kLimbHeight * 0.5f, arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth},
-                        0.0f,
-                        {face_uv(lcu::assets::SkinRegion::LeftArmLeft), face_uv(lcu::assets::SkinRegion::LeftArmRight),
-                         face_uv(lcu::assets::SkinRegion::LeftArmBottom), face_uv(lcu::assets::SkinRegion::LeftArmTop),
-                         face_uv(lcu::assets::SkinRegion::LeftArmBack), face_uv(lcu::assets::SkinRegion::LeftArmFront)});
-
-            // Head - the one part with real pitch (follows camera.pitch,
-            // see rotate_pitch's own doc comment); yaw stays body_yaw
-            // (== camera.yaw in this implementation, see DECISIONS.md).
-            submit_part(world_pivot({0.0f, shoulder_y, 0.0f}), {0.0f, kHeadSize * 0.5f, 0.0f},
-                        {kHeadSize * 0.5f, kHeadSize * 0.5f, kHeadSize * 0.5f}, camera.pitch,
-                        {face_uv(lcu::assets::SkinRegion::HeadLeft), face_uv(lcu::assets::SkinRegion::HeadRight),
-                         face_uv(lcu::assets::SkinRegion::HeadBottom), face_uv(lcu::assets::SkinRegion::HeadTop),
-                         face_uv(lcu::assets::SkinRegion::HeadBack), face_uv(lcu::assets::SkinRegion::HeadFront)});
+            submit_character_model(renderer, skin_texture, sky_program, view, proj, body_feet, camera.yaw,
+                                    camera.pitch, walk_cycle_phase, draw_calls);
         }
 
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
