@@ -2979,3 +2979,61 @@ capability now and only wiring it up to a real icon widget later
 it produces anything sensible is exactly the "wrote code, never really
 verified it" trap this project's discipline argues against, more so
 than deferring the whole feature honestly).
+
+## 2026-09-11 — Options persistence: plain text, `SDL_GetPrefPath`, FOV left unapplied
+
+**Context:** Phase 45 asked for a real persisted `Options` struct (mouse
+sensitivity, FOV, HUD/debug-overlay toggles, key bindings) saved to a
+real per-OS user config location, in the exact `key=value` text format
+its own spec laid out.
+
+**Decision:** `Options::default_path()` uses `SDL_GetPrefPath(
+"LiveCraftUltimate", "LiveCraftUltimate")`, not a hand-picked path per
+platform - SDL already resolves the correct OS convention (XDG on
+Linux, `Application Support` on macOS, `%APPDATA%` on Windows) and this
+project already depends on SDL for exactly this kind of platform
+knowledge elsewhere (`Window::executable_base_path`, Phase 43). Verified
+directly from SDL3's own header
+(`SDL3/SDL_filesystem.h`) that `SDL_GetPrefPath` returns a `char*`
+requiring `SDL_free()`, unlike `SDL_GetBasePath()` (which returns SDL-
+owned `const char*`) - both are used correctly for their own ownership
+rules, not copy-pasted from one to the other.
+
+**Format is genuinely tolerant, not just documented as such:** a
+missing file returns `false` and leaves every default untouched (first
+run always looks like this - not an error path); a corrupt or
+unrecognized line (bad float/int, unknown action name, unknown key
+name) is silently skipped and every other real line on either side of
+it still loads. Verified with a real load call against a real file
+containing deliberately interleaved garbage lines, not just reasoned
+about.
+
+**`Action` gained a real bidirectional name table (`action_name`/
+`parse_action_name`, 29 entries) specifically so `options.txt` stores
+human-readable keys (`key.move_forward=W`) rather than raw enum
+indices** - a raw index would silently break every existing player's
+save file the moment a new `Action` got inserted anywhere but the end
+of the enum, which is exactly the kind of fragile-by-construction
+format this project's own discipline argues against elsewhere (see the
+`PhysicalKey` unified-space entry above, which made the same call for
+key codes).
+
+**`options.fov` is persisted and round-trips but is not yet applied to
+the camera's projection matrix - a genuine, honestly-scoped gap, not an
+oversight.** Nothing in `client/main.cpp` currently reads it for
+rendering. Wiring FOV into the projection now, with no menu (Phase 46)
+to actually change it in-game, would mean the only way to ever exercise
+that code path is hand-editing `options.txt` - not a real verification
+this project's discipline would accept as done. It's left honestly
+unused until Phase 46 gives it a real, player-facing consumer.
+
+**Alternatives considered:** a binary/serialized format (rejected - the
+phase spec explicitly asked for human-readable `key=value` text, and a
+player should be able to hand-edit `options.txt` the way Minecraft's
+own `options.txt` supports); storing `Action` bindings by raw enum
+index (rejected - see above, fragile against any future enum
+reordering or insertion); wiring `options.fov` into the camera
+projection now anyway "since the field already exists" (rejected -
+untestable without a real consumer, and this project has repeatedly
+preferred an honest "not yet" over code with no way to verify it
+matters, e.g. Phase 44's deferred item-icon rendering just above).

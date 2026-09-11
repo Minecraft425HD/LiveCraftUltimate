@@ -39,6 +39,7 @@
 #include "lcu/physics/raycast.h"
 #include "lcu/platform/input.h"
 #include "lcu/platform/key_bindings.h"
+#include "lcu/platform/options.h"
 #include "lcu/platform/window.h"
 #include "lcu/player/camera.h"
 #include "lcu/player/movement_input.h"
@@ -185,11 +186,6 @@ constexpr lcu::f32 kPlayerHeight = 1.8f;
 constexpr lcu::f32 kEyeHeight = 1.62f;
 constexpr lcu::f32 kMoveSpeed = 4.3f;    // blocks/s
 constexpr lcu::f32 kLookSpeed = 2.0f;    // radians/s, arrow-key look (see platform/input.h)
-// Radians of camera rotation per raw SDL mouse-motion pixel (Phase 43) -
-// Minecraft's own default sensitivity setting maps to almost exactly this
-// value; Phase 46 is expected to make this a real, saved options.txt
-// setting instead of a fixed constant (see engine/platform/options.h).
-constexpr lcu::f32 kMouseSensitivity = 0.0022f;
 constexpr lcu::f32 kInteractRange = 6.0f;
 
 // Crosshair (Phase 44): the first real consumer of the new 2D UI quad
@@ -1307,7 +1303,25 @@ int main() {
     // in this sandbox.
     game::systems::DayNightCycle day_night_cycle(kDayLengthSeconds);
 
-    lcu::platform::KeyBindings key_bindings;
+    // Persistent options (Phase 45): loaded once at startup - real
+    // Minecraft-parity KeyBindings/mouse-sensitivity/HUD defaults if no
+    // options.txt exists yet at this real, per-OS location (a real,
+    // expected first-run state, not an error - see Options::load's own
+    // doc comment), the user's real saved choices otherwise. Phase 46's
+    // options/controls menu is the first thing that will actually
+    // *change* this at runtime; this phase only wires up the real
+    // load/save mechanics and lets the client's existing systems
+    // consume them (mouse sensitivity, HUD/debug-overlay visibility,
+    // the actual keymap) instead of the fixed constants/fresh-default
+    // KeyBindings they used through Phase 44.
+    lcu::platform::Options options;
+    const std::string options_path = lcu::platform::Options::default_path();
+    if (options.load(options_path)) {
+        LCU_LOG_INFO("Loaded options from \"{}\"", options_path);
+    } else {
+        LCU_LOG_INFO("No options file at \"{}\" yet - using real defaults", options_path);
+    }
+
     lcu::platform::DesktopInputBackend input_backend;
     lcu::platform::InputState input;
     lcu::platform::InputState previous_input;
@@ -1357,7 +1371,7 @@ int main() {
     auto last_tick = std::chrono::steady_clock::now();
 
     while (window.pump_events()) {
-        input_backend.update(key_bindings, input);
+        input_backend.update(options.key_bindings, input);
 
         // Real mouse-capture management (Phase 43): ESC/Tab or losing
         // window focus releases capture; clicking while free re-captures
@@ -1674,7 +1688,8 @@ int main() {
         // back, before the recapture click lands) never spuriously spins
         // the camera from residual/incidental motion.
         if (window.relative_mouse_mode()) {
-            camera.add_yaw_pitch(input.mouse_delta_x() * kMouseSensitivity, -input.mouse_delta_y() * kMouseSensitivity);
+            camera.add_yaw_pitch(input.mouse_delta_x() * options.mouse_sensitivity,
+                                 -input.mouse_delta_y() * options.mouse_sensitivity);
         }
 
         if (input.is_down(lcu::platform::Action::LookLeft)) {
@@ -2064,7 +2079,10 @@ int main() {
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
         // queued via submit_ui_quad, then one real draw call via
         // flush_ui_quads (see kCrosshairSize's own doc comment above).
-        {
+        // Gated on options.hud_enabled (Phase 45) - the first real
+        // consumer of that persisted flag, not just a field that gets
+        // saved/loaded without affecting anything.
+        if (options.hud_enabled) {
             const auto screen_center_x = static_cast<lcu::f32>(renderer_desc.width) / 2.0f;
             const auto screen_center_y = static_cast<lcu::f32>(renderer_desc.height) / 2.0f;
             renderer.submit_ui_quad(screen_center_x - kCrosshairSize / 2.0f,
@@ -2073,17 +2091,25 @@ int main() {
             renderer.submit_ui_quad(screen_center_x - kCrosshairThickness / 2.0f,
                                      screen_center_y - kCrosshairSize / 2.0f, kCrosshairThickness, kCrosshairSize,
                                      kCrosshairColor);
-            const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
-            renderer.flush_ui_quads(ui2d_program);
-            if (ui_had_quads && bgfx::isValid(ui2d_program)) {
-                ++draw_calls;
-            }
+        }
+        const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
+        renderer.flush_ui_quads(ui2d_program);
+        if (ui_had_quads && bgfx::isValid(ui2d_program)) {
+            ++draw_calls;
         }
 
-        lcu::ui::draw_debug_overlay(
-            renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
-            {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
-             job_system.unfinished_job_count()});
+        // Debug overlay (FPS/chunks/entities/draw-calls/jobs) gated on
+        // options.debug_overlay_enabled (Phase 45) - real use of the
+        // second persisted HUD flag, independent of hud_enabled (the
+        // crosshair and the debug overlay are two separate real toggles,
+        // matching Phase 46's own planned "HUD: an/aus" / "Debug-
+        // Overlay: an/aus" as two distinct options-screen rows).
+        if (options.debug_overlay_enabled) {
+            lcu::ui::draw_debug_overlay(
+                renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
+                {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
+                 job_system.unfinished_job_count()});
+        }
         renderer.end_frame();
 #endif
 
@@ -2136,6 +2162,15 @@ int main() {
             LCU_LOG_INFO("AI entity (index={}) at ({:.2f}, {:.2f}, {:.2f})", entity.index, pos.x, pos.y, pos.z);
         }
     }
+
+    // Real save-on-exit (Phase 45): Phase 46's options/controls menu
+    // will also save on every change once it exists, but a clean exit
+    // is a real, honest trigger on its own - it's what actually
+    // creates options.txt for a first-time run (nothing has written to
+    // it yet otherwise), and round-trips any values this phase's
+    // headless verification runs never actually change back out again.
+    options.save(options_path);
+    LCU_LOG_INFO("Saved options to \"{}\"", options_path);
 
     LCU_LOG_INFO("LiveCraftUltimate client shutting down after {} frames", frame);
     return 0;

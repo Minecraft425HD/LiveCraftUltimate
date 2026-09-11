@@ -59,7 +59,7 @@ target_link_libraries(VoxelTests PRIVATE
 # the only configuration LcuPlatform (and the SDL3 it links) is built in.
 if(TARGET Lcu::Platform)
     target_sources(VoxelTests PRIVATE platform/input_test.cpp platform/touch_input_test.cpp
-                                       platform/key_bindings_test.cpp)
+                                       platform/key_bindings_test.cpp platform/options_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Platform)
 endif()
 

@@ -34,6 +34,17 @@ constexpr PhysicalKey kMouseMiddleKey = -4;
 std::string physical_key_name(PhysicalKey key);
 PhysicalKey parse_physical_key(const std::string& name);
 
+// Human-readable, round-trippable name for an Action itself (Phase 45's
+// options.txt persistence: each `key.<action_name>=<physical_key_name>`
+// line needs both halves as real strings) - lowercase_snake_case,
+// matching Action's own enumerator names. `parse_action_name` is the
+// reverse: returns false (leaving `out` unchanged) for an unrecognized
+// name, the same "don't apply, don't crash" tolerance
+// parse_physical_key's kUnboundKey fallback gives a corrupt options.txt
+// line.
+std::string action_name(Action action);
+bool parse_action_name(const std::string& name, Action& out);
+
 // Real rebindable keymap (Phase 43, brief section 27's "configurable
 // keymapping"): each Action maps to up to kMaxBindingsPerAction physical
 // keys - letting one action (e.g. Interact) be reachable from both a

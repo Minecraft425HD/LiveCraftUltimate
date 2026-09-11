@@ -158,3 +158,24 @@ TEST(PhysicalKey, UnknownNameParsesAsUnbound) {
     EXPECT_EQ(parse_physical_key(""), kUnboundKey);
     EXPECT_EQ(physical_key_name(kUnboundKey), "UNBOUND");
 }
+
+TEST(ActionName, EveryActionHasARealNameAndRoundTrips) {
+    // Real completeness check (Phase 45's options.txt persistence needs
+    // every Action representable, not just the ones a test happens to
+    // pick) - walks the whole enum rather than sampling a few.
+    for (lcu::usize i = 0; i < static_cast<lcu::usize>(Action::Count); ++i) {
+        const auto action = static_cast<Action>(i);
+        const std::string name = lcu::platform::action_name(action);
+        EXPECT_NE(name, "unknown") << "Action index " << i << " has no real name";
+
+        Action parsed{};
+        ASSERT_TRUE(lcu::platform::parse_action_name(name, parsed)) << "name=\"" << name << "\"";
+        EXPECT_EQ(parsed, action) << "name=\"" << name << "\"";
+    }
+}
+
+TEST(ActionName, UnknownNameFailsToParse) {
+    Action out = Action::Jump;
+    EXPECT_FALSE(lcu::platform::parse_action_name("not_a_real_action", out));
+    EXPECT_EQ(out, Action::Jump) << "a failed parse must not touch the output";
+}

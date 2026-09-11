@@ -2,7 +2,63 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45
+
+### Phase 45
+
+- **Real persistent options**: `engine/platform::Options` (new
+  `options.{h,cpp}`) - `mouse_sensitivity`, `fov`, `hud_enabled`,
+  `debug_overlay_enabled`, and a full `KeyBindings` instance, all
+  loaded from and saved to a real `key=value` text file
+  (`# comments`, blank lines skipped) at `SDL_GetPrefPath(
+  "LiveCraftUltimate", "LiveCraftUltimate")` (a genuine per-OS user
+  config directory, e.g. `~/.local/share/LiveCraftUltimate/
+  LiveCraftUltimate/options.txt` on Linux) via `Options::default_path()`.
+  Every one of `KeyBindings`' 29 `Action`s round-trips through a new
+  bidirectional `action_name`/`parse_action_name` table (`key.<action>=
+  <key>`, plus `key.<action>.alt=<key>` only when a real second binding
+  exists).
+- **Real tolerance, not just a happy path**: a missing file leaves
+  every default untouched and `load()` returns `false` (not an error -
+  first run always looks like this); a corrupt or unrecognized line
+  (bad number, unknown action name, unknown key name) is skipped and
+  every other real line still loads, verified by dedicated tests that
+  deliberately interleave garbage lines between real ones.
+- **`VoxelClient` now genuinely uses this instead of hardcoded
+  constants**: the former `kMouseSensitivity` constant is gone,
+  replaced by `options.mouse_sensitivity`; the crosshair (Phase 44) is
+  now gated behind `options.hud_enabled`; the debug overlay is now
+  gated behind `options.debug_overlay_enabled` - a real behavior
+  change, since that option defaults to `false` (matching this
+  project's own Phase 45 spec example and Minecraft's own F3-gated
+  convention), so the overlay no longer renders unconditionally as it
+  did through Phase 44. Options load at startup and save on exit; no
+  menu UI writes to it yet (Phase 46).
+- 7 new `Options` unit tests (default values, missing-file behavior,
+  scalar round-trip, keybinding round-trip, corrupt-line tolerance,
+  unrecognized-name tolerance, conditional `.alt` line) plus 2 new
+  `ActionName` tests (every one of the 29 real `Action`s has a real
+  name and round-trips; an unknown name fails to parse rather than
+  aliasing to some action).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs (byte-identical to Phase 44, plus the new
+  "Loaded options from"/"No options file at"/"Saved options to" log
+  lines), a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D`
+  shader programs all still `valid=true`), a real two-process networked
+  run (zero warnings/errors/rejects, matching spawn columns), and a
+  real inspection of the actual written `options.txt` confirming every
+  field including every one of the 29 keybindings round-trips as
+  human-readable text at the real OS-provided path - not just asserted
+  in a unit test against a temp file.
+- `ctest` 436/436 (bgfx, up from 427) / 428/428 (non-bgfx, up from
+  419).
+- Honestly scoped: no options menu UI exists yet to change these values
+  in-game (Phase 46 - this phase is the storage layer only, per its own
+  spec); FOV is persisted but **not yet actually applied to the camera
+  projection - NOT VERIFIED, deferred** (nothing in the client currently
+  reads `options.fov` for rendering; wiring it in without a menu to
+  change it would be speculative, so it stays honestly unused until
+  Phase 46 gives it a real consumer).
 
 ### Phase 44
 

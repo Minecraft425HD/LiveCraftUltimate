@@ -41,6 +41,68 @@ PhysicalKey parse_physical_key(const std::string& name) {
     return code != SDL_SCANCODE_UNKNOWN ? static_cast<PhysicalKey>(code) : kUnboundKey;
 }
 
+namespace {
+// One row per Action (Phase 45) - the real bidirectional name table
+// action_name/parse_action_name below share, so the two directions can
+// never drift apart the way two separately-maintained switch statements
+// could.
+struct ActionNameEntry {
+    Action action;
+    const char* name;
+};
+
+constexpr ActionNameEntry kActionNames[] = {
+    {Action::MoveForward, "move_forward"},
+    {Action::MoveBackward, "move_backward"},
+    {Action::MoveLeft, "move_left"},
+    {Action::MoveRight, "move_right"},
+    {Action::Jump, "jump"},
+    {Action::Crouch, "crouch"},
+    {Action::Sprint, "sprint"},
+    {Action::Interact, "interact"},
+    {Action::Inventory, "inventory"},
+    {Action::LookUp, "look_up"},
+    {Action::LookDown, "look_down"},
+    {Action::LookLeft, "look_left"},
+    {Action::LookRight, "look_right"},
+    {Action::PlaceBlock, "place_block"},
+    {Action::PickBlock, "pick_block"},
+    {Action::CycleHotbar, "cycle_hotbar"},
+    {Action::CycleHotbarPrev, "cycle_hotbar_prev"},
+    {Action::SelectHotbar1, "select_hotbar_1"},
+    {Action::SelectHotbar2, "select_hotbar_2"},
+    {Action::SelectHotbar3, "select_hotbar_3"},
+    {Action::SelectHotbar4, "select_hotbar_4"},
+    {Action::SelectHotbar5, "select_hotbar_5"},
+    {Action::SelectHotbar6, "select_hotbar_6"},
+    {Action::SelectHotbar7, "select_hotbar_7"},
+    {Action::SelectHotbar8, "select_hotbar_8"},
+    {Action::SelectHotbar9, "select_hotbar_9"},
+    {Action::SwapOffhand, "swap_offhand"},
+    {Action::Craft, "craft"},
+    {Action::Escape, "escape"},
+};
+}  // namespace
+
+std::string action_name(Action action) {
+    for (const auto& entry : kActionNames) {
+        if (entry.action == action) {
+            return entry.name;
+        }
+    }
+    return "unknown";
+}
+
+bool parse_action_name(const std::string& name, Action& out) {
+    for (const auto& entry : kActionNames) {
+        if (name == entry.name) {
+            out = entry.action;
+            return true;
+        }
+    }
+    return false;
+}
+
 KeyBindings::KeyBindings() { reset_to_defaults(); }
 
 bool KeyBindings::triggers(Action action, PhysicalKey key) const {

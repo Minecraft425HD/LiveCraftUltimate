@@ -1742,6 +1742,63 @@ backgrounds yet (real future consumers of this same batch API, Phase
 
 ---
 
+## Phase 45 — Persistent options
+
+Real config persistence: the storage layer Phase 46's options/controls
+screens will read from and write to.
+
+- [x] **New `engine/platform::Options`** (`options.{h,cpp}`):
+  `mouse_sensitivity`/`fov`/`hud_enabled`/`debug_overlay_enabled` plus
+  a full `KeyBindings` instance, `load(path)`/`save(path)`, real
+  `key=value` text format (`# comments`, blank lines skipped).
+- [x] **Real per-OS storage location**: `Options::default_path()` uses
+  `SDL_GetPrefPath("LiveCraftUltimate", "LiveCraftUltimate")`, not a
+  hand-picked path - verified on this Linux sandbox at
+  `~/.local/share/LiveCraftUltimate/LiveCraftUltimate/options.txt`.
+- [x] **New bidirectional `action_name`/`parse_action_name` table** (29
+  entries): every `Action` persists as a human-readable name
+  (`key.move_forward=W`), not a raw enum index that would silently
+  break on any future enum reordering (see DECISIONS.md).
+- [x] **Real tolerance, not just a happy path**: a missing file returns
+  `false` and keeps every default untouched; a corrupt or unrecognized
+  line (bad number, unknown action or key name) is skipped and every
+  other real line still loads - verified against a real file with
+  deliberately interleaved garbage lines between real ones.
+- [x] **`VoxelClient` wired to actually use it**: the former
+  `kMouseSensitivity` constant is gone, replaced by
+  `options.mouse_sensitivity`; the Phase 44 crosshair is now gated
+  behind `options.hud_enabled`; the debug overlay is now gated behind
+  `options.debug_overlay_enabled`, defaulting `false` - a real behavior
+  change from Phase 44's always-on overlay. Options load at startup,
+  save on exit.
+- [ ] **`options.fov` applied to the camera's projection** - PARTIAL,
+  deferred: the field is persisted and round-trips, but nothing in
+  `client/main.cpp` currently reads it for rendering. Wiring it in with
+  no menu (Phase 46) to actually change it in-game would be
+  speculative and unverifiable, so it stays honestly unused until a
+  real consumer exists.
+- [x] 9 new unit tests (7 `Options`: defaults, missing-file behavior,
+  scalar round-trip, keybinding round-trip, corrupt-line tolerance,
+  unrecognized-name tolerance, conditional `.alt` line; 2 `ActionName`:
+  every real `Action` round-trips, an unknown name fails to parse).
+- [x] Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs (byte-identical to Phase 44, plus the new
+  load/save log lines), a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`Chunk`/`Sky`/`UI2D` shader programs all still `valid=true`), a real
+  two-process networked run (zero warnings/errors/rejects, matching
+  spawn columns), and direct inspection of the real written
+  `options.txt` confirming every field, including all 29 keybindings,
+  round-trips as human-readable text at the real OS path.
+
+`ctest` 436/436 (bgfx, up from 427) / 428/428 (non-bgfx, up from 419).
+
+Honestly scoped: no options menu UI exists yet to change these values
+in-game (Phase 46 - this phase is the storage layer only, per its own
+spec); `options.fov` is persisted but not yet applied to the camera
+projection (see above).
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet

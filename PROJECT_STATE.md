@@ -38,8 +38,9 @@ extended debug overlay)**, **Phase 37 (sea level at y=0 + water
 block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 **Phase 39 (biomes)**, **Phase 40 (caves + ores)**, **Phase 41
 (vegetation)**, **Phase 42 (documentation update)**, **Phase 43
-(input overhaul + mouse look + Minecraft-parity defaults)**, and
-**Phase 44 (2D UI framework)** are done; see "Reality Audit" and
+(input overhaul + mouse look + Minecraft-parity defaults)**,
+**Phase 44 (2D UI framework)**, and **Phase 45 (persistent options)**
+are done; see "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
 cross-chunk global lighting with real performance constraints,
@@ -1556,6 +1557,54 @@ end-to-end, not that it looks right); no item-icon rendering yet
 (deferred, see above); no slot backgrounds/health/hunger/menu
 backgrounds yet (real future consumers of this same batch API, Phase
 46+).
+
+**Phase 45 (persistent options)**: new `engine/platform::Options` -
+`mouse_sensitivity`/`fov`/`hud_enabled`/`debug_overlay_enabled` plus a
+full `KeyBindings` instance, all loaded from and saved to a real
+`key=value` text file (`# comments`, blank lines skipped) at
+`SDL_GetPrefPath("LiveCraftUltimate", "LiveCraftUltimate")` - a real
+per-OS user config directory, not a hand-picked path, verified on this
+Linux sandbox at `~/.local/share/LiveCraftUltimate/LiveCraftUltimate/
+options.txt`. Every one of `KeyBindings`' 29 `Action`s round-trips
+through a new bidirectional `action_name`/`parse_action_name` table
+(`key.<action>=<key>`, plus `key.<action>.alt=<key>` only when a real
+second binding exists) rather than a raw enum index, so a future
+`Action` insertion can't silently corrupt an existing player's save
+file (see DECISIONS.md).
+
+Real tolerance, not just a happy path: a missing file leaves every
+default untouched and `load()` returns `false` (first run always looks
+like this, not an error); a corrupt or unrecognized line (bad number,
+unknown action name, unknown key name) is skipped and every other real
+line still loads - verified against a real file with deliberately
+interleaved garbage lines between real ones.
+
+`VoxelClient` now genuinely consumes this instead of hardcoded
+constants: the former `kMouseSensitivity` constant is gone, replaced
+by `options.mouse_sensitivity`; the Phase 44 crosshair is now gated
+behind `options.hud_enabled`; the debug overlay is now gated behind
+`options.debug_overlay_enabled`, a real behavior change since that
+option defaults to `false` (Minecraft's own F3-gated convention), so
+the overlay no longer renders unconditionally as it did through Phase
+44. Options load at startup and save on exit; no menu UI writes to it
+yet (Phase 46). 9 new unit tests (7 `Options`, 2 `ActionName`).
+Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+`LCU_VERIFY_CRAFT` runs (byte-identical to Phase 44, plus the new
+load/save log lines), a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/
+`Sky`/`UI2D` shader programs all still `valid=true`), a real
+two-process networked run (zero warnings/errors/rejects, matching
+spawn columns), and direct inspection of the real written
+`options.txt` confirming every field, including all 29 keybindings,
+round-trips as human-readable text at the real OS path. `ctest`
+436/436 (bgfx, up from 427) / 428/428 (non-bgfx, up from 419).
+
+Honestly scoped: no options menu UI exists yet to change these values
+in-game (Phase 46 - this phase is the storage layer only, per its own
+spec); `options.fov` is persisted but **not yet applied to the
+camera's projection - NOT VERIFIED, deferred** (nothing currently
+reads it for rendering; wiring it in with no menu to change it would
+be speculative and unverifiable, so it stays honestly unused until
+Phase 46 gives it a real consumer).
 
 ## Build Status
 
