@@ -36,14 +36,18 @@ propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 (chunk unload marks neighbors dirty)**, **Phase 36 (entity boxes +
 extended debug overlay)**, **Phase 37 (sea level at y=0 + water
 block/rendering)**, **Phase 38 (continental/mountain terrain)**,
-**Phase 39 (biomes)**, **Phase 40 (caves + ores)**, and **Phase 41
-(vegetation)** are done; see
-"Reality Audit" and "Last Completed Task" below for what they cover
-and what's next. A large, user-directed program (Phases 26-42: visible
-terrain colors, skybox, cross-chunk global lighting with real
-performance constraints, procedural terrain with sea level at y=0,
-water, biomes, caves/ores, vegetation) is now in progress - see
-TASK_QUEUE.md for per-phase detail as each lands.
+**Phase 39 (biomes)**, **Phase 40 (caves + ores)**, **Phase 41
+(vegetation)**, **Phase 42 (documentation update)**, and **Phase 43
+(input overhaul + mouse look + Minecraft-parity defaults)** are done;
+see "Reality Audit" and "Last Completed Task" below for what they
+cover and what's next. Phases 26-42 (visible terrain colors, skybox,
+cross-chunk global lighting with real performance constraints,
+procedural terrain with sea level at y=0, water, biomes, caves/ores,
+vegetation, and a documentation pass) closed out that first
+user-directed program; a second one (Phases 43-46: rebindable input,
+a 2D UI framework, persistent options, and a menu/options/controls
+screen) is now in progress - see TASK_QUEUE.md for per-phase detail as
+each lands.
 
 ## Reality Audit (2026-09-10)
 
@@ -1431,6 +1435,85 @@ wide/spreading tree canopies (a real, documented scope choice, not a
 hidden gap); no varied tree/cactus silhouettes; no wood/leaves/cactus
 item drops/mapping yet; no structures pipeline stage (out of scope for
 this 42-phase plan entirely).
+
+**Phase 42 (documentation update)**: closed out the Phases 25-42
+program with a real documentation pass, not just a phase-count
+bookkeeping entry. `README.md` written for the first time (was an
+empty file) - a real project-level entry point: what the project is,
+an honest current-status pointer, a feature summary reflecting the
+actual Phase 41 state, a quick-start build/run block, and a
+documentation map. A stale `PROJECT_STATE.md` "Known Limitations"
+entry left over from Phase 17 (still claiming "no climate/biome/caves/
+ores/structures/vegetation/decoration") was corrected in place to
+reflect that Phases 39-41 made biome/caves/ores/vegetation all real,
+leaving only structures genuinely unimplemented.
+`BUILDING.md`/`CHANGELOG.md`/`DECISIONS.md` were reviewed against the
+current state and found already current (kept up to date
+phase-by-phase throughout Phases 35-41), so no further edits were
+needed there.
+
+**Phase 43 (input overhaul + mouse look + Minecraft-parity defaults)**:
+first phase of a second user-directed program (Phases 43-46:
+controls, a 2D UI framework, persistent options, and a menu/options/
+controls screen). New `engine/platform::KeyBindings` - each `Action`
+maps to up to 2 physical keys (a unified space covering both keyboard
+scancodes and 3 mouse buttons), starting from real Minecraft-parity
+defaults and rebindable in place (`bind()`/`reset_to_defaults()`) -
+the real data structure a Phase 46 controls menu will read/write, not
+a stub. `KeyboardInputBackend` renamed `DesktopInputBackend` and
+rewritten to poll through `KeyBindings` (mouse buttons included)
+instead of a fixed table, so `Interact`/`PlaceBlock` are driven by
+real mouse clicks with zero changes needed to the existing break/place
+logic. New `Action::PickBlock` (middle-click), `CycleHotbarPrev`
+(wheel down), 9 `SelectHotbar1..9` (number row), and `Escape` (ESC/Tab,
+still routed through the normal Action/KeyBindings path rather than a
+hardcoded SDL check - see DECISIONS.md).
+
+Real relative mouse-look (`InputState::mouse_delta_x/y` via
+`SDL_GetRelativeMouseState`) applied to the camera additively alongside
+the existing arrow-key look fallback, not replacing it. Real mouse
+capture management: `Window::set_relative_mouse_mode`/
+`consume_wheel_delta_y`/`consume_focus_lost` wrap SDL's own capture/
+wheel/focus mechanisms - ESC/Tab releases capture, a click while free
+re-captures it without that same click also breaking/placing a block
+(`suppress_click_for_recapture`), losing window focus releases it
+automatically. This project's own pre-Phase-43 Sprint/Crouch defaults
+were backwards (Sprint=Shift, Crouch=Ctrl) - corrected to Minecraft's
+real Sprint=Ctrl, Crouch=Shift.
+
+Hygiene fixes from a real first macOS run's own bug reports: the
+chunk/sky shader load path now resolves against
+`Window::executable_base_path()` (`SDL_GetBasePath`) instead of the
+current working directory - verified via real runs of the client from
+the repo root and from `/tmp`, both correctly loading real shaders
+regardless of launch directory. Rendering-only constants gated behind
+`LCU_ENABLE_BGFX` (genuinely dead declarations without it - the real
+cause of a reported unused-variable warning, not reproduced by this
+sandbox's own compiler). A real, verified redundant `Lcu::Math` link
+entry removed from `game/CMakeLists.txt` (already provided
+transitively via `Lcu::EngineCore`) - a real contributor to a reported
+"ignoring duplicate libraries" linker warning (an Apple-`ld`-specific
+message, also not reproduced here).
+
+20 new unit tests. Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run
+(from multiple working directories), real `LCU_VERIFY_BREAK_PLACE`/
+`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+41), and a real two-process networked run with matching
+independently-computed spawn columns, zero warnings/errors/rejects.
+`ctest` 420/420 (bgfx, up from 406) / 417/417 (non-bgfx, up from 403).
+
+Honestly scoped: **real mouse-look/click/wheel/capture behavior
+against an actual mouse device and display is still NOT VERIFIED —
+ENVIRONMENT LIMITATION** (this sandbox has no real mouse -
+`SDL_SetWindowRelativeMouseMode` under the dummy video driver here
+happens to report success with nothing to actually capture); the
+exact unused-variable/duplicate-library linker warnings these fixes
+target were never reproduced in this sandbox either (fixed on
+code-reading grounds, not by watching a warning disappear); no 2D
+UI/menu yet to rebind a key through (Phase 44/46); `Action::
+Inventory`/`SwapOffhand`/`Escape`'s pause-menu half and most
+`SelectHotbar5-9` slots still have no consumer (the real hotbar only
+has 4 items).
 
 ## Build Status
 

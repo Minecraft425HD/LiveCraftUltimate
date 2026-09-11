@@ -2,7 +2,91 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43
+
+### Phase 43
+
+- **Real rebindable keymap**: new `engine/platform::KeyBindings` - each
+  `Action` maps to up to 2 physical keys (a unified `PhysicalKey` space
+  covering both SDL scancodes and 3 mouse buttons), starting from real
+  Minecraft-parity defaults and rebindable in place via `bind()`/
+  `reset_to_defaults()` - the actual data structure a future controls
+  menu will read/write, not a stub. `physical_key_name`/
+  `parse_physical_key` round-trip a binding to/from a human-readable
+  string (SDL-provided for keyboard keys, `MOUSE_LEFT`/`MOUSE_RIGHT`/
+  `MOUSE_MIDDLE` for mouse buttons) for future persistence/display.
+- **`KeyboardInputBackend` renamed `DesktopInputBackend`** and rewritten
+  to poll through `KeyBindings` instead of a fixed table baked into
+  input.cpp - every Action now resolves through the same physical-key
+  lookup, mouse buttons included, so `Action::Interact`/`PlaceBlock`/
+  `PickBlock` are driven by real mouse clicks with zero special-casing
+  in client/main.cpp's existing break/place logic.
+- **Real relative mouse-look**: `InputState::mouse_delta_x/y` (from
+  `SDL_GetRelativeMouseState`, polled once per frame) applied to
+  `FirstPersonCamera::add_yaw_pitch` alongside (not instead of) the
+  existing arrow-key look fallback. `Window::set_relative_mouse_mode`/
+  `relative_mouse_mode()` wrap SDL's own capture mechanism; a real
+  ESC/Tab (new `Action::Escape`) releases it, a click while free
+  re-captures it (the re-capture click itself doesn't also register as
+  a break/place - see `suppress_click_for_recapture`), and a real
+  `Window::consume_focus_lost()` (SDL_EVENT_WINDOW_FOCUS_LOST) releases
+  it automatically on alt-tab.
+- **Real mouse-wheel hotbar cycling**: `Window::consume_wheel_delta_y()`
+  accumulates `SDL_EVENT_MOUSE_WHEEL` events per frame; client/main.cpp
+  turns a nonzero delta into a one-frame `Action::CycleHotbar`/new
+  `Action::CycleHotbarPrev` pulse, reusing the exact same edge-detection
+  as a real key press.
+- **Direct hotbar selection**: 9 new `Action::SelectHotbar1..9` bound to
+  the number row, directly setting the selected placeable index (a
+  silent no-op past the real hotbar's current size, not a crash or
+  wraparound). New `Action::PickBlock` (mouse middle button, Minecraft's
+  "pick block") selects whichever placeable entry matches the
+  looked-at block, without granting the item for free.
+- **Real Minecraft-parity default fix**: this project's own pre-Phase-43
+  defaults had Sprint/Crouch backwards (Sprint=Shift, Crouch=Ctrl) -
+  corrected to Sprint=Ctrl, Crouch=Shift.
+- **Hygiene fixes**: the chunk/sky shader load path now resolves against
+  `Window::executable_base_path()` (`SDL_GetBasePath`) instead of the
+  current working directory - real, not cosmetic: verified via a real
+  run of the client from the repo root and from `/tmp`, both correctly
+  loading real shaders (`Chunk shader program valid=true`) from
+  whatever directory it was launched from, not just the executable's
+  own directory as every prior verification run in this repo happened
+  to already be. Rendering-only constants (`kNightSkyColor` etc., Phase
+  27/36) gated behind `#if defined(LCU_ENABLE_BGFX)` - genuinely dead
+  declarations in a non-bgfx build, the real cause of an unused-variable
+  warning reported from a real macOS/Apple-Clang build (not reproduced
+  by this sandbox's own GCC/Clang - see BUILD_STATUS.md). A real,
+  verified redundant `Lcu::Math` link entry removed from
+  `game/CMakeLists.txt` (already provided transitively via
+  `Lcu::EngineCore`) - one real contributor to a reported "ignoring
+  duplicate libraries" linker warning (also an Apple-`ld`-specific
+  message, not reproduced here).
+- 20 new unit tests (`KeyBindings`/`PhysicalKey`: defaults, rebinding,
+  reset, name round-trip; `InputState`: mouse-delta get/set).
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (from the repo
+  root AND from `/tmp`, not just `bin/`), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+  41 - mouse-driven Interact/PlaceBlock still fire correctly from the
+  same `set_down` calls these hooks always used), and a real
+  two-process networked run with matching independently-computed spawn
+  columns, zero warnings/errors/rejects.
+- `ctest` 420/420 (bgfx, up from 406) / 417/417 (non-bgfx, up from 403).
+- Honestly scoped: **real mouse-look/click/wheel/capture behavior on an
+  actual GPU/display and mouse device is still NOT VERIFIED —
+  ENVIRONMENT LIMITATION** (this sandbox has no real mouse; `SDL_
+  SetWindowRelativeMouseMode` under the dummy video driver here
+  happened to report success with nothing to actually capture, logged
+  either way - see `Window::set_relative_mouse_mode`); the unused-
+  variable and duplicate-library linker warnings' exact reproduction is
+  also NOT VERIFIED here for the same reason (real fixes applied on
+  code-reading grounds, not by watching the warning disappear); no 2D
+  UI/menu yet to actually rebind a key through (Phase 44/46); `Action::
+  Inventory`/`SwapOffhand` still have no consumer (unchanged from
+  before this phase, now joined by `Escape`'s pause-menu half and most
+  `SelectHotbar5-9` slots, which the real 4-item hotbar can't reach
+  yet).
+
 
 ### Phase 42
 

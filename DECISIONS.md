@@ -2843,3 +2843,81 @@ skipping vegetation for Snowy by giving it its own always-None branch
 explicitly written out at every call site (rejected - `vegetation_at`
 already handles this correctly and uniformly by only ever checking
 `Biome::Plains`/`Biome::Desert`, no separate carve-out needed).
+
+## 2026-09-11 — Rebindable input: unified PhysicalKey space, SDL-provided names, Escape as a real Action
+
+**Context:** Phase 43 asked for a real, rebindable keymap plus real mouse
+look/click/wheel support - a genuine input overhaul, not a bigger
+hardcoded table. Several small design choices shaped
+`engine/platform::KeyBindings`.
+
+**Unified `PhysicalKey` space (keyboard scancodes and 3 mouse-button
+constants sharing one `i32`):** the alternative - a tagged
+`{source, code}` struct - is more "correct" in the abstract, but every
+consumer (`KeyBindings::triggers`, the polling loop in `input.cpp`,
+persistence in a future options.txt) only ever needs "is this exact
+physical input held" - a flat comparable value does that with less code
+and no risk of the tag and code disagreeing. Negative values for mouse
+buttons keep them disjoint from any real non-negative `SDL_Scancode`
+without needing a reserved offset range that could collide with a future
+SDL scancode addition.
+
+**SDL's own `SDL_GetScancodeName`/`SDL_GetScancodeFromName` for
+keyboard-key display names, not a hand-rolled scancode<->string table:**
+a hand-written table (`{SDL_SCANCODE_W, "W"}, {SDL_SCANCODE_LCTRL,
+"LCTRL"}, ...`) would need to enumerate and stay in sync with every
+`SDL_SCANCODE_*` by hand for a purely cosmetic difference (SDL's own
+names read slightly differently - "Left Ctrl" rather than "LCTRL" - but
+are real, complete, and already correct). Real round-trip correctness
+(`parse_physical_key(physical_key_name(k)) == k`) matters far more than
+the exact display string for persistence (Phase 45) and a future
+controls-menu label (Phase 46); the exact SDL-provided text is a real,
+working value even where it reads slightly differently than a
+hand-picked short form would have.
+
+**ESC/Tab as a real `Action::Escape` in `KeyBindings`, not a raw SDL
+scancode check outside the Action system:** this phase's own directive
+called ESC "nicht rebindbar" (not rebindable). Read literally that could
+argue for bypassing the whole Action/KeyBindings abstraction for it -
+but doing so would mean two different physical-key-lookup code paths to
+maintain (one through KeyBindings, one hardcoded), and `client/main.cpp`
+would need direct SDL scancode access it currently has zero of
+(deliberately - see ARCHITECTURE.md's "no platform backend leaking into
+gameplay code above engine/platform/engine/rendering"). Treating
+`Escape` as a normal `KeyBindings` entry keeps every physical-key lookup
+on one path; "not rebindable" becomes a Phase 46 controls-*menu* choice
+(simply never listing it as an editable row), not an architectural
+restriction baked into this phase.
+
+**Real mouse-look applied additively alongside the existing arrow-key
+look, not replacing it:** the arrow-key fallback (`Action::LookUp/Down/
+Left/Right`) has been real, working, and tested since Phase 4. Removing
+it the moment real mouse-look landed would regress a working control
+scheme for players without (or who prefer not to use) a mouse, for no
+real gain - `FirstPersonCamera::add_yaw_pitch` composes cleanly from
+multiple call sites in the same frame with no special handling needed
+either way.
+
+**The re-capture click doesn't also register as a break/place action the
+same frame** (`suppress_click_for_recapture` in client/main.cpp): without
+this, clicking back into a window that lost mouse capture would
+simultaneously re-capture the mouse AND break/place whatever block
+happened to be under the crosshair - a real, jarring double-purpose
+input a player would never expect from "I clicked to get my cursor
+back." A one-frame suppression flag, computed once at the top of the
+loop where capture state is decided, threaded down to the same
+edge-detection the break/place logic already computes.
+
+**Alternatives considered:** a tagged `{source, code}` PhysicalKey
+struct (rejected - see the unified-space reasoning above); a hand-rolled
+scancode-name table (rejected - real, ongoing maintenance burden for a
+cosmetic difference from SDL's own correct names); hardcoding ESC/Tab
+outside the Action system (rejected - a second physical-key-lookup path
+to maintain, and would need SDL access in client/main.cpp the
+architecture deliberately keeps out); dropping the arrow-key look
+fallback once mouse-look landed (rejected - a real regression for
+mouse-less/mouse-averse play, with no real benefit to removing it);
+polling for a "wheel state" the way keyboard/mouse buttons are polled
+(rejected - SDL has no such state, only discrete `SDL_EVENT_MOUSE_WHEEL`
+events, so `Window` accumulates them per-frame instead - the one real
+place in this phase event-driven accumulation was unavoidable).

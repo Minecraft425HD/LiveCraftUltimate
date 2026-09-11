@@ -38,6 +38,7 @@
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
 #include "lcu/platform/input.h"
+#include "lcu/platform/key_bindings.h"
 #include "lcu/platform/window.h"
 #include "lcu/player/camera.h"
 #include "lcu/player/movement_input.h"
@@ -183,6 +184,11 @@ constexpr lcu::f32 kPlayerHeight = 1.8f;
 constexpr lcu::f32 kEyeHeight = 1.62f;
 constexpr lcu::f32 kMoveSpeed = 4.3f;    // blocks/s
 constexpr lcu::f32 kLookSpeed = 2.0f;    // radians/s, arrow-key look (see platform/input.h)
+// Radians of camera rotation per raw SDL mouse-motion pixel (Phase 43) -
+// Minecraft's own default sensitivity setting maps to almost exactly this
+// value; Phase 46 is expected to make this a real, saved options.txt
+// setting instead of a fixed constant (see engine/platform/options.h).
+constexpr lcu::f32 kMouseSensitivity = 0.0022f;
 constexpr lcu::f32 kInteractRange = 6.0f;
 
 // Headless verification hook (this sandbox has no real keyboard/mouse
@@ -266,6 +272,18 @@ constexpr lcu::u32 kAiRngSeed = 20260909;
 // scale change across a handful of frames.
 constexpr lcu::f32 kDayLengthSeconds = 120.0f;
 
+// Rendering-only constants (Phase 27/36) - every use site below is
+// inside an `#if defined(LCU_ENABLE_BGFX)` block (real draw calls), so
+// these are genuinely dead declarations in a non-bgfx build. Gated here
+// too (Phase 43 hygiene fix): a non-bgfx build previously declared these
+// at namespace scope with nothing referencing them, which some compilers
+// (Apple Clang on a real macOS run, not reproduced by this sandbox's own
+// GCC/Clang - see BUILD_STATUS.md) flag as unused-variable warnings,
+// since a `constexpr` at namespace scope has internal linkage same as a
+// plain `const` would. The real fix is removing the dead declarations
+// where they're genuinely dead, not silencing the warning with
+// `[[maybe_unused]]` on constants that have zero purpose without bgfx.
+#if defined(LCU_ENABLE_BGFX)
 // Skybox (Phase 27): the render clear color IS the sky, since there's no
 // separate skybox geometry - a deep blue-black night and a bright blue
 // day, linearly interpolated by DayNightCycle::sky_light_scale() (see
@@ -293,6 +311,7 @@ constexpr lcu::math::Vec3 kMoonColor{0.75f, 0.8f, 0.9f};
 // unmistakably-not-terrain red, matching the classic "debug wireframe"
 // convention most engines use.
 constexpr lcu::math::Vec3 kEntityBoxColor{1.0f, 0.1f, 0.1f};
+#endif
 
 // If LCU_CONNECT_PORT is set, VoxelClient connects to a VoxelServer on
 // 127.0.0.1:<port> at startup (brief section 64/Phase 8) instead of
@@ -1050,18 +1069,24 @@ int main() {
 #if defined(LCU_ENABLE_BGFX)
     // Only present when LCU_BUILD_SHADER_TOOLS compiled shaders into
     // <exe_dir>/shaders/chunk (see client/CMakeLists.txt and BUILDING.md).
-    // "shaders/chunk" is relative to the current working directory, which
-    // every verification run in this repo has been the executable's own
-    // directory - a real asset system (brief section 33) will replace
-    // this raw path with an ID-based lookup once one exists.
+    // Real fix (Phase 43 hygiene): resolved against Window::
+    // executable_base_path() (SDL_GetBasePath), not the current working
+    // directory - a previous version of this path was CWD-relative,
+    // which happened to work in every verification run in this repo
+    // (always launched from the executable's own directory) but broke
+    // the first time a real user launched the client from elsewhere
+    // (e.g. double-clicking it, or `./build/macos/bin/VoxelClient` from
+    // the repo root). A real asset system (brief section 33) will
+    // replace this raw path with an ID-based lookup once one exists.
+    const std::string shader_base_path = lcu::platform::Window::executable_base_path();
     bgfx::ProgramHandle chunk_program = BGFX_INVALID_HANDLE;
     // Sky program (Phase 27, sun/moon) - same on/off-ness as chunk_program,
     // driven by the same LCU_HAS_CHUNK_SHADERS define (client/CMakeLists.txt
     // compiles both shader pairs together under LCU_BUILD_SHADER_TOOLS).
     bgfx::ProgramHandle sky_program = BGFX_INVALID_HANDLE;
 #if defined(LCU_HAS_CHUNK_SHADERS)
-    chunk_program = lcu::rendering::load_chunk_program("shaders/chunk", "chunk");
-    sky_program = lcu::rendering::load_chunk_program("shaders/sky", "sky");
+    chunk_program = lcu::rendering::load_chunk_program(shader_base_path + "shaders/chunk", "chunk");
+    sky_program = lcu::rendering::load_chunk_program(shader_base_path + "shaders/sky", "sky");
 #endif
     LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
     LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
@@ -1259,9 +1284,22 @@ int main() {
     // in this sandbox.
     game::systems::DayNightCycle day_night_cycle(kDayLengthSeconds);
 
-    lcu::platform::KeyboardInputBackend keyboard;
+    lcu::platform::KeyBindings key_bindings;
+    lcu::platform::DesktopInputBackend input_backend;
     lcu::platform::InputState input;
     lcu::platform::InputState previous_input;
+
+    // Real mouse-look capture (Phase 43): the standard FPS convention -
+    // cursor hidden and confined the moment the game starts, released by
+    // ESC/Tab or a focus loss, re-grabbed by clicking back into the
+    // window (see the capture-management block in the frame loop below).
+    // Real, not a fake toggle: under this sandbox's own headless/dummy
+    // SDL video driver, the underlying SDL call fails (logged, not
+    // fatal - see Window::set_relative_mouse_mode) since there's no real
+    // mouse device to capture, same honest "logic runs for real, the
+    // visual/device-level result is NOT VERIFIED — ENVIRONMENT
+    // LIMITATION" pattern every other input-adjacent feature here uses.
+    window.set_relative_mouse_mode(true);
     lcu::debug::FrameStats frame_stats;
 #if defined(LCU_ENABLE_BGFX)
     lcu::f32 last_known_fps = 0.0f;  // updated only on frame_stats' periodic reports (see below); drives the on-screen debug overlay
@@ -1296,7 +1334,30 @@ int main() {
     auto last_tick = std::chrono::steady_clock::now();
 
     while (window.pump_events()) {
-        keyboard.update(input);
+        input_backend.update(key_bindings, input);
+
+        // Real mouse-capture management (Phase 43): ESC/Tab or losing
+        // window focus releases capture; clicking while free re-captures
+        // it. The re-capture click must not ALSO register as a break/
+        // place action the same frame - a real game treats "the click
+        // that got focus back" as consumed by that alone, not a
+        // double-purpose input - so suppress_click_for_recapture is
+        // threaded down to interact_pressed/place_pressed's own
+        // edge-detection below.
+        const bool escape_pressed =
+            input.is_down(lcu::platform::Action::Escape) && !previous_input.is_down(lcu::platform::Action::Escape);
+        if (escape_pressed && window.relative_mouse_mode()) {
+            window.set_relative_mouse_mode(false);
+        }
+        if (window.consume_focus_lost() && window.relative_mouse_mode()) {
+            window.set_relative_mouse_mode(false);
+        }
+        bool suppress_click_for_recapture = false;
+        if (!window.relative_mouse_mode() &&
+            (input.is_down(lcu::platform::Action::Interact) || input.is_down(lcu::platform::Action::PlaceBlock))) {
+            window.set_relative_mouse_mode(true);
+            suppress_click_for_recapture = true;
+        }
 
         if (verify_break_place) {
             input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
@@ -1583,6 +1644,16 @@ int main() {
         }
         day_night_cycle.update(delta_seconds);
 
+        // Real mouse-look (Phase 43) - applied additively alongside the
+        // arrow-key fallback below, not instead of it (see Action::LookUp's
+        // own doc comment in input.h). Only while the window actually owns
+        // capture, so a free/uncaptured mouse (e.g. right after alt-tabbing
+        // back, before the recapture click lands) never spuriously spins
+        // the camera from residual/incidental motion.
+        if (window.relative_mouse_mode()) {
+            camera.add_yaw_pitch(input.mouse_delta_x() * kMouseSensitivity, -input.mouse_delta_y() * kMouseSensitivity);
+        }
+
         if (input.is_down(lcu::platform::Action::LookLeft)) {
             camera.add_yaw_pitch(-kLookSpeed * delta_seconds, 0.0f);
         }
@@ -1628,20 +1699,85 @@ int main() {
             last_streamed_center = current_center;
         }
 
+        // Real mouse-wheel hotbar cycling (Phase 43): SDL only delivers
+        // wheel motion as discrete events (see Window::consume_wheel_delta_y),
+        // so this synthesizes a one-frame "pressed" pulse from it - the
+        // edge-detection below then fires exactly once per scroll notch,
+        // indistinguishable from a real key press (the same shape every
+        // LCU_VERIFY_* hook already uses to drive InputState directly).
+        const lcu::f32 wheel_delta_y = window.consume_wheel_delta_y();
+        if (wheel_delta_y > 0.0f) {
+            input.set_down(lcu::platform::Action::CycleHotbar, true);
+        } else if (wheel_delta_y < 0.0f) {
+            input.set_down(lcu::platform::Action::CycleHotbarPrev, true);
+        }
+
         const auto hit = lcu::physics::raycast(world, camera.position, camera.forward(), kInteractRange, is_solid);
 
         const bool interact_pressed = input.is_down(lcu::platform::Action::Interact) &&
-                                       !previous_input.is_down(lcu::platform::Action::Interact);
+                                       !previous_input.is_down(lcu::platform::Action::Interact) &&
+                                       !suppress_click_for_recapture;
         const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
-                                    !previous_input.is_down(lcu::platform::Action::PlaceBlock);
+                                    !previous_input.is_down(lcu::platform::Action::PlaceBlock) &&
+                                    !suppress_click_for_recapture;
+        const bool pick_block_pressed = input.is_down(lcu::platform::Action::PickBlock) &&
+                                         !previous_input.is_down(lcu::platform::Action::PickBlock) &&
+                                         !suppress_click_for_recapture;
         const bool cycle_hotbar_pressed = input.is_down(lcu::platform::Action::CycleHotbar) &&
                                            !previous_input.is_down(lcu::platform::Action::CycleHotbar);
+        const bool cycle_hotbar_prev_pressed = input.is_down(lcu::platform::Action::CycleHotbarPrev) &&
+                                                !previous_input.is_down(lcu::platform::Action::CycleHotbarPrev);
         const bool craft_pressed =
             input.is_down(lcu::platform::Action::Craft) && !previous_input.is_down(lcu::platform::Action::Craft);
 
         if (cycle_hotbar_pressed) {
             selected_placeable_index = (selected_placeable_index + 1) % placeable_items.size();
             LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+        }
+        if (cycle_hotbar_prev_pressed) {
+            selected_placeable_index =
+                (selected_placeable_index + placeable_items.size() - 1) % placeable_items.size();
+            LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+        }
+
+        // Direct number-row hotbar selection (Phase 43): SelectHotbar1..9
+        // are declared consecutively in Action (see input.h), so this
+        // walks them as one contiguous range instead of 9 near-identical
+        // if-blocks. A slot with no matching placeable_items entry (5-9,
+        // today - only 4 placeable items exist) is a real, silent no-op,
+        // not a crash or a wraparound onto some other slot.
+        for (lcu::usize i = 0; i < 9; ++i) {
+            const auto slot_action =
+                static_cast<lcu::platform::Action>(static_cast<lcu::u8>(lcu::platform::Action::SelectHotbar1) + i);
+            if (input.is_down(slot_action) && !previous_input.is_down(slot_action)) {
+                if (i < placeable_items.size()) {
+                    selected_placeable_index = i;
+                    LCU_LOG_INFO("Selected placeable item: {}", placeable_items[selected_placeable_index].name);
+                }
+                break;
+            }
+        }
+
+        if (pick_block_pressed && hit) {
+            // Real "middle-click to pick block" (Phase 43) - selects
+            // whichever placeable_items entry matches the looked-at
+            // block, without granting the item (the player still needs
+            // to actually hold it to place - see place_pressed below).
+            // A silent no-op if the block has no placeable entry (e.g.
+            // looking at an ore/cave-only block with no matching hotbar
+            // slot yet).
+            bool found_placeable = false;
+            for (lcu::usize i = 0; i < placeable_items.size(); ++i) {
+                if (placeable_items[i].block_id == hit->block) {
+                    selected_placeable_index = i;
+                    LCU_LOG_INFO("Picked block into hotbar: {}", placeable_items[selected_placeable_index].name);
+                    found_placeable = true;
+                    break;
+                }
+            }
+            if (!found_placeable) {
+                LCU_LOG_DEBUG("PickBlock: no placeable hotbar entry for block id {}", hit->block);
+            }
         }
 
         if (craft_pressed) {

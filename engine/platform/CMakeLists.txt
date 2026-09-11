@@ -2,6 +2,7 @@ add_library(LcuPlatform STATIC
     src/window.cpp
     src/native_handle.cpp
     src/input.cpp
+    src/key_bindings.cpp
     src/touch_input.cpp
 )
 add_library(Lcu::Platform ALIAS LcuPlatform)

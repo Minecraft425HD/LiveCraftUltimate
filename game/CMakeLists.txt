@@ -24,6 +24,13 @@ target_include_directories(LcuGame PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/items/include>
 )
 
-target_link_libraries(LcuGame PUBLIC Lcu::EngineCore Lcu::Math)
+# Lcu::Math dropped from this list (Phase 43 hygiene fix) - Lcu::EngineCore
+# already links it (see engine/CMakeLists.txt), so listing it again here was
+# a real, verifiable redundant duplicate entry, one real contributor to the
+# "ignoring duplicate libraries" linker warning reported from a real macOS
+# build (not reproduced by this sandbox's own GCC/Clang - see
+# BUILD_STATUS.md). Lcu::EngineCore's own transitive link already reaches
+# every symbol LcuGame's sources use.
+target_link_libraries(LcuGame PUBLIC Lcu::EngineCore)
 
 lcu_apply_common_options(LcuGame)
