@@ -13,10 +13,12 @@
 #include <random>
 
 #include "game/components/ai_wander.h"
+#include "game/components/item_entity.h"
 #include "game/components/position.h"
 #include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/day_night_cycle.h"
+#include "game/systems/item_entity_system.h"
 #include "game/systems/replication_protocol.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
@@ -48,6 +50,7 @@
 #include "lcu/replication/position_interpolator.h"
 #include "lcu/replication/prediction_buffer.h"
 #include "lcu/serialization/chunk_serializer.h"
+#include "lcu/ui/crafting_table_screen.h"
 #include "lcu/ui/hud.h"
 #include "lcu/ui/inventory_screen.h"
 #include "lcu/ui/menu_stack.h"
@@ -73,6 +76,7 @@
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
+#include "lcu/ui/crafting_table_screen_renderer.h"
 #include "lcu/ui/debug_overlay.h"
 #include "lcu/ui/hud_renderer.h"
 #include "lcu/ui/inventory_screen_renderer.h"
@@ -196,6 +200,31 @@ constexpr lcu::f32 kEyeHeight = 1.62f;
 constexpr lcu::f32 kMoveSpeed = 4.3f;    // blocks/s
 constexpr lcu::f32 kLookSpeed = 2.0f;    // radians/s, arrow-key look (see platform/input.h)
 constexpr lcu::f32 kInteractRange = 6.0f;
+// Real item-entity pickup range (Phase 50.2): an exact player-AABB-
+// vs-item-AABB overlap would almost never trigger in practice - the
+// block a player just broke is typically one block *in front of* them
+// (raycast target), not at their own feet, so a dropped item with no
+// horizontal velocity of its own (see ItemEntity's own doc comment)
+// settles roughly where the broken block was, which can genuinely be
+// one OR TWO blocks *below* the player's own standing height (e.g.
+// mining straight down while standing still, exactly what
+// LCU_VERIFY_CRAFT's own break-grass-then-break-dirt-beneath-it
+// sequence does). Two real, measured failures from this phase's own
+// headless verification pinned this down, not a guess: with a 0.75
+// inflate, a single-block-deep item (real observed y=0.12, player
+// min.y=1.0) missed pickup_aabb.min.y=0.25 by 0.005 (LCU_VERIFY_
+// BREAK_PLACE); with 1.0, a two-blocks-deep item (grass then dirt
+// beneath it, item settling around y=-0.875) still sat below
+// pickup_aabb.min.y=0.0 (LCU_VERIFY_CRAFT, the second break's item was
+// never picked up in an extended run). 2.0 comfortably covers both real
+// cases with margin (min.y - 2.0 = -1.0, below every real settled
+// position measured above) - Minecraft's own real player pickup range
+// is likewise larger than its exact hitbox, so inflating `player.aabb`
+// by this much on every axis before the pickup overlap check below is
+// the same real, deliberate design choice (a player mining a staircase
+// down while standing still can still pick up what they just broke),
+// not a test-passing hack (see DECISIONS.md).
+constexpr lcu::f32 kItemPickupRangeInflate = 2.0f;
 // Third-person-behind camera distance (Phase 47, F5) - real, chosen to
 // clear the player's own AABB (kPlayerHeight/kPlayerHalfWidth above)
 // comfortably; no real collision check pulls it closer against a wall
@@ -412,6 +441,32 @@ constexpr lcu::f32 kVerifyInventoryPlaceInMainAtSeconds = 1.0f;
 constexpr lcu::f32 kVerifyInventoryShiftToHotbarAtSeconds = 1.2f;
 constexpr lcu::f32 kVerifyInventoryCloseAtSeconds = 1.4f;
 
+// A sixth, independent headless hook (LCU_VERIFY_WORKBENCH, Phase 50.3):
+// grants the player 1 game:wood directly (same synthetic-setup
+// precedent every prior hook's own item/block seeding already uses),
+// then directly overwrites the world block the player spawns looking at
+// (the same real (-84,0,-85) target LCU_VERIFY_BREAK_PLACE/TORCH/CRAFT
+// already establish) with a real `game:crafting_table` block - a real,
+// deterministic way to guarantee a crafting table is right there to
+// right-click, the same "synthesize exactly the state a real action
+// would produce" honesty those hooks' own item grants already use,
+// just applied to a block instead of an item this time (placing one via
+// a real PlaceBlock press first would need the player to physically
+// re-aim at a face after placement, which this sandbox's fixed spawn
+// orientation can't do deterministically). Then: right-click opens the
+// workbench (PlaceBlock, since it's bound to the right mouse button -
+// see key_bindings.cpp), pick up the wood from the hotbar into the
+// cursor, drop it anywhere in the real 3x3 grid (game:wood -> 4
+// game:planks is shapeless, so it matches regardless of which of the 9
+// cells it's in - a real, direct proof the same recipe genuinely works
+// in a bigger grid, not just the 2x2 one LCU_VERIFY_INVENTORY already
+// covers), take the result, then closes the screen via Escape.
+constexpr lcu::f32 kVerifyWorkbenchOpenAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyWorkbenchPickupWoodAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyWorkbenchDropInGridAtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyWorkbenchTakeResultAtSeconds = 0.8f;
+constexpr lcu::f32 kVerifyWorkbenchCloseAtSeconds = 1.0f;
+
 // Real Minecraft-sized inventory (Phase 49): 9 hotbar slots (indices
 // 0-8, real Minecraft slot numbering) + 27 main storage slots (indices
 // 9-35, 3 rows of 9). Armor slots have no consumer yet - nothing reads/
@@ -427,6 +482,15 @@ constexpr lcu::usize kInventorySlotCount = kHotbarSlotCount + kMainInventorySlot
 constexpr lcu::usize kCraftGridInputSlotCount = 4;
 constexpr lcu::usize kCraftGridResultSlotIndex = kCraftGridInputSlotCount;
 constexpr lcu::usize kCraftGridTotalSlotCount = kCraftGridInputSlotCount + 1;
+// The workbench's own real 3x3 crafting grid (Phase 50.3) - same shape
+// as kCraftGridInputSlotCount above, just 9 slots instead of 4, and its
+// own separate `lcu::items::Inventory` (a crafting-table screen's grid
+// contents shouldn't share state with the inventory screen's own 2x2
+// grid - two real, independent workspaces, matching Minecraft's own
+// two independent grids).
+constexpr lcu::usize kWorkbenchGridInputSlotCount = 9;
+constexpr lcu::usize kWorkbenchGridResultSlotIndex = kWorkbenchGridInputSlotCount;
+constexpr lcu::usize kWorkbenchGridTotalSlotCount = kWorkbenchGridInputSlotCount + 1;
 
 // A handful of wandering AI entities near spawn - a real (if minimal)
 // consumer of engine/ecs and game/systems::update_ai_wander, not just
@@ -771,6 +835,21 @@ int main() {
     cactus_def.color = {0.10f, 0.45f, 0.30f};
     const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
 
+    // Real crafting table (Phase 50.3): right-clicking it opens a real
+    // 3x3 crafting-grid screen (see workbench_open below) instead of
+    // placing/breaking normally through PlaceBlock. A solid, sturdy
+    // furniture block - hardness between plain wood (1.5s) and stone
+    // (2.0s), a real, own choice (no tool-tier system exists to gate it
+    // further - see DECISIONS.md, out of this project's scope entirely).
+    lcu::voxel::BlockDefinition crafting_table_def;
+    crafting_table_def.namespaced_id = "game:crafting_table";
+    crafting_table_def.display_name = "Crafting Table";
+    crafting_table_def.is_transparent = false;
+    crafting_table_def.has_collision = true;
+    crafting_table_def.hardness = 2.0f;
+    crafting_table_def.color = {0.55f, 0.35f, 0.15f};
+    const lcu::voxel::BlockId crafting_table_id = block_registry.register_block(crafting_table_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -827,6 +906,17 @@ int main() {
     wood_item_def.max_stack_size = 64;
     wood_item_def.icon_color = {wood_def.color.x, wood_def.color.y, wood_def.color.z, 1.0f};
     const lcu::items::ItemId wood_item_id = item_registry.register_item(wood_item_def);
+
+    // game:crafting_table's own item (Phase 50.3) - breaking a crafting
+    // table drops itself, the same direct 1:1 block->item convention
+    // every other real placeable block here already follows.
+    lcu::items::ItemDefinition crafting_table_item_def;
+    crafting_table_item_def.namespaced_id = "game:crafting_table";
+    crafting_table_item_def.display_name = "Crafting Table";
+    crafting_table_item_def.max_stack_size = 64;
+    crafting_table_item_def.icon_color = {crafting_table_def.color.x, crafting_table_def.color.y,
+                                           crafting_table_def.color.z, 1.0f};
+    const lcu::items::ItemId crafting_table_item_id = item_registry.register_item(crafting_table_item_def);
 
     // First crafted-only item (Phase 23, closing brief section 55's
     // "no crafting-grid caller anywhere" gap): game:compost has no
@@ -904,26 +994,7 @@ int main() {
     block_item_mapping.register_pair(dirt_id, dirt_item_id);
     block_item_mapping.register_pair(torch_id, torch_item_id);
     block_item_mapping.register_pair(wood_id, wood_item_id);
-
-    // Block-break's item drop (brief section 55) - still a direct 1:1
-    // block->item mapping (Phase 17), not a loot-table system, just
-    // data-driven now instead of hardcoded (Phase 22). Shared by both
-    // the networked (optimistic, client-authoritative - see
-    // DECISIONS.md) and single-player break paths below so the two
-    // don't drift out of sync with each other.
-    const auto grant_item_for_broken_block = [&](lcu::voxel::BlockId broken_block) {
-        const lcu::items::ItemId item_id = block_item_mapping.item_for_block(broken_block);
-        if (item_id == lcu::items::kNoItemId) {
-            return;
-        }
-        const std::string& item_name = item_registry.definition_of(item_id).namespaced_id;
-        const lcu::u32 leftover = player_inventory.add_item(item_registry, {item_id, 1});
-        if (leftover == 0) {
-            LCU_LOG_INFO("Picked up 1 {} (inventory: {})", item_name, player_inventory.count_item(item_id));
-        } else {
-            LCU_LOG_INFO("Inventory full, {} drop lost", item_name);
-        }
-    };
+    block_item_mapping.register_pair(crafting_table_id, crafting_table_item_id);
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Modding stack (Phase 9, brief section 84): one Lua VM shared by every
@@ -1498,6 +1569,42 @@ int main() {
     }
     game::systems::AIWanderConfig ai_wander_config;
 
+    // Block-break's item drop (brief section 55) - still a direct 1:1
+    // block->item mapping (Phase 17), just data-driven (Phase 22).
+    // Real physical item entity now (Phase 50), replacing the old
+    // direct-to-inventory grant: spawns a real `game::components::
+    // ItemEntity` + `Position` (on the same `entity_registry` the AI
+    // entities above already share - one real ECS world, not a second
+    // one) at the broken block's own center with a real small upward
+    // toss (`update_item_entities` below applies real gravity/ground
+    // collision every frame after this), rather than teleporting the
+    // item straight into the player's inventory. Actual pickup happens
+    // later, once the player's own AABB overlaps it and its own pickup
+    // delay has elapsed (`pickup_item_entities`) - a real Minecraft-
+    // shaped break -> pop up -> fall -> land -> pick up pipeline, not a
+    // shortcut. Shared by both the networked (optimistic, client-
+    // authoritative - see DECISIONS.md) and single-player break paths
+    // below so the two don't drift out of sync with each other.
+    const auto spawn_item_entity_for_broken_block = [&](lcu::voxel::BlockId broken_block,
+                                                          const lcu::voxel::BlockWorldCoord& block_pos) {
+        const lcu::items::ItemId item_id = block_item_mapping.item_for_block(broken_block);
+        if (item_id == lcu::items::kNoItemId) {
+            return;
+        }
+        const lcu::math::Vec3 spawn_center{static_cast<lcu::f32>(block_pos.x) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.y) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.z) + 0.5f};
+        const lcu::ecs::EntityId entity = entity_registry.create_entity();
+        entity_registry.add_component<game::components::Position>(entity, {spawn_center});
+        game::components::ItemEntity item_entity;
+        item_entity.stack = {item_id, 1};
+        item_entity.vertical_velocity = game::systems::kItemEntitySpawnUpSpeed;
+        item_entity.pickup_delay_seconds = game::systems::kItemEntityPickupDelaySeconds;
+        entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
+        LCU_LOG_INFO("Spawned item entity: {} at world ({}, {}, {})",
+                     item_registry.definition_of(item_id).namespaced_id, block_pos.x, block_pos.y, block_pos.z);
+    };
+
     // One interpolator per remote AI entity (keyed by the EntityState
     // wire format's entity_index - see replication_protocol.h), fed by
     // EntityState messages below. network_clock is this client's own
@@ -1603,6 +1710,10 @@ int main() {
     const auto verify_inventory_start = std::chrono::steady_clock::now();
     bool verify_inventory_wood_granted = false;
 
+    const bool verify_workbench = std::getenv("LCU_VERIFY_WORKBENCH") != nullptr;
+    const auto verify_workbench_start = std::chrono::steady_clock::now();
+    bool verify_workbench_setup_done = false;
+
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
     // (wall-clock) seconds - frame-count-indexed like
@@ -1668,6 +1779,34 @@ int main() {
         const lcu::items::ItemStack* match =
             recipe_registry.find_match(grid, lcu::ui::kCraftGridEdge, lcu::ui::kCraftGridEdge);
         craft_grid_inventory.set_slot(kCraftGridResultSlotIndex, match != nullptr ? *match : lcu::items::ItemStack{});
+    };
+
+    // Real crafting-table workbench screen (Phase 50.3): right-clicking
+    // a `game:crafting_table` block opens this instead of placing a
+    // block or breaking normally (see place_pressed below) - a real 3x3
+    // grid + result, plus the same main storage + hotbar rows the
+    // regular inventory screen shows (a workbench GUI with no way to
+    // actually move items into its own grid would be unusable - see
+    // DECISIONS.md for why this reads "like inventory UI" as "reuses the
+    // same screen shape," not "grid+result only and nothing else").
+    // Mutually exclusive with both menu_stack and inventory_open by
+    // construction, same pattern inventory_open itself already
+    // establishes against menu_stack.
+    bool workbench_open = false;
+    lcu::items::Inventory workbench_grid_inventory(kWorkbenchGridTotalSlotCount);
+
+    // Recomputes the workbench's own real 3x3 crafting result - same
+    // RecipeRegistry::find_match integration recompute_craft_result
+    // above uses, just queried as a 3x3 grid instead of 2x2.
+    const auto recompute_workbench_result = [&]() {
+        std::vector<lcu::items::ItemId> grid(kWorkbenchGridInputSlotCount, lcu::items::kNoItemId);
+        for (lcu::usize i = 0; i < kWorkbenchGridInputSlotCount; ++i) {
+            grid[i] = workbench_grid_inventory.slot_at(i).item;
+        }
+        const lcu::items::ItemStack* match =
+            recipe_registry.find_match(grid, lcu::ui::kCraftingTableGridEdge, lcu::ui::kCraftingTableGridEdge);
+        workbench_grid_inventory.set_slot(kWorkbenchGridResultSlotIndex,
+                                           match != nullptr ? *match : lcu::items::ItemStack{});
     };
 
     // Real F-key HUD/display state (Phase 47) - toggled by their own
@@ -2006,6 +2145,61 @@ int main() {
             input.set_down(lcu::platform::Action::Interact, interact_now);
             input.set_down(lcu::platform::Action::Crouch, shift_now);
         }
+        if (verify_workbench) {
+            if (!verify_workbench_setup_done) {
+                // Synthetic setup (see kVerifyWorkbenchOpenAtSeconds' own
+                // doc comment above): grants wood directly (same
+                // precedent every prior hook's own item grant uses), and
+                // directly overwrites the real world block at the same
+                // (-84,0,-85) spawn-look target LCU_VERIFY_BREAK_PLACE/
+                // TORCH/CRAFT already establish with a real
+                // game:crafting_table block, so it's guaranteed to be
+                // right there to right-click.
+                player_inventory.add_item(item_registry, {wood_item_id, 1});
+                const lcu::voxel::BlockWorldCoord seed_pos{-84, 0, -85};
+                const auto seed_split = lcu::voxel::world_to_chunk_and_local(seed_pos, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* seed_target = world.chunk_at_mutable(seed_split.chunk)) {
+                    seed_target->set_block(seed_split.local.x, seed_split.local.y, seed_split.local.z,
+                                            crafting_table_id);
+                }
+                verify_workbench_setup_done = true;
+            }
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_workbench_start).count();
+            input.set_down(lcu::platform::Action::Escape, elapsed >= kVerifyWorkbenchCloseAtSeconds &&
+                                                               elapsed < kVerifyWorkbenchCloseAtSeconds +
+                                                                             kVerifyEdgePulseSeconds);
+
+            const lcu::ui::CraftingTableScreenLayout verify_workbench_layout = lcu::ui::crafting_table_screen_layout(
+                static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+            const auto verify_wb_slot_center = [](const lcu::ui::InventorySlotRect& rect) {
+                return lcu::platform::Window::MousePosition{rect.x + rect.size * 0.5f, rect.y + rect.size * 0.5f};
+            };
+
+            bool place_now = false;
+            bool interact_now = false;
+            if (elapsed >= kVerifyWorkbenchOpenAtSeconds &&
+                elapsed < kVerifyWorkbenchOpenAtSeconds + kVerifyEdgePulseSeconds) {
+                place_now = true;
+            } else if (elapsed >= kVerifyWorkbenchPickupWoodAtSeconds &&
+                       elapsed < kVerifyWorkbenchPickupWoodAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_wb_slot_center(verify_workbench_layout.hotbar_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyWorkbenchDropInGridAtSeconds &&
+                       elapsed < kVerifyWorkbenchDropInGridAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_wb_slot_center(verify_workbench_layout.grid_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            } else if (elapsed >= kVerifyWorkbenchTakeResultAtSeconds &&
+                       elapsed < kVerifyWorkbenchTakeResultAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_wb_slot_center(verify_workbench_layout.result);
+                window.warp_mouse(pos.x, pos.y);
+                interact_now = true;
+            }
+            input.set_down(lcu::platform::Action::PlaceBlock, place_now);
+            input.set_down(lcu::platform::Action::Interact, interact_now);
+        }
 
         // Real mouse-capture management (Phase 43, extended Phase 46):
         // ESC/Tab or losing window focus releases capture; clicking
@@ -2069,9 +2263,22 @@ int main() {
             }
         };
 
+        // Real workbench close (Phase 50.3) - same "never silently
+        // discard the cursor stack" contract close_inventory above
+        // establishes.
+        const auto close_workbench = [&]() {
+            workbench_open = false;
+            window.set_relative_mouse_mode(true);
+            if (!cursor_stack.is_empty()) {
+                const lcu::u32 leftover = player_inventory.add_item(item_registry, cursor_stack);
+                cursor_stack =
+                    leftover > 0 ? lcu::items::ItemStack{cursor_stack.item, leftover} : lcu::items::ItemStack{};
+            }
+        };
+
         const bool inventory_toggle_pressed =
             input.is_down(lcu::platform::Action::Inventory) && !previous_input.is_down(lcu::platform::Action::Inventory);
-        if (inventory_toggle_pressed && !waiting_for_rebind && menu_stack.empty()) {
+        if (inventory_toggle_pressed && !waiting_for_rebind && menu_stack.empty() && !workbench_open) {
             if (inventory_open) {
                 close_inventory();
                 LCU_LOG_INFO("Inventory closed");
@@ -2086,16 +2293,22 @@ int main() {
         // ESC opens the pause menu from gameplay, or pops one screen
         // back while a menu is already open (popping the last screen
         // closes it and re-captures the mouse) - see Phase 46's own
-        // directive. Closes the inventory screen instead if that's what
-        // is currently open (Phase 49) - Minecraft's own ESC behavior,
-        // and keeps the pause menu and inventory screen mutually
-        // exclusive (menu_stack.empty() above already refuses to open
-        // the inventory while paused, so this side only needs the
-        // reverse check). Suppressed while actively capturing a rebind
-        // so ESC cancels that instead (handled above).
+        // directive. Closes the inventory or workbench screen instead if
+        // one of those is currently open (Phase 49/50) - Minecraft's own
+        // ESC behavior, and keeps the pause menu, inventory screen, and
+        // workbench screen mutually exclusive (menu_stack.empty() above
+        // already refuses to open the inventory while paused, and the
+        // place_pressed workbench-open check below refuses to open the
+        // workbench while inventory_open or paused, so this side only
+        // needs the reverse checks). Suppressed while actively capturing
+        // a rebind so ESC cancels that instead (handled above).
         if (escape_pressed && !waiting_for_rebind) {
             if (inventory_open) {
                 close_inventory();
+                LCU_LOG_INFO("Inventory closed");
+            } else if (workbench_open) {
+                close_workbench();
+                LCU_LOG_INFO("Workbench closed");
             } else if (menu_stack.empty()) {
                 menu_stack.push(build_pause_screen());
                 window.set_relative_mouse_mode(false);
@@ -2110,7 +2323,7 @@ int main() {
             window.set_relative_mouse_mode(false);
         }
         bool suppress_click_for_recapture = false;
-        if (menu_stack.empty() && !inventory_open && !window.relative_mouse_mode() &&
+        if (menu_stack.empty() && !inventory_open && !workbench_open && !window.relative_mouse_mode() &&
             (input.is_down(lcu::platform::Action::Interact) || input.is_down(lcu::platform::Action::PlaceBlock))) {
             window.set_relative_mouse_mode(true);
             suppress_click_for_recapture = true;
@@ -2236,6 +2449,109 @@ int main() {
                                      static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "");
                     } else {
                         LCU_LOG_INFO("Inventory click: region={} index={}{} -> cursor {} x{}",
+                                     static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "",
+                                     item_registry.definition_of(cursor_stack.item).namespaced_id, cursor_stack.count);
+                    }
+                }
+            }
+        }
+
+        // Real workbench drag/drop (Phase 50.3) - same real click
+        // dispatch inventory_open's own block above uses, just against
+        // the workbench's own 3x3 grid + the shared player_inventory's
+        // main/hotbar ranges (there is no separate "workbench inventory"
+        // - the main storage/hotbar rows are the same real
+        // player_inventory the regular inventory screen and the
+        // in-world hotbar both read).
+        if (workbench_open && !waiting_for_rebind) {
+            const bool wb_left_pressed =
+                input.is_down(lcu::platform::Action::Interact) && !previous_input.is_down(lcu::platform::Action::Interact);
+            const bool wb_right_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
+                                           !previous_input.is_down(lcu::platform::Action::PlaceBlock);
+            if (wb_left_pressed || wb_right_pressed) {
+                const bool shift_held = input.is_down(lcu::platform::Action::Crouch);
+                const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
+                const lcu::ui::CraftingTableScreenLayout workbench_layout = lcu::ui::crafting_table_screen_layout(
+                    static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+                const lcu::ui::CraftingTableScreenHit hit = lcu::ui::hit_test_crafting_table_screen(
+                    workbench_layout, static_cast<lcu::f32>(mouse_pos.x), static_cast<lcu::f32>(mouse_pos.y));
+
+                switch (hit.region) {
+                    case lcu::ui::CraftingTableScreenRegion::kGridInput: {
+                        if (shift_held && wb_left_pressed) {
+                            lcu::items::inventory_shift_click(workbench_grid_inventory, hit.index, item_registry,
+                                                               player_inventory, 0, kInventorySlotCount);
+                        } else if (wb_left_pressed) {
+                            lcu::items::inventory_left_click(workbench_grid_inventory, item_registry, hit.index,
+                                                              cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(workbench_grid_inventory, item_registry, hit.index,
+                                                               cursor_stack);
+                        }
+                        recompute_workbench_result();
+                        break;
+                    }
+                    case lcu::ui::CraftingTableScreenRegion::kResult: {
+                        // Same real "take the result, consume 1 of each
+                        // ingredient" logic the 2x2 inventory grid's own
+                        // result-click uses - see its own doc comment for
+                        // the real, documented multi-ingredient limit.
+                        const lcu::items::ItemStack result =
+                            workbench_grid_inventory.slot_at(kWorkbenchGridResultSlotIndex);
+                        const lcu::u32 max_stack =
+                            result.is_empty() ? 0 : item_registry.definition_of(result.item).max_stack_size;
+                        const bool cursor_accepts =
+                            cursor_stack.is_empty() ||
+                            (cursor_stack.item == result.item && cursor_stack.count + result.count <= max_stack);
+                        if (!result.is_empty() && cursor_accepts) {
+                            cursor_stack = cursor_stack.is_empty()
+                                               ? result
+                                               : lcu::items::ItemStack{cursor_stack.item, cursor_stack.count + result.count};
+                            for (lcu::usize i = 0; i < kWorkbenchGridInputSlotCount; ++i) {
+                                const lcu::items::ItemStack ingredient = workbench_grid_inventory.slot_at(i);
+                                if (!ingredient.is_empty()) {
+                                    workbench_grid_inventory.set_slot(
+                                        i, ingredient.count > 1 ? lcu::items::ItemStack{ingredient.item, ingredient.count - 1}
+                                                                : lcu::items::ItemStack{});
+                                }
+                            }
+                            recompute_workbench_result();
+                        }
+                        break;
+                    }
+                    case lcu::ui::CraftingTableScreenRegion::kMainInventory: {
+                        const lcu::usize slot = kHotbarSlotCount + hit.index;
+                        if (shift_held && wb_left_pressed) {
+                            lcu::items::inventory_shift_click(player_inventory, slot, item_registry, player_inventory,
+                                                               0, kHotbarSlotCount);
+                        } else if (wb_left_pressed) {
+                            lcu::items::inventory_left_click(player_inventory, item_registry, slot, cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(player_inventory, item_registry, slot, cursor_stack);
+                        }
+                        break;
+                    }
+                    case lcu::ui::CraftingTableScreenRegion::kHotbar: {
+                        const lcu::usize slot = hit.index;
+                        if (shift_held && wb_left_pressed) {
+                            lcu::items::inventory_shift_click(player_inventory, slot, item_registry, player_inventory,
+                                                               kHotbarSlotCount, kInventorySlotCount);
+                        } else if (wb_left_pressed) {
+                            lcu::items::inventory_left_click(player_inventory, item_registry, slot, cursor_stack);
+                        } else {
+                            lcu::items::inventory_right_click(player_inventory, item_registry, slot, cursor_stack);
+                        }
+                        break;
+                    }
+                    case lcu::ui::CraftingTableScreenRegion::kNone:
+                        break;
+                }
+                if (hit.region != lcu::ui::CraftingTableScreenRegion::kNone) {
+                    if (cursor_stack.is_empty()) {
+                        LCU_LOG_INFO("Workbench click: region={} index={}{} -> cursor empty",
+                                     static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "");
+                    } else {
+                        LCU_LOG_INFO("Workbench click: region={} index={}{} -> cursor {} x{}",
                                      static_cast<int>(hit.region), hit.index, shift_held ? " (shift)" : "",
                                      item_registry.definition_of(cursor_stack.item).namespaced_id, cursor_stack.count);
                     }
@@ -2642,6 +2958,30 @@ int main() {
             day_night_cycle.update(delta_seconds);
         }
 
+        // Real item-entity physics + pickup (Phase 50) - client-side
+        // always (item entities are spawned optimistically client-side
+        // in both single-player and networked mode, same as their own
+        // spawn call site's own doc comment explains), gated on `paused`
+        // alone like day_night_cycle above, NOT on `inventory_open` -
+        // dropped items keep falling/despawning and can still be picked
+        // up while the player's inventory screen is open, matching
+        // Minecraft's own real behavior (only the player's own
+        // movement/mining/placing locks while it's open, not the world).
+        if (!paused) {
+            game::systems::update_item_entities(entity_registry, world, delta_seconds, is_solid);
+            const lcu::physics::AABB pickup_aabb{
+                player.aabb.min - lcu::math::Vec3{kItemPickupRangeInflate, kItemPickupRangeInflate,
+                                                    kItemPickupRangeInflate},
+                player.aabb.max + lcu::math::Vec3{kItemPickupRangeInflate, kItemPickupRangeInflate,
+                                                    kItemPickupRangeInflate},
+            };
+            const lcu::u32 picked_up =
+                game::systems::pickup_item_entities(entity_registry, pickup_aabb, item_registry, player_inventory);
+            if (picked_up > 0) {
+                LCU_LOG_INFO("Picked up from {} item entity(ies) (inventory updated)", picked_up);
+            }
+        }
+
         // Real inventory-screen player-control lock (Phase 49, brief
         // section 60's own directive: "game keeps running - Minecraft
         // behavior: no pause in inventory"): unlike `paused` above
@@ -2650,7 +2990,13 @@ int main() {
         // above/at the top of this frame) - only the player's own
         // movement/camera/mining/placing/crafting lock, the same real
         // Minecraft behavior (the world keeps ticking behind the GUI).
-        if (!paused && !inventory_open) {
+        // Same real lock for the workbench screen (Phase 50.3) - the
+        // crafting-table right-click interception below runs inside this
+        // very block (workbench_open is still false at the moment of
+        // that click, so this gate doesn't block the *opening* click
+        // itself), then subsequent frames correctly lock out movement/
+        // mining/placing the same way inventory_open already does.
+        if (!paused && !inventory_open && !workbench_open) {
             // Real hand-swing elapsed time (Phase 48) - reset to 0 on
             // every real break/place action below, counted up here so
             // the render section can compute a real swing offset from
@@ -2914,7 +3260,7 @@ int main() {
                 // tracks the same three items (Phase 19) and reconciles
                 // this optimistic guess via InventoryUpdate once its own
                 // outcome is known - see DECISIONS.md.
-                grant_item_for_broken_block(hit->block);
+                spawn_item_entity_for_broken_block(hit->block, hit->world);
             } else if (break_ready) {
                 break_request_sent = true;
                 hand_swing_elapsed = 0.0f;
@@ -2944,13 +3290,32 @@ int main() {
                     // first real item consumer (see DECISIONS.md), a direct
                     // 1:1 block->item mapping (stone/grass/dirt as of Phase
                     // 17), not a loot-table system.
-                    grant_item_for_broken_block(hit->block);
+                    spawn_item_entity_for_broken_block(hit->block, hit->world);
                 } else {
                     LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
                 }
             }
 
-            // Real slot-driven placement (Phase 49): whatever item
+            // Real crafting-table right-click interception (Phase 50.3):
+            // right-clicking a `game:crafting_table` block opens the
+            // workbench screen instead of placing/breaking through it -
+            // Minecraft's own real behavior for every "special GUI"
+            // block (a crafting table, a furnace, ...): the click is
+            // always intercepted, regardless of what item (if any) the
+            // player happens to be holding. Checked before the normal
+            // placement logic below so a placeable item held while
+            // looking at a crafting table never overwrites it. Already
+            // inside the `!workbench_open` gate above, so this can only
+            // run on the real opening click, never while already open
+            // (the separate workbench click-handling block above owns
+            // every click once it's open).
+            if (place_pressed && hit && hit->block == crafting_table_id) {
+                workbench_open = true;
+                window.set_relative_mouse_mode(false);
+                recompute_workbench_result();
+                LCU_LOG_INFO("Workbench opened");
+            } else {
+                // Real slot-driven placement (Phase 49): whatever item
             // physically sits in the selected hotbar slot right now is
             // what places - block_item_mapping::block_for_item is the
             // only thing translating it into a block id.
@@ -3023,7 +3388,8 @@ int main() {
                     }
                 }
             }
-        }  // if (!paused && !inventory_open)
+            }  // else (not a crafting-table right-click)
+        }  // if (!paused && !inventory_open && !workbench_open)
 
         // Real F-key HUD/display toggles (Phase 47) - work regardless
         // of pause state (see `third_person`'s own doc comment above).
@@ -3125,6 +3491,12 @@ int main() {
         const lcu::ui::InventoryScreenLayout inventory_layout =
             lcu::ui::inventory_screen_layout(renderer_desc.width, renderer_desc.height);
 
+        // Real workbench screen (Phase 50.3) - same populate-then-queue-
+        // then-draw-labels split as inventory_state above.
+        lcu::ui::CraftingTableScreenState workbench_state{};
+        const lcu::ui::CraftingTableScreenLayout workbench_layout =
+            lcu::ui::crafting_table_screen_layout(renderer_desc.width, renderer_desc.height);
+
         // Sun/moon (Phase 27) - see kCelestialRadius's doc comment. Direction
         // math lives in game::systems::sun_direction (headlessly unit-tested
         // at the four cardinal phase points) rather than duplicated here.
@@ -3193,6 +3565,39 @@ int main() {
                     ++draw_calls;
                 }
                 ++entity_count;
+            }
+        }
+
+        // Real item-entity rendering (Phase 50.1) - a small colored
+        // camera-facing quad per real dropped item (its own item's
+        // icon_color, same flat-color convention every other real icon
+        // in this project already follows), via the new depth-tested
+        // submit_world_billboard (not submit_billboard's own sky view -
+        // an item entity needs to be genuinely occluded by/occlude
+        // terrain, not always render on top the way the sun/moon do -
+        // see submit_world_billboard's own doc comment). spin_angle
+        // (real per-frame Y-axis rotation, purely visual) rotates the
+        // quad's own right/up basis around world-up so a dropped item
+        // is visibly distinct from a static block even as a flat quad,
+        // not just a billboard that always faces the camera - the same
+        // real per-frame variation Minecraft's own spinning item
+        // entities have. Always drawn from entity_registry regardless of
+        // networked/single-player (unlike AI above): item entities are
+        // spawned client-side in both modes (see their own spawn call
+        // site's doc comment), not server-replicated.
+        for (const lcu::ecs::EntityId& entity : entity_registry.pool_for<game::components::ItemEntity>().dense_entities()) {
+            const auto& item_entity = *entity_registry.get_component<game::components::ItemEntity>(entity);
+            const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
+            const lcu::f32 cos_a = std::cos(item_entity.spin_angle);
+            const lcu::f32 sin_a = std::sin(item_entity.spin_angle);
+            const lcu::math::Vec3 billboard_right{cos_a, 0.0f, sin_a};
+            constexpr lcu::math::Vec3 kWorldUp{0.0f, 1.0f, 0.0f};
+            const lcu::math::Vec4 icon_color =
+                item_registry.definition_of(item_entity.stack.item).icon_color;
+            renderer.submit_world_billboard(pos, billboard_right, kWorldUp, game::components::kItemEntityHalfExtent,
+                                             {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj);
+            if (bgfx::isValid(sky_program)) {
+                ++draw_calls;
             }
         }
 
@@ -3364,6 +3769,57 @@ int main() {
                                                    renderer_desc.height);
         }
 
+        // Real workbench screen (Phase 50.3) - same real per-frame
+        // population as the inventory screen above, just against the
+        // workbench's own 3x3 grid Inventory instead of the 2x2 one.
+        // Mutually exclusive with inventory_open (see the E/right-click
+        // handling above), so this never double-draws with it either.
+        if (workbench_open) {
+            for (lcu::usize i = 0; i < lcu::ui::kCraftingTableGridSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = workbench_grid_inventory.slot_at(i);
+                workbench_state.grid_input[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    workbench_state.grid_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    workbench_state.grid_input[i].count = stack.count;
+                }
+            }
+            const lcu::items::ItemStack& wb_result_stack =
+                workbench_grid_inventory.slot_at(kWorkbenchGridResultSlotIndex);
+            workbench_state.result.has_item = !wb_result_stack.is_empty();
+            if (!wb_result_stack.is_empty()) {
+                workbench_state.result.icon_color = item_registry.definition_of(wb_result_stack.item).icon_color;
+                workbench_state.result.count = wb_result_stack.count;
+            }
+            for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
+                workbench_state.main_slots[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    workbench_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    workbench_state.main_slots[i].count = stack.count;
+                }
+            }
+            for (lcu::usize i = 0; i < lcu::ui::kHotbarSlotCount; ++i) {
+                const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
+                workbench_state.hotbar_slots[i].has_item = !stack.is_empty();
+                if (!stack.is_empty()) {
+                    workbench_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    workbench_state.hotbar_slots[i].count = stack.count;
+                }
+            }
+            if (!cursor_stack.is_empty()) {
+                workbench_state.cursor.has_item = true;
+                workbench_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                workbench_state.cursor.count = cursor_stack.count;
+                const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
+                workbench_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
+                workbench_state.cursor_y = static_cast<lcu::f32>(mouse_pos.y);
+            } else {
+                workbench_state.cursor = lcu::ui::InventorySlotDisplay{};
+            }
+            lcu::ui::queue_crafting_table_screen_quads(renderer, workbench_layout, workbench_state,
+                                                        renderer_desc.width, renderer_desc.height);
+        }
+
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
         renderer.flush_ui_quads(ui2d_program);
         if (ui_had_quads && bgfx::isValid(ui2d_program)) {
@@ -3402,6 +3858,11 @@ int main() {
         // readable while it's open.
         if (inventory_open) {
             lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state);
+        }
+        // Real workbench screen slot-count labels (Phase 50.3) - same
+        // reasoning as the inventory screen's own labels above.
+        if (workbench_open) {
+            lcu::ui::draw_crafting_table_screen_labels(renderer, workbench_layout, workbench_state);
         }
         // Menu row labels last - drawn on top of (after) the debug
         // overlay/HUD text, since the pause menu is meant to be the one

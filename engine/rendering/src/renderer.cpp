@@ -345,6 +345,61 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     bgfx::submit(0, program);
 }
 
+void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
+                                       f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
+                                       const math::Mat4& view, const math::Mat4& proj) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    // Same minimal vertex format every other flat-color debug/world
+    // primitive here already uses (see submit_billboard's own doc
+    // comment on why not voxel::MeshVertex).
+    struct BillboardVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+    };
+
+    const math::Vec3 v0 = center - right * half_size - up * half_size;
+    const math::Vec3 v1 = center + right * half_size - up * half_size;
+    const math::Vec3 v2 = center + right * half_size + up * half_size;
+    const math::Vec3 v3 = center - right * half_size + up * half_size;
+    const BillboardVertex vertices[4] = {
+        {v0.x, v0.y, v0.z, color.x, color.y, color.z},
+        {v1.x, v1.y, v1.z, color.x, color.y, color.z},
+        {v2.x, v2.y, v2.z, color.x, color.y, color.z},
+        {v3.x, v3.y, v3.z, color.x, color.y, color.z},
+    };
+    const u16 indices[6] = {0, 1, 2, 0, 2, 3};
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .end();
+
+    if (bgfx::getAvailTransientVertexBuffer(4, layout) < 4 || bgfx::getAvailTransientIndexBuffer(6) < 6) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 4, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 6);
+    std::memcpy(tvb.data, vertices, sizeof(vertices));
+    std::memcpy(tib.data, indices, sizeof(indices));
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    // Real depth test against terrain, no depth write - same reasoning
+    // submit_wireframe_box/submit_solid_box's own comments give for a
+    // per-frame, moving object; drawn into view 0 (terrain), not
+    // kSkyViewId, so it's genuinely occluded by/occludes real geometry.
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS);
+    bgfx::submit(0, program);
+}
+
 void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color) {
     LCU_ASSERT(initialized_);
 

@@ -360,6 +360,17 @@ int main(int argc, char** argv) {
     cactus_def.has_collision = true;
     const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
 
+    // Real crafting table (Phase 50.3) - registered identically to
+    // VoxelClient's own (same relative position right after cactus), so
+    // both sides' BlockIds stay in sync the same way every other block
+    // here already does.
+    lcu::voxel::BlockDefinition crafting_table_def;
+    crafting_table_def.namespaced_id = "game:crafting_table";
+    crafting_table_def.display_name = "Crafting Table";
+    crafting_table_def.is_transparent = false;
+    crafting_table_def.has_collision = true;
+    const lcu::voxel::BlockId crafting_table_id = block_registry.register_block(crafting_table_def);
+
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
     // register the same one item in the same order, so their ItemIds
@@ -394,6 +405,25 @@ int main(int argc, char** argv) {
     torch_item_def.display_name = "Torch";
     torch_item_def.max_stack_size = 64;
     const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
+
+    // Registered in the same order as VoxelClient (Phase 50), same
+    // ItemId-parity reasoning as every entry above - game:planks/
+    // game:compost are deliberately NOT registered here, matching them
+    // never appearing in `tracked_items` below: both are crafted-only,
+    // never involved in a BlockAction, so this server never needs to
+    // track or validate them (crafting stays real client-side local
+    // bookkeeping - see DECISIONS.md).
+    lcu::items::ItemDefinition wood_item_def;
+    wood_item_def.namespaced_id = "game:wood";
+    wood_item_def.display_name = "Wood";
+    wood_item_def.max_stack_size = 64;
+    const lcu::items::ItemId wood_item_id = item_registry.register_item(wood_item_def);
+
+    lcu::items::ItemDefinition crafting_table_item_def;
+    crafting_table_item_def.namespaced_id = "game:crafting_table";
+    crafting_table_item_def.display_name = "Crafting Table";
+    crafting_table_item_def.max_stack_size = 64;
+    const lcu::items::ItemId crafting_table_item_id = item_registry.register_item(crafting_table_item_def);
 
 #if defined(LCU_ENABLE_SCRIPTING)
     // Mods run here too (Phase 9) so a mod's registered blocks/items exist
@@ -580,6 +610,8 @@ int main(int argc, char** argv) {
     block_item_mapping.register_pair(grass_id, grass_item_id);
     block_item_mapping.register_pair(dirt_id, dirt_item_id);
     block_item_mapping.register_pair(torch_id, torch_item_id);
+    block_item_mapping.register_pair(wood_id, wood_item_id);
+    block_item_mapping.register_pair(crafting_table_id, crafting_table_item_id);
     const auto item_for_block = [&](lcu::voxel::BlockId block_id) {
         return block_item_mapping.item_for_block(block_id);
     };
@@ -589,9 +621,11 @@ int main(int argc, char** argv) {
     // BlockAction, not just the one item (if any) that request actually
     // touched, so a stale guess for an *unrelated* tracked item (e.g.
     // from an earlier request that arrived out of order) also gets
-    // corrected eventually.
-    const std::array<lcu::items::ItemId, 4> tracked_items{stone_item_id, grass_item_id, dirt_item_id,
-                                                            torch_item_id};
+    // corrected eventually. Extended to 6 entries (Phase 50): wood/
+    // crafting_table are real, block-backed, BlockAction-reachable
+    // items now too, same as the original four.
+    const std::array<lcu::items::ItemId, 6> tracked_items{stone_item_id,        grass_item_id, dirt_item_id,
+                                                            torch_item_id,       wood_item_id,  crafting_table_item_id};
 
     // Sends `client`'s current authoritative count for every tracked
     // item - called after every BlockAction that could have affected

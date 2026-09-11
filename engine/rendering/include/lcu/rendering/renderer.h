@@ -116,6 +116,21 @@ class Renderer : public NonCopyable {
     void submit_solid_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
                            bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
 
+    // Draws one camera-facing colored quad into the terrain view (view
+    // 0) WITH real depth testing against solid terrain (Phase 50's real
+    // item-entity rendering) - the same camera-facing quad math
+    // submit_billboard already uses, but genuinely occluded by/occluding
+    // against nearby geometry the way a real object living in the game
+    // world needs, unlike submit_billboard's own sky view (no depth
+    // test - correct for a sun/moon "at infinity", wrong for a dropped
+    // item sitting on the ground behind a wall). No depth *write*, same
+    // reasoning submit_wireframe_box/submit_solid_box's own comments
+    // give for a per-frame, moving object. No-op if `program` is
+    // invalid.
+    void submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
+                                 f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
+                                 const math::Mat4& view, const math::Mat4& proj);
+
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in
     // pixels, top-left origin, y increasing downward (SDL/mouse

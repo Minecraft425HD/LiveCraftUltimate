@@ -27,6 +27,7 @@ add_executable(VoxelTests
     game/systems/ai_wander_system_test.cpp
     game/systems/day_night_cycle_test.cpp
     game/systems/replication_protocol_test.cpp
+    game/systems/item_entity_system_test.cpp
     game/items/block_item_mapping_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp
@@ -85,7 +86,8 @@ endif()
 # Lcu::Platform's own tests, in both the bgfx and non-bgfx configs (see
 # engine/ui/CMakeLists.txt).
 if(TARGET Lcu::Ui)
-    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp ui/inventory_screen_test.cpp)
+    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp ui/inventory_screen_test.cpp
+                                       ui/crafting_table_screen_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
 endif()
 

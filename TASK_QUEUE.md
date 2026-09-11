@@ -2074,6 +2074,76 @@ needing >1 of the same ingredient in one cell isn't correctly consumed
 by the result-click logic (documented, no registered recipe needs it
 yet); still no icon/texture atlas.
 
+## Phase 50 — Item entities + crafting table
+
+Real physical dropped items (closing Phase 17's own long-standing
+"pickup goes straight to inventory" gap) and a real crafting table with
+its own 3x3 grid screen.
+
+- [x] **Real item entities**: breaking a block spawns a real
+  `game::components::ItemEntity` + `Position` on the shared
+  `entity_registry` with a real small upward toss, instead of a direct
+  inventory grant. `game::systems::update_item_entities` applies real
+  gravity/ground collision every frame by reusing `lcu::physics::
+  apply_gravity`/`move_and_collide` - the same primitives the player's
+  own controller already uses. Real per-frame Y-axis spin (visual
+  only), real 5-minute despawn.
+- [x] **Real pickup**: `pickup_item_entities` adds to the inventory once
+  the player's own (inflated) AABB overlaps the entity and its 0.5s
+  pickup delay has elapsed; a partial fit keeps the entity alive with
+  its count reduced to the real leftover.
+- [x] **New `Renderer::submit_world_billboard`**: a real depth-tested
+  camera-facing quad in the terrain view (unlike `submit_billboard`'s
+  own sky view, which has no depth test) - reuses the existing sky
+  shader, zero new shader files. Item entities spin around world-Y,
+  tinted their own item's real `icon_color`.
+- [x] **Real crafting table** (`game:crafting_table`): right-click opens
+  a real workbench screen - a 3x3 grid + result plus the same main
+  storage/hotbar rows the regular inventory screen shows (a grid-only
+  screen would have no way to move items into it - see DECISIONS.md).
+  New pure `engine/ui::crafting_table_screen.{h,cpp}` +
+  `crafting_table_screen_renderer.{h,cpp}`, built from
+  `inventory_screen.h`'s own shared building blocks. Real click
+  dispatch reuses the exact same `inventory_left_click`/`right_click`/
+  `shift_click` functions Phase 49 already built. Breaking a crafting
+  table drops itself.
+- [x] **Server parity extended**: `game:wood`/`game:crafting_table`
+  items now registered on `VoxelServer` too (Phase 49 only added wood
+  client-side - a real, now-closed gap), `tracked_items` grown from 4
+  to 6 entries.
+- [x] **A real item-entity pickup-range bug found and fixed twice
+  during this phase's own headless verification**: an exact player-
+  AABB overlap almost never triggers in practice (a dropped item with
+  no horizontal velocity can settle one or two blocks below the
+  player's own standing height) - a real 0.75 inflate missed a
+  single-block-deep item by 0.005 (`LCU_VERIFY_BREAK_PLACE` failed for
+  real), 1.0 still missed a two-blocks-deep item
+  (`LCU_VERIFY_CRAFT` failed for real) - fixed at a real 2.0 with
+  margin, both confirmed via a real re-run. See DECISIONS.md.
+- [x] **New `LCU_VERIFY_WORKBENCH` hook**: grants wood, directly seeds
+  a real `game:crafting_table` block at the established spawn-look
+  target, right-clicks it open, picks up the wood, drops it anywhere in
+  the real 3x3 grid (proving the shapeless "1 wood -> 4 planks" recipe
+  works in the bigger grid too), takes the result, closes via Escape.
+- [x] 17 new unit tests (9 `UpdateItemEntities`/`PickupItemEntities`, 8
+  `CraftingTableScreenLayoutTest`/`HitTestCraftingTableScreen`/
+  `CraftingTableScreenConstants`).
+- [x] Verified via a real `LCU_VERIFY_WORKBENCH` run (both bgfx and
+  non-bgfx builds), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD` regression runs, a real two-process networked
+  `LCU_VERIFY_CRAFT` run, and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 523/523 (bgfx, up from 506) / 515/515 (non-bgfx, up from 498).
+
+Honestly scoped: what a dropped item or the workbench screen actually
+look like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+LIMITATION**; item entities have no horizontal scatter on spawn
+(vertical toss only); the workbench's own shift-click lands anywhere in
+the whole inventory rather than hotbar-first; a recipe needing >1 of
+the same ingredient in one cell still isn't correctly consumed by
+either result-click.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

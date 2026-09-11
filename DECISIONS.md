@@ -3404,3 +3404,88 @@ building a general per-recipe ingredient-count consumption system now
 rather than the simpler "decrement by 1" (rejected - no registered
 recipe needs it yet, and the limitation is small, real, and documented,
 not a silent correctness gap for anything reachable today).
+
+## 2026-09-11 — Item entities: reusing player physics, a real pickup-range bug found twice, and why the workbench screen isn't grid-only
+
+**Context:** Phase 50 replaced Phase 17's "break a block, item teleports
+straight into the inventory" shortcut with real physically-simulated
+item entities, and added a real crafting-table block with its own 3x3
+grid screen.
+
+**Item-entity gravity/ground-collision reuses `lcu::physics::
+apply_gravity`/`move_and_collide` directly, rather than a second,
+parallel physics implementation.** Both are the exact same real,
+already-tested primitives the player's own `integrate_player` builds
+on. A dropped item is given a tiny (0.25-block) `AABB` each frame
+(`components::item_entity_aabb`), gravity is applied to its own
+`vertical_velocity` via `apply_gravity` (same `PlayerPhysicsConfig`
+defaults - a dropped item falls exactly as fast as the player would,
+not a separately-tuned value), and `move_and_collide` resolves it
+against real terrain, same as any other AABB in this codebase. No
+horizontal velocity is modeled - Minecraft's own real dropped items get
+a small random horizontal scatter on spawn; this project's items only
+get a real small vertical toss. A real, documented simplification: the
+vertical-only physics is what actually blocks pickup range (see below),
+and nothing in this phase's own scope needed horizontal drift to work.
+
+**A real item-entity pickup-range bug was found and fixed *twice*
+during this phase's own headless verification - not reasoned about in
+advance, caught by an actual failing run each time.** The first,
+naive design checked an *exact* overlap between the player's own AABB
+and the item entity's tiny AABB. This almost never triggers in real
+play: the block a player breaks is typically one block *in front of*
+them (the raycast target), not at their own feet, so a dropped item
+with zero horizontal velocity settles roughly where the broken block
+was - which can genuinely be one or two blocks *below* the player's own
+standing height (mining straight down, exactly what `LCU_VERIFY_CRAFT`
+does: break the block you're on, then the one beneath it). Two real
+numbers, not guesses: with `player.aabb` inflated by 0.75 on every
+axis, a real, logged single-block-deep item (settled at y=0.12, player
+min.y=1.0) missed the inflated `pickup_aabb.min.y=0.25` by 0.005 -
+`LCU_VERIFY_BREAK_PLACE` failed for real (the broken item never reached
+the inventory before the hook's own place attempt). Raising the inflate
+to 1.0 fixed that case but still missed a real two-blocks-deep item
+(settled around y=-0.875, `LCU_VERIFY_CRAFT`'s second break) - an
+extended run confirmed it was never picked up at all, not merely slow.
+2.0 was chosen from those two real, measured failures with real margin
+(`min.y - 2.0` clears every position actually observed), not derived
+from a formula. Debugged by adding a temporary, env-var-gated per-frame
+position/velocity/delay log (`LCU_DEBUG_ITEM_ENTITIES`, removed once
+the real cause was found) rather than guessing from the code alone -
+the same "verify by actually running it" discipline this project has
+followed since Phase 1, applied to a bug-hunt, not just a feature.
+
+**The workbench screen reuses the regular inventory screen's full
+layout shape (3x3 grid + result on top, main storage + hotbar below),
+not just the 3x3 grid and result slot alone - a deliberate reading of
+an ambiguous brief.** The phase's own directive says the workbench
+screen should be "like the inventory UI, but only grid+result" - read
+literally, that could mean *only* a grid and a result slot, nothing
+else. Built that way, though, the screen would have no way to actually
+move an item into its own 3x3 grid: the cursor stack is real
+drag/drop state carried between screens, but a player can't pick
+anything up from a screen that shows no storage at all. A genuinely
+unusable GUI is exactly the kind of "technically matches the words,
+fails the real playtest" outcome this project's own discipline argues
+against (see brief section 96, and every "verified via a real run" note
+throughout this changelog). The chosen reading - "like the inventory
+UI" means *reuse that screen's shape*, and "only grid+result" describes
+what's *different* about it (a 3x3 grid instead of 2x2, not a second
+copy of the main inventory) - is the one that produces a real, usable
+screen, matches actual Minecraft's own crafting-table GUI, and is what
+`LCU_VERIFY_WORKBENCH` actually exercises end to end (pick up from the
+hotbar row this same screen shows, drop in the grid, take the result).
+
+**Alternatives considered:** a grid-and-result-only workbench screen
+with some other means of feeding it items (e.g. only allowing pre-held
+cursor stacks from the moment it opens) - rejected as needing its own
+special-cased, harder-to-explain rule for no real benefit over just
+reusing the existing full screen shape; tuning the pickup-range inflate
+per-axis (a smaller horizontal value, a larger vertical one) instead of
+one uniform 2.0 - rejected as more real tuning surface than this
+phase's two actual failure cases justified, and a uniform value is
+simpler to reason about and explain; a general horizontal-scatter
+velocity on item spawn to more closely match real Minecraft - rejected
+as unnecessary complexity this phase's own scope didn't need (the
+pickup-range fix above already makes stationary-player pickup reliable
+without it).

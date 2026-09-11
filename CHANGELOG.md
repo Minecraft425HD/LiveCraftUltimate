@@ -2,7 +2,111 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50
+
+### Phase 50
+
+- **Real item entities**: breaking a block no longer teleports its item
+  straight into the inventory - it spawns a real, physically-simulated
+  `game::components::ItemEntity` + `Position` on the shared
+  `entity_registry` (the same ECS world AI entities already live in),
+  with a real small upward toss (`kItemEntitySpawnUpSpeed`). New
+  `game::systems::update_item_entities` applies real gravity + AABB/
+  voxel ground collision every frame by reusing `lcu::physics::
+  apply_gravity`/`move_and_collide` - the exact same primitives the
+  player's own controller already uses, not a reimplementation. Each
+  entity gets a real per-frame Y-axis spin (`spin_angle`, purely visual)
+  and despawns (real entity destruction) after 5 real minutes
+  (`kItemEntityDespawnSeconds`).
+- **Real pickup**: `game::systems::pickup_item_entities` adds an item
+  entity to the inventory the moment the player's own (inflated) AABB
+  overlaps it and its 0.5s `pickup_delay_seconds` has counted down - a
+  real Minecraft-shaped break -> pop up -> fall -> land -> pick up
+  pipeline. A stack that only partially fits keeps the entity alive with
+  its count reduced to the real leftover, matching `Inventory::add_item`
+  itself.
+- **New `Renderer::submit_world_billboard`**: a real depth-tested
+  camera-facing quad in the terrain view (unlike `submit_billboard`'s
+  own sky view, which has no depth test - correct for a sun/moon "at
+  infinity", wrong for a dropped item that needs to be genuinely
+  occluded by/occlude nearby geometry). Reuses the exact same sky
+  shader/vertex format - no new shader files needed. Item entities
+  render as a small quad spinning around world-Y (`spin_angle`), tinted
+  their own item's real `icon_color`.
+- **Real crafting table** (`game:crafting_table`, registered identically
+  on `VoxelClient`/`VoxelServer`, same as every other real block/item
+  pair here): right-clicking one opens a real workbench screen - a 3x3
+  crafting grid + result, plus the same main storage + hotbar rows the
+  regular inventory screen shows (a workbench GUI with no way to
+  actually move items into its own grid would be unusable - see
+  DECISIONS.md for the real reasoning behind reusing the full screen
+  shape). New pure `engine/ui::crafting_table_screen.{h,cpp}` (layout/
+  hit-testing, its own 3x3 grid independent of the regular inventory
+  screen's 2x2 one) + `crafting_table_screen_renderer.{h,cpp}` (drawing)
+  - built from inventory_screen.h's own shared building blocks rather
+  than modifying its already-tested 2x2 grid. Breaking a crafting table
+  drops itself (real 1:1 block->item mapping, same convention every
+  other placeable block already follows). Real click dispatch reuses
+  the exact same `inventory_left_click`/`right_click`/`shift_click`
+  pure-logic functions Phase 49's inventory screen already established
+  - no new drag/drop logic needed.
+- **Server parity extended**: `game:wood`/`game:crafting_table` items
+  registered on `VoxelServer` too (Phase 49 only added `game:wood` to
+  the client - a real, now-closed gap, since the server's own
+  `tracked_items`/BlockAction validation needs matching ids to stay
+  correct in networked mode), `tracked_items` grown from 4 to 6 entries.
+- 17 new unit tests (9 `UpdateItemEntities`/`PickupItemEntities`, 8
+  `CraftingTableScreenLayoutTest`/`HitTestCraftingTableScreen`/
+  `CraftingTableScreenConstants`).
+- **A real item-entity pickup-range bug was found and fixed twice
+  during this phase's own headless verification, not merely
+  anticipated.** An exact player-AABB-vs-item-AABB overlap almost never
+  triggers in practice: the block a player breaks is typically one
+  block *in front of* them, not at their own feet, and a dropped item
+  with no horizontal velocity settles wherever the broken block was -
+  which can be one or even two blocks *below* the player's own standing
+  height (e.g. mining straight down, exactly what `LCU_VERIFY_CRAFT`
+  does). A real 0.75 vertical inflate missed a real, measured
+  single-block-deep item by 0.005 (`LCU_VERIFY_BREAK_PLACE` regressed:
+  the broken item never reached the inventory in time to place); 1.0
+  still missed a real two-blocks-deep item (`LCU_VERIFY_CRAFT`
+  regressed: the second break's item was never picked up in an
+  extended run). Fixed by inflating the real player AABB by 2.0 blocks
+  on every axis before the pickup overlap check - both real failures
+  confirmed fixed via a real re-run, not assumed - see DECISIONS.md.
+- **New `Window::warp_mouse`** used two ways this phase: the real
+  workbench click dispatch itself, and a new `LCU_VERIFY_WORKBENCH`
+  headless hook (grants wood, directly seeds a real `game:
+  crafting_table` block at the same spawn-look target the other hooks
+  already establish, right-clicks it open, picks up the wood, drops it
+  anywhere in the real 3x3 grid - proving the same shapeless "1 wood ->
+  4 planks" recipe genuinely works in a bigger grid too, not just the
+  2x2 one `LCU_VERIFY_INVENTORY` already covers - takes the result,
+  closes via Escape).
+- Verified via a real `LCU_VERIFY_WORKBENCH` run (both bgfx and
+  non-bgfx builds - full pipeline confirmed: open -> pick up -> craft ->
+  take result -> close), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_
+  TORCH`/`LCU_VERIFY_CRAFT`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD` regression runs (all still pass with the real item-
+  entity pickup pipeline in place of direct-to-inventory), a real
+  two-process networked `LCU_VERIFY_CRAFT` run (both breaks spawn real
+  item entities, both get picked up, craft succeeds, matching server
+  log output), and a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/
+  `Sky`/`UI2D` shader programs all still `valid=true`, item entities
+  render via the new `submit_world_billboard` with zero new shader
+  files).
+- `ctest` 523/523 (bgfx, up from 506) / 515/515 (non-bgfx, up from 498).
+- Honestly scoped: what a dropped item or the workbench screen actually
+  look like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; item entities have no horizontal scatter velocity on
+  spawn (vertical toss only - a real, documented simplification, see
+  `ItemEntity`'s own doc comment); the workbench screen's shift-click
+  from its own 3x3 grid lands anywhere in the whole 36-slot inventory
+  rather than hotbar-first (same real, minor simplification the 2x2
+  inventory screen's own grid already has); a recipe needing more than
+  one of the same ingredient in a single grid cell still isn't
+  correctly consumed by either result-click (documented, no registered
+  recipe needs it yet).
 
 ### Phase 49
 
