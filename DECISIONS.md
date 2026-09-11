@@ -3712,3 +3712,54 @@ inset (a full texel instead of half) - rejected as unnecessarily
 wasteful of each tile's real usable area for no additional anti-bleed
 benefit over a half-texel inset, which already fully closes the real
 floating-point-rounding failure mode NEAREST filtering can hit.
+
+## 2026-09-11 — Phase 56: per-vertex texture flag over per-draw uniform, and no alpha blending on the sky-shader family
+
+**Context:** Phase 56 wires item icons (inventory, hotbar, hand) and
+dropped-item billboards through the Phase 53/54 texture atlas, reusing
+the two shader programs (`vs_ui2d.sc`/`fs_ui2d.sc` for UI,
+`vs_sky.sc`/`fs_sky.sc` for world billboards) that already existed for
+flat-colored quads.
+
+**`UiVertex2D` gained a per-vertex `use_texture` flag, not a per-draw
+uniform like `fs_chunk.sc`'s own `u_useTextures`.** A chunk mesh is
+homogeneous - either the whole draw call is textured or it isn't - so a
+per-draw uniform was correct there. A single UI batch is not
+homogeneous: one `flush_ui_quads` call legitimately mixes textured item
+icons with flat-colored slot borders, backdrops, and health/hunger
+bars, all queued into the same vertex/index buffer before one
+`bgfx::submit()`. A per-draw uniform would have forced either splitting
+every UI frame into multiple draw calls (real performance cost, no
+correctness benefit) or coloring every non-item quad through the atlas
+too (wrong). The per-vertex flag costs 4 bytes per vertex and lets
+`fs_ui2d.sc` mix() between the flat color and the sampled+alpha-
+multiplied atlas color per pixel, with no draw-call splitting. The same
+reasoning was applied to `submit_world_billboard`'s own extension to
+`vs_sky.sc`/`fs_sky.sc`.
+
+**`vs_sky.sc`/`fs_sky.sc` did not gain alpha blending in Phase 56, and
+still don't have it.** That shader family (skybox, wireframe boxes,
+solid boxes, and now textured world billboards) has never had
+`BGFX_STATE_BLEND_ALPHA` enabled, and adding it was out of this
+directive's own Phase 56 scope (56.5 asks only for texture UVs on
+`submit_world_billboard`, not a blend-state change). The real,
+observable consequence: a dropped torch - whose Phase 54 texture has
+real alpha-0 pixels around the flame/stem - renders those transparent
+pixels as solid black on its world billboard, not see-through. This is
+a genuine, accepted visual limitation, not a silently-swallowed bug -
+recorded here and in PROJECT_STATE.md's Known Limitations so a future
+phase that revisits dropped-item rendering (or wants real leaf
+transparency, which has the identical alpha-hole texture shape) knows
+exactly where the gap is and why it's still open.
+
+**Alternatives considered:** a per-draw `u_useTextures`-style uniform
+for the UI/billboard shaders too, matching `fs_chunk.sc` exactly -
+rejected because it would have required splitting every mixed textured/
+flat-colored UI batch into multiple draw calls, a real cost for no
+correctness gain; enabling alpha blending on the sky-shader family as
+part of Phase 56 to make the torch's dropped-item billboard render
+correctly - rejected as scope growth beyond what 56.5 actually asks
+for, and deferred as a named, honest limitation instead of silently
+special-cased per-item hackery (e.g. hiding the torch's alpha-holed
+pixels by editing its dropped-item color) that would have masked the
+real gap rather than documenting it.

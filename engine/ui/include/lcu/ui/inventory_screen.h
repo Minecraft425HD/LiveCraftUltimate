@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include "lcu/core/types.h"
 #include "lcu/math/vec4.h"
@@ -76,13 +77,15 @@ struct InventoryScreenHit {
 
 InventoryScreenHit hit_test_inventory_screen(const InventoryScreenLayout& layout, f32 mouse_x, f32 mouse_y);
 
-// One slot's real display data for the renderer - same flat-color-icon +
-// count convention hud.h's own HotbarItem already established (see
-// ItemDefinition::icon_color's doc comment), reused here rather than
-// inventing a second representation.
+// One slot's real display data for the renderer - same icon_color/
+// texture_uv + count convention hud.h's own HotbarItem already
+// established (see its own doc comment), reused here (and by
+// crafting_table_screen.h) rather than inventing a second
+// representation.
 struct InventorySlotDisplay {
     bool has_item = false;
     math::Vec4 icon_color{1.0f, 1.0f, 1.0f, 1.0f};
+    std::optional<math::Vec4> texture_uv;
     u32 count = 0;
 };
 

@@ -2,7 +2,59 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56
+
+### Phase 56
+
+- **Items now use the real texture atlas**: `ItemDefinition` gains
+  `texture_index` (`std::optional<u32>`, same layering reason as
+  `BlockDefinition`'s own texture fields) - block-as-items (stone,
+  grass, dirt, torch, wood, crafting table, compost, planks) reuse the
+  exact same atlas slot as their block. Apple/bread deliberately keep no
+  `texture_index` (no Phase 54 texture exists for either) and fall back
+  to `icon_color` everywhere, same as before.
+- **One real helper, one real call site pattern**: `client/main.cpp`
+  gained a single `resolve_item_display` lambda that every one of the
+  13 places that used to read `.icon_color` off the item registry now
+  routes through - it fills `icon_color` (always, unchanged) and
+  `texture_uv` (only when textures are on *and* the item has a real
+  `texture_index`), so inventory slots, hotbar, the crafting grid, and
+  the drag cursor all pick up real textures from one place, not 13
+  separate lookups.
+- **Real textured-quad rendering plumbed through the whole UI stack**:
+  `UiVertex2D` gains a per-vertex `use_texture` flag (not a per-draw
+  uniform - a single UI batch legitimately mixes textured item icons
+  with flat-color borders/backgrounds/health bars in the same draw
+  call); `Renderer::submit_textured_ui_quad` is the new real entry
+  point; `vs_ui2d.sc`/`fs_ui2d.sc` sample `s_atlas` and `mix()` against
+  the flat color per-vertex. `HotbarItem`/`InventorySlotDisplay` both
+  gain `std::optional<math::Vec4> texture_uv`; `hud_renderer.cpp`,
+  `inventory_screen_renderer.cpp`, and `crafting_table_screen_renderer.cpp`
+  all branch on it the same way.
+- **Hand icon and dropped items textured too**: the Phase 48 hand icon
+  now goes through `resolve_item_display` + `submit_textured_ui_quad`.
+  `submit_world_billboard` (Phase 50 dropped items) gains real
+  atlas-texture + UV-rect parameters, reusing the same `vs_sky.sc`/
+  `fs_sky.sc` program already shared by the skybox/wireframe/solid-box
+  billboard family - the other 3 callers of that program
+  (`submit_billboard`, `submit_wireframe_box`, `submit_solid_box`) get
+  their vertex structs mechanically extended with always-zero UV/flag
+  fields, keeping their own output byte-identical.
+- Verified via real headless runs (`atlas_texture_valid=true`/`false`
+  under both `LCU_USE_TEXTURES=1`/`0`, unchanged from Phase 55), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs (still
+  byte-identical gameplay-logic output), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build compiling every touched shader
+  (`vs_ui2d.sc`/`fs_ui2d.sc`/`vs_sky.sc`/`fs_sky.sc`) to spirv/glsl/essl.
+  `ctest` 563/563 (bgfx) / 555/555 (non-bgfx) - unchanged counts, since
+  Phase 56 is real-rendering wiring with fallback-chain coverage already
+  proven by Phase 55's tests, not new pure-logic surface.
+- Honestly scoped: what any of this actually looks like textured on a
+  real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  the `vs_sky.sc`/`fs_sky.sc` family never had alpha blending enabled
+  and still doesn't, so a dropped torch's transparent background pixels
+  render solid black on its billboard rather than see-through - a real,
+  accepted visual limitation, not a bug, documented in DECISIONS.md.
 
 ### Phase 55
 

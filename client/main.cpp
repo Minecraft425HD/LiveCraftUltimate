@@ -932,6 +932,7 @@ int main() {
     // block's tint where one exists (BlockDefinition::color above), the
     // same "flat color, no atlas" convention, not a coincidence.
     stone_item_def.icon_color = {0.5f, 0.5f, 0.5f, 1.0f};
+    stone_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Stone);
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
     // Phase 17's grass/dirt terrain content gets the same direct 1:1
@@ -945,6 +946,7 @@ int main() {
     grass_item_def.display_name = "Grass";
     grass_item_def.max_stack_size = 64;
     grass_item_def.icon_color = {0.3f, 0.7f, 0.2f, 1.0f};
+    grass_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::GrassTop);
     const lcu::items::ItemId grass_item_id = item_registry.register_item(grass_item_def);
 
     lcu::items::ItemDefinition dirt_item_def;
@@ -952,6 +954,7 @@ int main() {
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
     dirt_item_def.icon_color = {0.4f, 0.25f, 0.1f, 1.0f};
+    dirt_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
     lcu::items::ItemDefinition torch_item_def;
@@ -959,6 +962,7 @@ int main() {
     torch_item_def.display_name = "Torch";
     torch_item_def.max_stack_size = 64;
     torch_item_def.icon_color = {1.0f, 0.65f, 0.2f, 1.0f};
+    torch_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Torch);
     const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
     // game:wood's own item (Phase 49): Phase 41 registered the wood
@@ -973,6 +977,7 @@ int main() {
     wood_item_def.display_name = "Wood";
     wood_item_def.max_stack_size = 64;
     wood_item_def.icon_color = {wood_def.color.x, wood_def.color.y, wood_def.color.z, 1.0f};
+    wood_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::WoodSide);
     const lcu::items::ItemId wood_item_id = item_registry.register_item(wood_item_def);
 
     // game:crafting_table's own item (Phase 50.3) - breaking a crafting
@@ -982,6 +987,7 @@ int main() {
     crafting_table_item_def.namespaced_id = "game:crafting_table";
     crafting_table_item_def.display_name = "Crafting Table";
     crafting_table_item_def.max_stack_size = 64;
+    crafting_table_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::CraftingTableTop);
     crafting_table_item_def.icon_color = {crafting_table_def.color.x, crafting_table_def.color.y,
                                            crafting_table_def.color.z, 1.0f};
     const lcu::items::ItemId crafting_table_item_id = item_registry.register_item(crafting_table_item_def);
@@ -997,6 +1003,7 @@ int main() {
     compost_item_def.display_name = "Compost";
     compost_item_def.max_stack_size = 64;
     compost_item_def.icon_color = {0.25f, 0.15f, 0.05f, 1.0f};
+    compost_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Compost);
     const lcu::items::ItemId compost_item_id = item_registry.register_item(compost_item_def);
 
     // Phase 49's own suggested example recipe's crafted-only result:
@@ -1008,6 +1015,7 @@ int main() {
     planks_item_def.display_name = "Planks";
     planks_item_def.max_stack_size = 64;
     planks_item_def.icon_color = {0.65f, 0.48f, 0.28f, 1.0f};
+    planks_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Planks);
     const lcu::items::ItemId planks_item_id = item_registry.register_item(planks_item_def);
 
     // game:apple / game:bread (Phase 51.2) - real Minecraft hunger-
@@ -1021,6 +1029,11 @@ int main() {
     // thing that marks an item as edible - right-click with one selected
     // restores hunger and consumes it (see the place_pressed dispatch
     // below) instead of placing or being ignored.
+    // No texture_index for either (Phase 56) - Phase 54's own procedural
+    // texture list is scoped to blocks only, so neither apple nor bread
+    // has a real generated texture to point at; both stay real, honest
+    // flat icon_color quads, same as every item rendered before Phase
+    // 56 - see PROJECT_STATE.md Known Limitations.
     lcu::items::ItemDefinition apple_item_def;
     apple_item_def.namespaced_id = "game:apple";
     apple_item_def.display_name = "Apple";
@@ -1534,6 +1547,27 @@ int main() {
                                                               lcu::assets::kAtlasSize);
     }
     LCU_LOG_INFO("Texture atlas: use_textures={} atlas_texture_valid={}", use_textures, bgfx::isValid(atlas_texture));
+
+    // Real per-slot icon resolution (Phase 56) - the one real place
+    // every hotbar/inventory/workbench slot-population call site below
+    // resolves an item's own real icon_color (always) and, when
+    // textures are on and the item has one, its real atlas UV rect too
+    // (lcu::assets::tile_uv_range), instead of repeating the same
+    // icon_color/texture_uv lookup at each of the real 13 call sites.
+    // texture_uv stays unset whenever textures are off or the item has
+    // no texture_index (apple/bread - see ItemDefinition registration
+    // above) - the real, honest "draw the flat icon_color instead"
+    // fallback every *_renderer.cpp already implements.
+    const auto resolve_item_display = [&](lcu::items::ItemId item_id, lcu::math::Vec4& icon_color,
+                                           std::optional<lcu::math::Vec4>& texture_uv) {
+        const lcu::items::ItemDefinition& def = item_registry.definition_of(item_id);
+        icon_color = def.icon_color;
+        texture_uv.reset();
+        if (use_textures && def.texture_index.has_value()) {
+            const lcu::assets::TileUvRange uv = lcu::assets::tile_uv_range(*def.texture_index);
+            texture_uv = lcu::math::Vec4{uv.u0, uv.v0, uv.u1, uv.v1};
+        }
+    };
 #endif
 
     // --- Player: spawns resting on dry land at spawn_column (Phase 37 - see
@@ -3920,10 +3954,11 @@ int main() {
             }
         }
 
-        // Real item-entity rendering (Phase 50.1) - a small colored
-        // camera-facing quad per real dropped item (its own item's
-        // icon_color, same flat-color convention every other real icon
-        // in this project already follows), via the new depth-tested
+        // Real item-entity rendering (Phase 50.1, real atlas texture
+        // since Phase 56) - a small camera-facing quad per real dropped
+        // item, its own item's real atlas texture when it has one
+        // (else the same flat icon_color quad every dropped item
+        // rendered before Phase 56), via the depth-tested
         // submit_world_billboard (not submit_billboard's own sky view -
         // an item entity needs to be genuinely occluded by/occlude
         // terrain, not always render on top the way the sun/moon do -
@@ -3944,10 +3979,20 @@ int main() {
             const lcu::f32 sin_a = std::sin(item_entity.spin_angle);
             const lcu::math::Vec3 billboard_right{cos_a, 0.0f, sin_a};
             constexpr lcu::math::Vec3 kWorldUp{0.0f, 1.0f, 0.0f};
-            const lcu::math::Vec4 icon_color =
-                item_registry.definition_of(item_entity.stack.item).icon_color;
-            renderer.submit_world_billboard(pos, billboard_right, kWorldUp, game::components::kItemEntityHalfExtent,
-                                             {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj);
+            lcu::math::Vec4 icon_color{};
+            std::optional<lcu::math::Vec4> item_texture_uv;
+            resolve_item_display(item_entity.stack.item, icon_color, item_texture_uv);
+            if (item_texture_uv.has_value()) {
+                const lcu::math::Vec4& uv = *item_texture_uv;
+                renderer.submit_world_billboard(pos, billboard_right, kWorldUp,
+                                                 game::components::kItemEntityHalfExtent,
+                                                 {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj,
+                                                 atlas_texture, uv.x, uv.y, uv.z, uv.w);
+            } else {
+                renderer.submit_world_billboard(pos, billboard_right, kWorldUp,
+                                                 game::components::kItemEntityHalfExtent,
+                                                 {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj);
+            }
             if (bgfx::isValid(sky_program)) {
                 ++draw_calls;
             }
@@ -4014,8 +4059,16 @@ int main() {
                     static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
                 const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
                 const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
-                const lcu::math::Vec4 hand_color = item_registry.definition_of(held_stack.item).icon_color;
-                renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+                lcu::math::Vec4 hand_color{};
+                std::optional<lcu::math::Vec4> hand_texture_uv;
+                resolve_item_display(held_stack.item, hand_color, hand_texture_uv);
+                if (hand_texture_uv.has_value()) {
+                    const lcu::math::Vec4& uv = *hand_texture_uv;
+                    renderer.submit_textured_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color, uv.x,
+                                                       uv.y, uv.z, uv.w);
+                } else {
+                    renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+                }
             }
         }
 
@@ -4052,7 +4105,7 @@ int main() {
             const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
             hud_state.hotbar[i].has_item = !stack.is_empty();
             if (!stack.is_empty()) {
-                hud_state.hotbar[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                resolve_item_display(stack.item, hud_state.hotbar[i].icon_color, hud_state.hotbar[i].texture_uv);
                 hud_state.hotbar[i].count = stack.count;
             }
         }
@@ -4081,21 +4134,24 @@ int main() {
                 const lcu::items::ItemStack& stack = craft_grid_inventory.slot_at(i);
                 inventory_state.craft_input[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.craft_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.craft_input[i].icon_color,
+                                          inventory_state.craft_input[i].texture_uv);
                     inventory_state.craft_input[i].count = stack.count;
                 }
             }
             const lcu::items::ItemStack& result_stack = craft_grid_inventory.slot_at(kCraftGridResultSlotIndex);
             inventory_state.craft_result.has_item = !result_stack.is_empty();
             if (!result_stack.is_empty()) {
-                inventory_state.craft_result.icon_color = item_registry.definition_of(result_stack.item).icon_color;
+                resolve_item_display(result_stack.item, inventory_state.craft_result.icon_color,
+                                      inventory_state.craft_result.texture_uv);
                 inventory_state.craft_result.count = result_stack.count;
             }
             for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
                 inventory_state.main_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.main_slots[i].icon_color,
+                                          inventory_state.main_slots[i].texture_uv);
                     inventory_state.main_slots[i].count = stack.count;
                 }
             }
@@ -4103,13 +4159,15 @@ int main() {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
                 inventory_state.hotbar_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.hotbar_slots[i].icon_color,
+                                          inventory_state.hotbar_slots[i].texture_uv);
                     inventory_state.hotbar_slots[i].count = stack.count;
                 }
             }
             if (!cursor_stack.is_empty()) {
                 inventory_state.cursor.has_item = true;
-                inventory_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                resolve_item_display(cursor_stack.item, inventory_state.cursor.icon_color,
+                                      inventory_state.cursor.texture_uv);
                 inventory_state.cursor.count = cursor_stack.count;
                 const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
                 inventory_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
@@ -4131,7 +4189,8 @@ int main() {
                 const lcu::items::ItemStack& stack = workbench_grid_inventory.slot_at(i);
                 workbench_state.grid_input[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.grid_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.grid_input[i].icon_color,
+                                          workbench_state.grid_input[i].texture_uv);
                     workbench_state.grid_input[i].count = stack.count;
                 }
             }
@@ -4139,14 +4198,16 @@ int main() {
                 workbench_grid_inventory.slot_at(kWorkbenchGridResultSlotIndex);
             workbench_state.result.has_item = !wb_result_stack.is_empty();
             if (!wb_result_stack.is_empty()) {
-                workbench_state.result.icon_color = item_registry.definition_of(wb_result_stack.item).icon_color;
+                resolve_item_display(wb_result_stack.item, workbench_state.result.icon_color,
+                                      workbench_state.result.texture_uv);
                 workbench_state.result.count = wb_result_stack.count;
             }
             for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
                 workbench_state.main_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.main_slots[i].icon_color,
+                                          workbench_state.main_slots[i].texture_uv);
                     workbench_state.main_slots[i].count = stack.count;
                 }
             }
@@ -4154,13 +4215,15 @@ int main() {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
                 workbench_state.hotbar_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.hotbar_slots[i].icon_color,
+                                          workbench_state.hotbar_slots[i].texture_uv);
                     workbench_state.hotbar_slots[i].count = stack.count;
                 }
             }
             if (!cursor_stack.is_empty()) {
                 workbench_state.cursor.has_item = true;
-                workbench_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                resolve_item_display(cursor_stack.item, workbench_state.cursor.icon_color,
+                                      workbench_state.cursor.texture_uv);
                 workbench_state.cursor.count = cursor_stack.count;
                 const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
                 workbench_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
@@ -4173,7 +4236,7 @@ int main() {
         }
 
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
-        renderer.flush_ui_quads(ui2d_program);
+        renderer.flush_ui_quads(ui2d_program, atlas_texture);
         if (ui_had_quads && bgfx::isValid(ui2d_program)) {
             ++draw_calls;
         }

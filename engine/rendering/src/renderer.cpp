@@ -226,14 +226,20 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
         return;
     }
 
-    // Position + color only - a dedicated minimal vertex format (see
-    // client/shaders/{vs_sky,fs_sky}.sc), deliberately not
-    // voxel::MeshVertex: the sky quad has no normal/UV/lighting concept,
-    // and reusing the chunk shader's format+lighting for it would be
-    // wrong (a light source rendering itself as "lit" makes no sense).
+    // Position + color, plus a real atlas UV/"use texture" pair (Phase
+    // 56) - always zero for this function (the sun/moon are never
+    // textured), but part of the one shared vertex format/layout every
+    // real vs_sky.sc/fs_sky.sc caller here uses (see fs_sky.sc and
+    // submit_world_billboard's own doc comment for the one real caller
+    // that DOES set these to something real). Deliberately not
+    // voxel::MeshVertex: this quad has no normal/lighting concept, and
+    // reusing the chunk shader's format+lighting for it would be wrong
+    // (a light source rendering itself as "lit" makes no sense).
     struct SkyVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 v0 = center - right * half_size - up * half_size;
@@ -241,10 +247,10 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
     const math::Vec3 v2 = center + right * half_size + up * half_size;
     const math::Vec3 v3 = center - right * half_size + up * half_size;
     const SkyVertex vertices[4] = {
-        {v0.x, v0.y, v0.z, color.x, color.y, color.z},
-        {v1.x, v1.y, v1.z, color.x, color.y, color.z},
-        {v2.x, v2.y, v2.z, color.x, color.y, color.z},
-        {v3.x, v3.y, v3.z, color.x, color.y, color.z},
+        {v0.x, v0.y, v0.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v1.x, v1.y, v1.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v2.x, v2.y, v2.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v3.x, v3.y, v3.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
     };
     // Built from the camera's own right/up (see the billboard's caller),
     // so this winding already faces the camera - no backface culling is
@@ -257,6 +263,8 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     // Transient buffers (Phase 27): this quad's position changes every
@@ -293,10 +301,13 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     }
 
     // Same minimal vertex format submit_billboard's SkyVertex already
-    // uses - position + flat color, no normal/UV/lighting concept.
+    // uses - position + flat color + a real, always-zero atlas UV/flag
+    // pair (Phase 56, see SkyVertex's own doc comment).
     struct LineVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 corners[8] = {
@@ -305,7 +316,7 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     };
     LineVertex vertices[8];
     for (u32 i = 0; i < 8; ++i) {
-        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f};
     }
     // 12 edges of a box, each as one line-list segment (2 indices) -
     // bottom face, top face, then the 4 verticals connecting them.
@@ -319,6 +330,8 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     // Transient buffers, same reasoning as submit_billboard: an
@@ -357,6 +370,8 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     struct BoxVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 corners[8] = {
@@ -365,7 +380,7 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     };
     BoxVertex vertices[8];
     for (u32 i = 0; i < 8; ++i) {
-        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f};
     }
     // 12 triangles, 2 per face, standard box winding (outward-facing,
     // though no backface culling is set below, matching
@@ -384,6 +399,8 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     if (bgfx::getAvailTransientVertexBuffer(8, layout) < 8 || bgfx::getAvailTransientIndexBuffer(36) < 36) {
@@ -410,7 +427,8 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
 
 void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
                                        f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
-                                       const math::Mat4& view, const math::Mat4& proj) {
+                                       const math::Mat4& view, const math::Mat4& proj,
+                                       bgfx::TextureHandle atlas_texture, f32 u0, f32 v0, f32 u1, f32 v1) {
     LCU_ASSERT(initialized_);
     if (!bgfx::isValid(program)) {
         return;
@@ -418,21 +436,29 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
 
     // Same minimal vertex format every other flat-color debug/world
     // primitive here already uses (see submit_billboard's own doc
-    // comment on why not voxel::MeshVertex).
+    // comment on why not voxel::MeshVertex) - the one real caller (this
+    // function) that ever sets the trailing UV/use_texture pair to
+    // something other than all-zero (Phase 56 - see this function's own
+    // doc comment in renderer.h).
     struct BillboardVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
-    const math::Vec3 v0 = center - right * half_size - up * half_size;
-    const math::Vec3 v1 = center + right * half_size - up * half_size;
-    const math::Vec3 v2 = center + right * half_size + up * half_size;
-    const math::Vec3 v3 = center - right * half_size + up * half_size;
+    const bool use_texture = bgfx::isValid(atlas_texture);
+    const f32 use_texture_value = use_texture ? 1.0f : 0.0f;
+
+    const math::Vec3 v0_pos = center - right * half_size - up * half_size;
+    const math::Vec3 v1_pos = center + right * half_size - up * half_size;
+    const math::Vec3 v2_pos = center + right * half_size + up * half_size;
+    const math::Vec3 v3_pos = center - right * half_size + up * half_size;
     const BillboardVertex vertices[4] = {
-        {v0.x, v0.y, v0.z, color.x, color.y, color.z},
-        {v1.x, v1.y, v1.z, color.x, color.y, color.z},
-        {v2.x, v2.y, v2.z, color.x, color.y, color.z},
-        {v3.x, v3.y, v3.z, color.x, color.y, color.z},
+        {v0_pos.x, v0_pos.y, v0_pos.z, color.x, color.y, color.z, u0, v0, use_texture_value},
+        {v1_pos.x, v1_pos.y, v1_pos.z, color.x, color.y, color.z, u1, v0, use_texture_value},
+        {v2_pos.x, v2_pos.y, v2_pos.z, color.x, color.y, color.z, u1, v1, use_texture_value},
+        {v3_pos.x, v3_pos.y, v3_pos.z, color.x, color.y, color.z, u0, v1, use_texture_value},
     };
     const u16 indices[6] = {0, 1, 2, 0, 2, 3};
 
@@ -440,6 +466,8 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     if (bgfx::getAvailTransientVertexBuffer(4, layout) < 4 || bgfx::getAvailTransientIndexBuffer(6) < 6) {
@@ -455,6 +483,9 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
     bgfx::setViewTransform(0, view.data(), proj.data());
     bgfx::setVertexBuffer(0, &tvb);
     bgfx::setIndexBuffer(&tib);
+    if (use_texture) {
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
     // Real depth test against terrain, no depth write - same reasoning
     // submit_wireframe_box/submit_solid_box's own comments give for a
     // per-frame, moving object; drawn into view 0 (terrain), not
@@ -470,10 +501,10 @@ void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::V
     const f32 right = x + width;
     const f32 top = y;
     const f32 bottom = y + height;
-    const UiVertex2D v0{left, top, 0.0f, 0.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v1{right, top, 1.0f, 0.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v2{right, bottom, 1.0f, 1.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v3{left, bottom, 0.0f, 1.0f, color.x, color.y, color.z, color.w};
+    const UiVertex2D v0{left, top, 0.0f, 0.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v1{right, top, 1.0f, 0.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v2{right, bottom, 1.0f, 1.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v3{left, bottom, 0.0f, 1.0f, color.x, color.y, color.z, color.w, 0.0f};
 
     const auto base = static_cast<u16>(ui_vertices_.size());
     ui_vertices_.push_back(v0);
@@ -485,7 +516,30 @@ void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::V
     ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
 }
 
-void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
+void Renderer::submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0,
+                                        f32 u1, f32 v1) {
+    LCU_ASSERT(initialized_);
+
+    const f32 left = x;
+    const f32 right = x + width;
+    const f32 top = y;
+    const f32 bottom = y + height;
+    const UiVertex2D tv0{left, top, u0, v0, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv1{right, top, u1, v0, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv2{right, bottom, u1, v1, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv3{left, bottom, u0, v1, color.x, color.y, color.z, color.w, 1.0f};
+
+    const auto base = static_cast<u16>(ui_vertices_.size());
+    ui_vertices_.push_back(tv0);
+    ui_vertices_.push_back(tv1);
+    ui_vertices_.push_back(tv2);
+    ui_vertices_.push_back(tv3);
+    const u16 quad_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                  base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+    ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
+}
+
+void Renderer::flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture) {
     LCU_ASSERT(initialized_);
 
     if (bgfx::isValid(program) && !ui_vertices_.empty()) {
@@ -494,6 +548,7 @@ void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
             .add(bgfx::Attrib::Position, 2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::Color0, 4, bgfx::AttribType::Float)
+            .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
             .end();
 
         const auto vertex_count = static_cast<u32>(ui_vertices_.size());
@@ -515,6 +570,15 @@ void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
             bgfx::setViewTransform(kUi2dViewId, math::Mat4::identity().data(), proj.data());
             bgfx::setVertexBuffer(0, &tvb);
             bgfx::setIndexBuffer(&tib);
+            // Real atlas binding (Phase 56) - only when actually handed
+            // one; every queued quad's own per-vertex use_texture flag
+            // (set by submit_ui_quad vs. submit_textured_ui_quad) is
+            // what actually decides whether fs_ui2d.sc samples it, same
+            // "invalid handle, never sampled" contract every other real
+            // atlas_texture parameter in this class establishes.
+            if (bgfx::isValid(atlas_texture)) {
+                bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+            }
             // No depth test/write (2D overlay, always on top - see
             // kUi2dViewId's own comment), real alpha blending (a menu
             // background or a semi-transparent slot highlight is real,

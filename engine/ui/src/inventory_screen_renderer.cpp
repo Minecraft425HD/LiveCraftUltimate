@@ -28,7 +28,13 @@ void queue_slot(rendering::Renderer& renderer, const InventorySlotRect& rect, co
     if (display.has_item) {
         const f32 icon_size = rect.size * (1.0f - kIconInsetRatio);
         const f32 inset = (rect.size - icon_size) * 0.5f;
-        renderer.submit_ui_quad(rect.x + inset, rect.y + inset, icon_size, icon_size, display.icon_color);
+        if (display.texture_uv.has_value()) {
+            const math::Vec4& uv = *display.texture_uv;
+            renderer.submit_textured_ui_quad(rect.x + inset, rect.y + inset, icon_size, icon_size, display.icon_color,
+                                              uv.x, uv.y, uv.z, uv.w);
+        } else {
+            renderer.submit_ui_quad(rect.x + inset, rect.y + inset, icon_size, icon_size, display.icon_color);
+        }
     }
 }
 
@@ -66,8 +72,15 @@ void queue_inventory_screen_quads(rendering::Renderer& renderer, const Inventory
         // mouse pointer itself, not a fourth "slot", so only the icon
         // quad is drawn, centered on the real mouse position.
         constexpr f32 kCursorIconSize = kInventorySlotSize * (1.0f - kIconInsetRatio);
-        renderer.submit_ui_quad(state.cursor_x - kCursorIconSize * 0.5f, state.cursor_y - kCursorIconSize * 0.5f,
-                                 kCursorIconSize, kCursorIconSize, state.cursor.icon_color);
+        if (state.cursor.texture_uv.has_value()) {
+            const math::Vec4& uv = *state.cursor.texture_uv;
+            renderer.submit_textured_ui_quad(state.cursor_x - kCursorIconSize * 0.5f,
+                                              state.cursor_y - kCursorIconSize * 0.5f, kCursorIconSize,
+                                              kCursorIconSize, state.cursor.icon_color, uv.x, uv.y, uv.z, uv.w);
+        } else {
+            renderer.submit_ui_quad(state.cursor_x - kCursorIconSize * 0.5f, state.cursor_y - kCursorIconSize * 0.5f,
+                                     kCursorIconSize, kCursorIconSize, state.cursor.icon_color);
+        }
     }
 }
 

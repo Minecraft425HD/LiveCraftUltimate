@@ -2327,6 +2327,45 @@ GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
 crafting-table sides reuse the plain planks tile; torch/cactus show
 one texture on every face (no per-face variant exists for either).
 
+## Phase 56 — Items use texture atlas
+
+- [x] `ItemDefinition` gains `texture_index` (`std::optional<u32>`);
+  block-as-items reuse their block's own atlas slot; apple/bread keep
+  none (no Phase 54 texture exists for either).
+- [x] One `resolve_item_display` lambda in `client/main.cpp` replaces
+  all 13 previous `.icon_color` lookup call sites, filling `icon_color`
+  (always) and `texture_uv` (only when textures are on and a real
+  `texture_index` exists).
+- [x] `UiVertex2D` gains a per-vertex `use_texture` flag (not a
+  per-draw uniform - a single UI batch mixes textured icons with
+  flat-color borders/bars); new `Renderer::submit_textured_ui_quad`;
+  `vs_ui2d.sc`/`fs_ui2d.sc` sample `s_atlas` and mix per-vertex.
+- [x] `HotbarItem`/`InventorySlotDisplay` gain `texture_uv`;
+  `hud_renderer.cpp`/`inventory_screen_renderer.cpp`/
+  `crafting_table_screen_renderer.cpp` all branch on it identically.
+- [x] Hand icon (Phase 48) textured via the same helper +
+  `submit_textured_ui_quad`.
+- [x] Dropped items (Phase 50's `submit_world_billboard`) textured -
+  reuses `vs_sky.sc`/`fs_sky.sc`, mechanically extending the other 3
+  callers of that program with always-zero UV/flag fields so their own
+  output stays byte-identical.
+- [x] Verified via real headless runs (`atlas_texture_valid` unchanged
+  from Phase 55 under both `LCU_USE_TEXTURES` settings), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs
+  (byte-identical), and a real `LCU_BUILD_SHADER_TOOLS=ON` build
+  (`vs_ui2d.sc`/`fs_ui2d.sc`/`vs_sky.sc`/`fs_sky.sc` all compile
+  cleanly to spirv/glsl/essl).
+
+`ctest` 563/563 (bgfx) / 555/555 (non-bgfx) - unchanged counts, since
+this phase is real-rendering wiring on top of Phase 55's own
+already-tested fallback-chain logic, not new pure-logic surface.
+
+Honestly scoped: what any of this looks like textured on a real
+GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+sky-shader family still has no alpha blending, so a dropped torch's
+transparent texture pixels render solid black on its billboard rather
+than see-through (a real, accepted limitation, see DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

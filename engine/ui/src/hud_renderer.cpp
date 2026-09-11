@@ -37,8 +37,14 @@ void queue_hud_quads(rendering::Renderer& renderer, const HudState& state, u32 s
         const HotbarItem& item = state.hotbar[i];
         if (item.has_item) {
             const f32 icon_inset = (slot.size - kHotbarIconSize) * 0.5f;
-            renderer.submit_ui_quad(slot.x + icon_inset, slot.y + icon_inset, kHotbarIconSize, kHotbarIconSize,
-                                     item.icon_color);
+            if (item.texture_uv.has_value()) {
+                const math::Vec4& uv = *item.texture_uv;
+                renderer.submit_textured_ui_quad(slot.x + icon_inset, slot.y + icon_inset, kHotbarIconSize,
+                                                  kHotbarIconSize, item.icon_color, uv.x, uv.y, uv.z, uv.w);
+            } else {
+                renderer.submit_ui_quad(slot.x + icon_inset, slot.y + icon_inset, kHotbarIconSize, kHotbarIconSize,
+                                         item.icon_color);
+            }
         }
     }
 

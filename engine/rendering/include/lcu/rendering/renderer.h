@@ -39,6 +39,15 @@ struct UiVertex2D {
     f32 g = 0.0f;
     f32 b = 0.0f;
     f32 a = 0.0f;
+    // Real per-vertex "sample the atlas at (u,v)" flag (Phase 56) - 0
+    // for a flat-color quad (submit_ui_quad, unchanged since Phase 44:
+    // borders, backgrounds, health/hunger bars), 1 for a real item-icon
+    // quad (submit_textured_ui_quad) whose (u,v) above is a real atlas
+    // sample rect, not a per-quad-local 0..1 UV. Lets both kinds of
+    // quad share the same batch/single draw call fs_ui2d.sc's own
+    // u_useTextures-style mix already established for chunk rendering
+    // (Phase 53) - see fs_ui2d.sc.
+    f32 use_texture = 0.0f;
 };
 
 // Thin wrapper around bgfx's global init/frame/shutdown lifecycle. This is
@@ -157,9 +166,20 @@ class Renderer : public NonCopyable {
     // reasoning submit_wireframe_box/submit_solid_box's own comments
     // give for a per-frame, moving object. No-op if `program` is
     // invalid.
+    // `atlas_texture`/`u0`/`v0`/`u1`/`v1` (Phase 56, all defaulted):
+    // when `atlas_texture` is valid, samples the real atlas rect
+    // (`u0`,`v0`)-(`u1`,`v1`) instead of drawing flat `color` - `color`'s
+    // own alpha still multiplies the sample's alpha (a real dropped
+    // torch's transparent background composites correctly). Invalid
+    // `atlas_texture` (the default) draws exactly the flat-color quad
+    // every dropped item rendered before Phase 56 - the same real "no
+    // atlas bound, no texture sampled" contract every other real
+    // `atlas_texture` parameter in this class establishes.
     void submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
                                  f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
-                                 const math::Mat4& view, const math::Mat4& proj);
+                                 const math::Mat4& view, const math::Mat4& proj,
+                                 bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, f32 u0 = 0.0f,
+                                 f32 v0 = 0.0f, f32 u1 = 1.0f, f32 v1 = 1.0f);
 
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in
@@ -171,10 +191,25 @@ class Renderer : public NonCopyable {
     // upload the whole batch and issue exactly one real draw call for
     // however many quads were queued - the real "Quad-Batch...ein
     // Draw-Call" behavior the brief asks for, not one draw call per
-    // quad. UV runs 0..1 across each quad independently (for a future
-    // pattern/atlas use - see DECISIONS.md for why item-icon rendering
-    // itself is deferred past this phase).
+    // quad. UV runs 0..1 across each quad independently, unused by
+    // fs_ui2d.sc unless a texture is actually sampled (see
+    // submit_textured_ui_quad below - this call always draws flat
+    // `color`, no atlas involved, the same real behavior every quad had
+    // before Phase 56).
     void submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color);
+
+    // Real atlas-textured UI quad (Phase 56) - same real batch/one-
+    // draw-call contract as submit_ui_quad above, but samples
+    // `s_atlas` at the real rect (`u0`,`v0`)-(`u1`,`v1`) (from
+    // lcu::assets::tile_uv_range) instead of drawing flat `color` -
+    // `color`'s own alpha still multiplies the sampled texture's alpha
+    // (so a torch icon's real transparent background composites
+    // correctly), its RGB is otherwise unused once textured. Whichever
+    // atlas texture flush_ui_quads() below is actually handed this
+    // frame is what gets sampled - this call only queues the quad/UV
+    // data, same "nothing drawn yet" contract as submit_ui_quad.
+    void submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0, f32 u1,
+                                  f32 v1);
 
     // How many quads are currently queued (real, testable state - not
     // just an implementation detail): 0 right after flush_ui_quads() or
@@ -194,7 +229,14 @@ class Renderer : public NonCopyable {
     // already have, not something that should re-appear stale on a
     // later frame once a program becomes valid). Call once per frame,
     // after every submit_ui_quad() for that frame, before end_frame().
-    void flush_ui_quads(bgfx::ProgramHandle program);
+    // `atlas_texture` (Phase 56) - same real "invalid handle means no
+    // atlas bound, every textured quad's own u_useTextures mix just
+    // reads garbage no submit_textured_ui_quad call this frame should
+    // have produced" contract Renderer::submit_chunk_mesh's own
+    // `atlas_texture` parameter already establishes; pass the same
+    // texture handle here as there, or an invalid one if `LCU_USE_
+    // TEXTURES` is off (see client/main.cpp).
+    void flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE);
 
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.

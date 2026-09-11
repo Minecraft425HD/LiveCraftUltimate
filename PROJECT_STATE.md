@@ -48,11 +48,14 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 fall damage, respawn)**, **Phase 52 (documentation)**, **Phase 53
 (texture-atlas pipeline - infrastructure only, no real textures yet)**,
 **Phase 54 (17 real procedurally-generated MC-style textures,
-still not wired to any block/item at that point - see Phase 56)**, and
-**Phase 55 (blocks now reference real Phase-54 textures per-face)**
-are done; a fourth user-directed program (Phases 53-57: texture atlas, procedural
-MC-style textures, blocks/items on the atlas, a bitmap font + real text
-renderer) is now in progress - see
+not yet wired to any block/item at that point)**,
+**Phase 55 (blocks now reference real Phase-54 textures per-face)**,
+and **Phase 56 (items - inventory, hotbar, hand, dropped items - now
+reference the same atlas, reusing a block's own texture where an item
+represents a block)** are done; a fourth user-directed program (Phases
+53-57: texture atlas, procedural MC-style textures, blocks/items on the
+atlas, a bitmap font + real text renderer) is now in progress, with only
+Phase 57 (bitmap font atlas + real text renderer) left - see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2353,20 +2356,24 @@ None currently tracked.
   layers exist structurally but are always empty (no transparent block
   registered anywhere, and transparent-vs-transparent face rules are
   deliberately unimplemented until one exists — see DECISIONS.md).
-- No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
+- ~~No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
   populated (quad-local, in block units) but nothing downstream
-  consumes or checks them yet, since there's no atlas (Phase 12).
+  consumes or checks them yet, since there's no atlas (Phase 12).~~
+  **Fixed** (Phases 53-56): a real 256x256 procedural-texture atlas
+  exists, `MeshVertex` gained `texture_index`, and every real block/item
+  in the game now renders through it - see CHANGELOG.md/BUILD_STATUS.md.
 - Shader compilation (`LCU_BUILD_SHADER_TOOLS`) is opt-in and OFF by
   default — most builds/CI runs won't have a real draw call unless this
   is explicitly turned on, since it adds real build time (shaderc +
   glslang/SPIRV-Tools/SPIRV-Cross/Dawn-Tint).
-- ~~Chunk shaders have no texturing — flat lit color only~~ **Partially
-  fixed** (Phase 26): real per-block/per-face color plus a subtle
-  procedural noise pattern now varies the surface, but it's still not
-  texturing - no texture atlas exists (Phase 12), `MeshVertex.u`/`.v`
-  are populated but unused downstream, and there's no per-block visual
-  detail beyond a flat tint + generic noise (no grain/bump/pattern
-  distinguishing e.g. stone from a hypothetical different gray block).
+- ~~Chunk shaders have no texturing — flat lit color only~~ **Fixed**
+  (Phases 26, then 53-55): Phase 26 added per-block/per-face color plus
+  procedural noise; Phases 53-55 added real atlas texturing on top - the
+  chunk shader now samples `s_atlas` per face using each block's own
+  top/side/bottom texture, mixed with the existing light factor.
+  `LCU_USE_TEXTURES=0` still keeps the Phase 26 color-only path working
+  as a real fallback (not just theoretically - both paths are exercised
+  by real headless runs every phase since 53).
 - No visual verification of any rendering exists or can exist in this
   sandbox — every claim above about the draw call is about the API
   calls succeeding (valid handles, no crash, bgfx accepts the shader
@@ -2414,9 +2421,11 @@ None currently tracked.
   would currently be dragging/tapping blind.
 - `QualityProfile` only controls chunk-load radius/vertical range so
   far — no render-distance-vs-loaded-distance split (both are the same
-  number today), no texture/shadow/particle quality tiers, since none
-  of those systems have more than one quality level to choose between
-  yet (no texture atlas, no shadows, no particles).
+  number today), no texture/shadow/particle quality tiers; a real
+  texture atlas exists now (Phase 53) but it's a single fixed
+  256x256 resolution with no lower-quality tier to switch to, and
+  there's still no shadow/particle system of any kind to have a
+  quality tier for.
 - Android/iOS: only `CMakePresets.json` entries exist and were
   re-verified structurally reachable (`android-arm64` fails only at
   NDK detection, as expected without one installed). No Gradle project,
@@ -2451,24 +2460,47 @@ None currently tracked.
   exist anywhere (`break_sound`/`place_sound` in `VoxelClient`), both
   procedurally generated sine tones — no real sound-effect content
   pipeline (loading/authoring actual game audio) exists yet.
-- `engine/ui::draw_debug_overlay` uses bgfx's built-in VGA-style
-  debug-text character buffer, not a real font/texture-atlas text
-  renderer — no texture atlas exists yet (brief section 12's content
-  pipeline is separate, larger work with no player-facing text to
-  justify it before this). Text is monospace ASCII only, fixed 8x16 (or
-  8x8) character cells, no styling beyond the VGA 16-color palette.
+- `engine/ui::draw_debug_overlay` (and every other debug-text call site
+  - HUD item counts, menu labels, inventory/workbench slot counts)
+  still uses bgfx's built-in VGA-style debug-text character buffer, not
+  a real font/texture-atlas text renderer. ~~No texture atlas exists
+  yet~~ **No longer true** (Phase 53): a real 256x256 procedural-texture
+  atlas exists and blocks/items both render through it (Phases 54-56).
+  A real bitmap-font atlas + `engine::ui::TextRenderer` is Phase 57's
+  own job, still pending at the time of writing. Text is monospace
+  ASCII only, fixed 8x16 (or 8x8) character cells, no styling beyond the
+  VGA 16-color palette, until Phase 57 lands.
 - The on-screen touch-control legend has no interactive elements of its
   own (no buttons a mouse/gamepad can click) — it draws where
   `TouchInputBackend`'s real touch-button rects are, for a player to
   see, but a desktop/gamepad player can't interact with it as a menu;
   `engine/ui` is presentation-only so far, not an input-routing/focus
   system for non-touch input devices.
-- No content pipeline exists for models/textures/sounds beyond what's
-  procedurally generated in code (worldgen's terrain, the greedy
-  mesher's geometry, `generate_sine_wave`'s tones) — "content" in brief
-  section 96's Phase 12 sense (imported/authored game assets) is still
-  entirely absent; every visual/audio element in this project today is
-  generated, not loaded.
+- No content pipeline exists for *imported/authored* models/textures/
+  sounds — "content" in brief section 96's Phase 12 sense (real files
+  authored outside this codebase and loaded at runtime) is still
+  entirely absent; every visual/audio element in this project remains
+  generated in code, not loaded from an asset file. This is now a
+  deliberate, standing scope decision, not just an unaddressed gap: the
+  Phase 53-57 directive itself fixed procedurally-generated 16x16
+  MC-style textures (Phase 54, `engine/assets::procedural_textures`)
+  and a procedurally-generated bitmap font (Phase 57) as the *real*
+  content pipeline for this project, specifically to avoid real MC
+  texture/font assets and their licensing - see DECISIONS.md. Phase
+  53's optional stb_image-based PNG loader (for a debug atlas dump only,
+  never a real content-loading path) was itself deliberately not
+  implemented either - see that phase's own DECISIONS.md entry.
+- The `vs_sky.sc`/`fs_sky.sc` shader family (skybox, wireframe/solid
+  boxes, and world billboards - `submit_world_billboard`, used for
+  dropped item entities) has no alpha blending (Phase 56 added real
+  texture sampling to this family but deliberately did not add
+  blending, out of that phase's own scope). A dropped item whose
+  texture has transparent pixels (e.g. `game:torch`'s flame/stem
+  cutout) renders those pixels solid black on its world billboard
+  rather than see-through - a real, accepted visual gap, not a bug, see
+  DECISIONS.md. Real leaf transparency has the identical shape of gap
+  (`game:leaves`'s alpha-0 holes render solid in-chunk too, unaffected
+  by Phase 56 since chunk rendering is a separate shader).
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No
