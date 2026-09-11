@@ -23,6 +23,7 @@
 #include "game/systems/item_entity_system.h"
 #include "game/systems/player_vitals_system.h"
 #include "game/systems/replication_protocol.h"
+#include "lcu/assets/procedural_textures.h"
 #include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
@@ -1490,15 +1491,13 @@ int main() {
     const bool use_textures = use_textures_env == nullptr || std::string(use_textures_env) != "0";
     bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE;
     if (use_textures) {
-        // Real placeholder content (Phase 53 builds the pipeline only -
-        // see this phase's own directive; Phase 54 replaces this flat
-        // white 256x256 buffer with real procedurally-generated MC-style
-        // block textures). Proves the real GPU round-trip
-        // (create_texture_from_pixels -> a valid bgfx::TextureHandle)
-        // end to end this phase, not just declared/unused API surface.
-        std::vector<lcu::u8> placeholder_atlas_pixels(
-            static_cast<lcu::usize>(lcu::assets::kAtlasSize) * lcu::assets::kAtlasSize * 4, 255);
-        atlas_texture = renderer.create_texture_from_pixels(placeholder_atlas_pixels.data(), lcu::assets::kAtlasSize,
+        // Real procedurally-generated MC-style block textures (Phase
+        // 54) - replaces Phase 53's own flat-white placeholder buffer
+        // now that real content exists. Every real block still resolves
+        // to atlas tile 0 (`lcu::assets::TileId::GrassTop`) until Phase
+        // 55 gives BlockDefinition real per-face texture indices.
+        const std::vector<lcu::u8> block_atlas_pixels = lcu::assets::build_block_atlas_pixels();
+        atlas_texture = renderer.create_texture_from_pixels(block_atlas_pixels.data(), lcu::assets::kAtlasSize,
                                                               lcu::assets::kAtlasSize);
     }
     LCU_LOG_INFO("Texture atlas: use_textures={} atlas_texture_valid={}", use_textures, bgfx::isValid(atlas_texture));

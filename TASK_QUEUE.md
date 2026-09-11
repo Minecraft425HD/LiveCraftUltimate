@@ -2279,6 +2279,30 @@ Honestly scoped: no real block textures exist yet (flat white
 placeholder atlas - Phase 54); Phase 53.2's optional stb_image debug
 PNG dump deliberately not implemented (PARTIAL, see DECISIONS.md).
 
+## Phase 54 — Procedural MC-style textures
+
+- [x] New `engine/assets::procedural_textures.{h,cpp}`: 17 real,
+  deterministic 16x16 RGBA generators (grass top/side, dirt, stone,
+  sand, snow, water, wood side/top, leaves, coal/iron ore, torch,
+  crafting-table top, cactus, compost, planks) - each a pure hash
+  function of a fixed per-texture seed + pixel position, no RNG-engine
+  state.
+- [x] New `TileId` enum fixes each real atlas slot; `build_block_
+  atlas_pixels()` packs all 17 into one real 256x256 RGBA8 buffer.
+- [x] `client/main.cpp` now uploads the real generated atlas instead of
+  Phase 53's flat-white placeholder.
+- [x] 8 new unit tests, including a real proof the packing math lands
+  each tile at its own correct slot.
+- [x] Verified via a real headless run (`atlas_texture_valid=true` with
+  real content) and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 561/561 (bgfx, up from 553) / 553/553 (non-bgfx, up from 545).
+
+Honestly scoped: no block/item yet references any of these textures -
+every face/icon still renders tile 0 regardless of block type (Phase
+55/56); what any of this looks like on a real GPU/display is still
+**NOT VERIFIED — ENVIRONMENT LIMITATION**.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

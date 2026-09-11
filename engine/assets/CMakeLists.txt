@@ -8,6 +8,7 @@
 if(LCU_BUILD_CLIENT)
     add_library(LcuAssets STATIC
         src/texture_atlas.cpp
+        src/procedural_textures.cpp
     )
     add_library(Lcu::Assets ALIAS LcuAssets)
 

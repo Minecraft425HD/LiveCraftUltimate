@@ -2,7 +2,48 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54
+
+### Phase 54
+
+- **Real procedurally-generated MC-style textures**: new
+  `engine/assets::procedural_textures.{h,cpp}` - 17 real 16x16 RGBA
+  generators (`generate_grass_top`/`_side`, `generate_dirt`,
+  `generate_stone`, `generate_sand`, `generate_snow`, `generate_water`,
+  `generate_wood_side`/`_top`, `generate_leaves`, `generate_coal_ore`/
+  `iron_ore`, `generate_torch`, `generate_crafting_table_top`,
+  `generate_cactus`, `generate_compost`, `generate_planks`), each real
+  and deterministic (a pure hash function of a fixed per-texture seed +
+  pixel position - same call, same bytes, every time, no RNG-engine
+  state to carry around). New `TileId` enum fixes each texture's own
+  real atlas slot (0-16) - grass's real jagged green/dirt boundary
+  (a deterministic per-column row jitter, not a flat line), wood's real
+  concentric growth rings, ore's real 2x2 pixel-blob clusters over a
+  stone base, leaves' real alpha-0 holes, and torch's real transparent
+  background + stem + flame are all genuinely computed, not flat fills
+  with a label.
+- **New `build_block_atlas_pixels()`** packs all 17 real textures into
+  one real 256x256 RGBA8 buffer at their own fixed `TileId` slots -
+  `client/main.cpp` now uploads this (via Phase 53's own `Renderer::
+  create_texture_from_pixels`) instead of Phase 53's flat-white
+  placeholder whenever `LCU_USE_TEXTURES` is on.
+- 8 new unit tests (`ProceduralTextures.*`/`BuildBlockAtlasPixels.*`) -
+  including a real proof the atlas-packing math lands each tile at its
+  own correct slot (comparing a packed atlas pixel against that same
+  tile's own standalone generator output), not just "the buffer is the
+  right size".
+- Verified via a real headless run (`Texture atlas: use_textures=true
+  atlas_texture_valid=true` - the real generated atlas uploads
+  successfully under the real, headless Noop backend) and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (unchanged shaders from Phase 53,
+  still compile cleanly). `ctest` 561/561 (bgfx, up from 553) / 553/553
+  (non-bgfx, up from 545).
+- Honestly scoped: no `BlockDefinition`/`ItemDefinition` yet reference
+  any of these real textures - every face/icon still renders atlas tile
+  0 (`TileId::GrassTop`) regardless of block type until Phase 55/56
+  wire real per-face/per-item texture indices; what these textures
+  actually look like on a real GPU/display is still **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**.
 
 ### Phase 53
 
