@@ -33,8 +33,9 @@ cross-chunk propagation)**, **Phase 31 (block-light cross-chunk
 propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 **Phase 33 (VoxelClient integration + smooth lighting)**,
 **Phase 34 (torch block + lighting benchmarks)**, **Phase 35
-(chunk unload marks neighbors dirty)**, and **Phase 36 (entity boxes +
-extended debug overlay)** are done; see
+(chunk unload marks neighbors dirty)**, **Phase 36 (entity boxes +
+extended debug overlay)**, and **Phase 37 (sea level at y=0 + water
+block/rendering)** are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1225,6 +1226,47 @@ Honestly scoped: **what the wireframe boxes or overlay text actually
 look like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
 LIMITATION**; CPU/GPU/RAM/ping/bandwidth remain deliberately absent
 from the overlay until this codebase has a real source for them.
+
+**Phase 37 (sea level at y=0 + water block/rendering)**: `worldgen::
+kSeaLevel` (world Y=0, new exported constant) - `terrain_height()`
+recentered from an always-positive [8,56] range to [-20,20], centered
+on sea level, so roughly half of all columns now land above it (dry
+land/hills) and half below (real lake/ocean basins). `generate_
+terrain_chunk` gained a `water_block` param filling any below-sea-
+level column's gap up to Y=0. `game:water` is deliberately `is_
+transparent=false` (the exact torch precedent - no transparent-layer
+meshing exists yet, `true` would make it invisible) and `has_
+collision=false` (real - the same `has_collision`-driven `is_solid`
+predicate every block's collision already uses, so a player genuinely
+walks/swims through it; no buoyancy/drag beyond that). All four
+`QualityProfile` tiers' vertical range shifted to straddle sea level
+while keeping every tier's total chunk count unchanged (1/18/27/36),
+so every prior "Loaded N chunks" claim stays numerically true.
+
+A fixed (0,0) spawn column could now legitimately land underwater by
+pure chance (no swim mechanics exist) - `VoxelClient`/`VoxelServer`
+each gained an identical, deterministic `find_dry_spawn_column` (a
+square-ring search outward for the nearest column at or above sea
+level, same seed on both sides so they agree without sending a
+coordinate over the wire).
+
+6 worldgen unit tests updated/added, 1 quality-profile test updated.
+Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn column
+(-19,18) found for seed 1337, dry land), real `LCU_VERIFY_BREAK_
+PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical
+behavior at the new location), and a real two-process networked run
+where client and server independently compute the identical spawn
+column and the server-reconciled player position lands on dry land,
+zero warnings/errors. `ctest` 393/393 (bgfx, up from 392) / 390/390
+(non-bgfx, up from 389).
+
+Honestly scoped: **what water actually looks like on a real
+GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; water
+renders as a solid-looking blue block, no transparency; no waves/
+current/buoyancy/swimming physics; no beach/sand shoreline transition;
+sky light still stops entirely at water's surface (treated opaque like
+any other solid block, an honest consequence of the existing binary
+light model).
 
 ## Build Status
 

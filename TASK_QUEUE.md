@@ -1316,6 +1316,58 @@ from the overlay until this codebase has a real source for them
 (Phase 42's documentation pass, or a dedicated future phase, would be
 the place to revisit if ever prioritized).
 
+## Phase 37 — Sea level at y=0 + water block/rendering
+
+Real sea level, a real water block, and a real dry spawn - not just
+worldgen numbers moving, three genuinely coupled changes.
+
+- [x] **`worldgen::kSeaLevel`** (world Y=0, new exported constant):
+  `terrain_height()` recentered from an always-positive [8,56] range
+  to [-20,20], centered on sea level - roughly half of all columns
+  land above it (dry land/hills), half below (real lake/ocean basins).
+- [x] **`game:water`**: `generate_terrain_chunk` gained a `water_block`
+  param, filling any below-sea-level column's gap up to Y=0 (a dry
+  column is completely unaffected). `is_transparent=false` (the torch
+  precedent - no transparent-layer meshing exists, `true` would make
+  it invisible), `has_collision=false` (real - the same `has_
+  collision`-driven `is_solid` predicate every block's collision
+  already uses, so a player genuinely walks/swims through it; no
+  buoyancy/drag beyond that).
+- [x] **Quality profiles re-centered**: all four `ChunkLoadSettings`
+  tiers shifted `min_chunk_y`/`max_chunk_y` to straddle sea level
+  (Desktop: 1/0/3 -> 1/-1/2) while keeping every tier's *total* chunk
+  count unchanged (1/18/27/36) - every prior "Loaded N chunks" claim
+  stays numerically true.
+- [x] **Real dry spawn placement**: a fixed (0,0) spawn column could
+  now legitimately land underwater by pure chance (no swim mechanics
+  exist) - `VoxelClient`/`VoxelServer` each gained an identical,
+  deterministic `find_dry_spawn_column` (a square-ring search outward
+  for the nearest column at or above sea level). Same seed, same
+  search, both sides agree without sending a coordinate over the wire.
+- [x] 6 worldgen unit tests updated/added (incl. a new test spanning a
+  deep column's water range across a chunk boundary), 1 quality-
+  profile test updated (the old locked "must stay 1/0/3" assertion now
+  asserts 1/-1/2 with updated reasoning).
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn
+  column (-19,18) found for seed 1337, `"Player position: (-19.00,
+  1.90, 18.00)"` - dry land), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical behavior
+  at the new location), and a real two-process networked run where
+  client and server independently compute the identical spawn column
+  and the server-reconciled player position lands on dry land, zero
+  warnings/errors.
+
+`ctest` 393/393 (bgfx, up from 392) / 390/390 (non-bgfx, up from 389).
+
+Honestly scoped: **what water actually looks like on a real
+GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; water
+renders as a solid-looking blue block, no transparency (see
+DECISIONS.md); no waves/current/buoyancy/swimming physics; no beach/
+sand transition at the shoreline; sky light still stops entirely at
+water's surface (treated opaque like any other solid block - an
+honest consequence of the existing binary light model, not a new
+simplification invented for this phase).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

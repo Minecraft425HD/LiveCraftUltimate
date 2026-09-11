@@ -75,6 +75,38 @@ std::optional<lcu::u64> max_ticks_from_env() {
 
 constexpr lcu::u32 kWorldSeed = 1337;
 
+// Real spawn placement (Phase 37) - mirrors VoxelClient's own find_dry_
+// spawn_column exactly (see that file's comment): terrain_height() is
+// now centered on sea level, so a fixed world (0,0) spawn column can
+// legitimately land underwater by pure chance, and no swim mechanics
+// exist yet. Same seed, same deterministic search, so client and
+// server agree on where "spawn" is without needing to send it over
+// the wire.
+struct SpawnColumn {
+    lcu::i32 x = 0;
+    lcu::i32 z = 0;
+};
+
+SpawnColumn find_dry_spawn_column(lcu::u32 seed) {
+    if (lcu::world::worldgen::terrain_height(seed, 0, 0) >= lcu::world::worldgen::kSeaLevel) {
+        return {0, 0};
+    }
+    constexpr lcu::i32 kMaxRadius = 64;
+    for (lcu::i32 radius = 1; radius <= kMaxRadius; ++radius) {
+        for (lcu::i32 x = -radius; x <= radius; ++x) {
+            for (lcu::i32 z = -radius; z <= radius; ++z) {
+                if (std::max(std::abs(x), std::abs(z)) != radius) {
+                    continue;
+                }
+                if (lcu::world::worldgen::terrain_height(seed, x, z) >= lcu::world::worldgen::kSeaLevel) {
+                    return {x, z};
+                }
+            }
+        }
+    }
+    return {0, 0};
+}
+
 // Sized by LCU_QUALITY_PROFILE (Phase 10, see lcu::core::QualityProfile) -
 // defaults to Desktop, numerically identical to this vertical slice's
 // original hardcoded 1/0/3 radius/min/max values.
@@ -230,6 +262,22 @@ int main(int argc, char** argv) {
     torch_def.light_emission = 14;
     const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
 
+    // Mirrors VoxelClient's own registration exactly (Phase 37: sea
+    // level + water) - the server needs its own authoritative copy so
+    // a chunk it generates (and streams to clients) has water where
+    // it should, and so has_collision=false is honored server-side
+    // too if server-authoritative collision against water is ever
+    // added. is_transparent=false for the same "no transparent-layer
+    // meshing exists yet" reason VoxelClient's own comment gives - the
+    // server never renders anything, but BlockId alignment across both
+    // registrations matters more than this specific field for it.
+    lcu::voxel::BlockDefinition water_def;
+    water_def.namespaced_id = "game:water";
+    water_def.display_name = "Water";
+    water_def.is_transparent = false;
+    water_def.has_collision = false;
+    const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
+
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
     // register the same one item in the same order, so their ItemIds
@@ -290,7 +338,7 @@ int main(int argc, char** argv) {
 #endif
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id, water_id);
     });
 
     // Real chunk persistence trigger (Phase 20) - `engine/serialization::
@@ -313,18 +361,28 @@ int main(int argc, char** argv) {
     };
 
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
-    for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
-        for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
+    // Phase 37: centers on the real dry spawn column, not always chunk
+    // (0,0) - see find_dry_spawn_column's doc comment.
+    const SpawnColumn spawn_column = find_dry_spawn_column(kWorldSeed);
+    const lcu::voxel::ChunkCoord spawn_chunk =
+        lcu::voxel::world_to_chunk_and_local({spawn_column.x, 0, spawn_column.z}, lcu::voxel::Chunk::kEdgeLength)
+            .chunk;
+    for (lcu::i32 cx = spawn_chunk.x - load_settings.radius_xz; cx <= spawn_chunk.x + load_settings.radius_xz;
+         ++cx) {
+        for (lcu::i32 cz = spawn_chunk.z - load_settings.radius_xz; cz <= spawn_chunk.z + load_settings.radius_xz;
+             ++cz) {
             for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                 world.load_chunk({cx, cy, cz});
             }
         }
     }
-    LCU_LOG_INFO("Loaded {} chunks (seed={})", world.loaded_chunk_count(), kWorldSeed);
+    LCU_LOG_INFO("Loaded {} chunks (seed={}) around spawn column ({},{})", world.loaded_chunk_count(), kWorldSeed,
+                 spawn_column.x, spawn_column.z);
 
     const auto is_solid = [&](lcu::voxel::BlockId id) { return block_registry.definition_of(id).has_collision; };
     const lcu::physics::PlayerPhysicsConfig physics_config;
-    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
+    const lcu::i32 spawn_ground_y =
+        lcu::world::worldgen::terrain_height(kWorldSeed, spawn_column.x, spawn_column.z) + 1;
 
     // Per-movement chunk streaming (Phase 16, see DECISIONS.md): which
     // chunk column a world-space position falls in, for deciding when a
@@ -369,8 +427,9 @@ int main(int argc, char** argv) {
     std::mt19937 ai_rng(kAiRngSeed);
     for (int i = 0; i < kAiEntityCount; ++i) {
         const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
-        const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
-                                         4.0f * std::sin(angle)};
+        const lcu::math::Vec3 spawn_pos{static_cast<lcu::f32>(spawn_column.x) + 4.0f * std::cos(angle),
+                                         static_cast<lcu::f32>(spawn_ground_y),
+                                         static_cast<lcu::f32>(spawn_column.z) + 4.0f * std::sin(angle)};
         const lcu::ecs::EntityId entity = entity_registry.create_entity();
         entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
         entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
@@ -556,7 +615,9 @@ int main(int argc, char** argv) {
             ClientState& client = it->second;
             client.last_packet_time = std::chrono::steady_clock::now();
             if (inserted) {
-                client.player.aabb = make_spawn_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
+                client.player.aabb = make_spawn_aabb({static_cast<lcu::f32>(spawn_column.x),
+                                                        static_cast<lcu::f32>(spawn_ground_y),
+                                                        static_cast<lcu::f32>(spawn_column.z)});
                 // last_streamed_center/interest_set deliberately left
                 // unset here - see their own declarations above. The
                 // per-movement streaming loop below always treats a

@@ -69,8 +69,12 @@ f32 fractal_noise(u32 seed, f32 x, f32 z) {
     return total / amplitude_sum;
 }
 
-constexpr i32 kBaseHeight = 32;
-constexpr i32 kHeightVariation = 24;
+// Phase 37: recentered on kSeaLevel (0) instead of the old always-
+// positive kBaseHeight=32 - real dry land above, real lake/ocean
+// basins below, rather than a world that was always entirely land no
+// matter how "low" a column's noise sampled.
+constexpr i32 kBaseHeight = kSeaLevel;
+constexpr i32 kHeightVariation = 20;
 constexpr f32 kNoiseScale = 0.01f;
 
 // How many layers of `subsurface_block` sit directly beneath the
@@ -89,7 +93,8 @@ i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
 }
 
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, voxel::BlockId surface_block,
-                             voxel::BlockId subsurface_block, voxel::BlockId stone_block) {
+                             voxel::BlockId subsurface_block, voxel::BlockId stone_block,
+                             voxel::BlockId water_block) {
     constexpr u32 kEdge = voxel::Chunk::kEdgeLength;
 
     for (u32 lz = 0; lz < kEdge; ++lz) {
@@ -101,7 +106,17 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
             for (u32 ly = 0; ly < kEdge; ++ly) {
                 const i32 world_y = coord.y * static_cast<i32>(kEdge) + static_cast<i32>(ly);
                 if (world_y > height) {
-                    continue;  // air - the chunk's default fill, nothing to set.
+                    // Above the terrain: water fills the gap up to sea
+                    // level for a below-sea-level column (Phase 37);
+                    // above sea level (or a dry column, where height
+                    // is already >= kSeaLevel and this branch is never
+                    // reached at or below it) stays air - the chunk's
+                    // default fill, nothing to set, unchanged from
+                    // before this phase.
+                    if (world_y <= kSeaLevel) {
+                        chunk.set_block(lx, ly, lz, water_block);
+                    }
+                    continue;
                 }
                 voxel::BlockId block_id = stone_block;
                 if (world_y == height) {

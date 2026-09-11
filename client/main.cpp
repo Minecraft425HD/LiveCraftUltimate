@@ -85,16 +85,52 @@ std::optional<lcu::u64> max_frames_from_env() {
 // worldgen.h).
 constexpr lcu::u32 kWorldSeed = 1337;
 
+// Real spawn placement (Phase 37): terrain_height() is now centered on
+// sea level, so a fixed world (0,0) spawn column can legitimately land
+// underwater by pure chance - no swim mechanics exist yet (see
+// DECISIONS.md), so that would strand the player. A small deterministic
+// square-ring search outward from the origin for the nearest column at
+// or above sea level - same seed always finds the same spot, no hidden
+// randomness. Falls back to (0,0) itself if nothing within kMaxRadius
+// qualifies (statistically implausible given terrain_height's roughly
+// symmetric distribution around sea level, but honestly handled rather
+// than assumed impossible).
+struct SpawnColumn {
+    lcu::i32 x = 0;
+    lcu::i32 z = 0;
+};
+
+SpawnColumn find_dry_spawn_column(lcu::u32 seed) {
+    if (lcu::world::worldgen::terrain_height(seed, 0, 0) >= lcu::world::worldgen::kSeaLevel) {
+        return {0, 0};
+    }
+    constexpr lcu::i32 kMaxRadius = 64;
+    for (lcu::i32 radius = 1; radius <= kMaxRadius; ++radius) {
+        for (lcu::i32 x = -radius; x <= radius; ++x) {
+            for (lcu::i32 z = -radius; z <= radius; ++z) {
+                // Only the current ring's boundary - interior points
+                // were already checked at a smaller radius.
+                if (std::max(std::abs(x), std::abs(z)) != radius) {
+                    continue;
+                }
+                if (lcu::world::worldgen::terrain_height(seed, x, z) >= lcu::world::worldgen::kSeaLevel) {
+                    return {x, z};
+                }
+            }
+        }
+    }
+    return {0, 0};  // honestly-scoped fallback - see this function's doc comment above.
+}
+
 // How far around spawn (in chunks) to keep loaded, and the vertical chunk
-// range (covering worldgen's height range: kBaseHeight=32 +/-
-// kHeightVariation=24 => world Y in [8,56]; edge length 16 means chunk Y
-// in [0,3] covers world Y in [0,63]). Real streaming driven by the
+// range (covering worldgen's height range: kBaseHeight=0 +/-
+// kHeightVariation=20 => world Y in [-20,20], centered on sea level;
+// edge length 16 means Desktop's chunk Y in [-1,2] covers world Y in
+// [-16,47] - see quality_profile.cpp). Real streaming driven by the
 // player's current position/view direction (brief section 22) is a later
 // refinement once World::update_streaming has a moving center to react to
 // every frame; this client loads a static area once at startup, sized by
-// LCU_QUALITY_PROFILE (Phase 10, see lcu::core::QualityProfile) -
-// defaults to Desktop, which is numerically identical to this vertical
-// slice's original hardcoded 1/0/3 values.
+// LCU_QUALITY_PROFILE (Phase 10, see lcu::core::QualityProfile).
 lcu::core::ChunkLoadSettings load_settings_from_env() {
     const char* profile_name = std::getenv("LCU_QUALITY_PROFILE");
     lcu::core::QualityProfile profile = lcu::core::QualityProfile::Desktop;
@@ -369,6 +405,28 @@ int main() {
     torch_def.color = {1.0f, 0.65f, 0.2f};
     const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
 
+    // Sea level + water (Phase 37, brief section 21): terrain_height()
+    // is now centered on lcu::world::worldgen::kSeaLevel (world Y 0)
+    // instead of always positive, so some columns' terrain genuinely
+    // dips below it - generate_terrain_chunk (below) fills that gap
+    // with this block up to sea level. Same "solid, not fake-invisible"
+    // reasoning the torch block above already established: no
+    // transparent-layer *meshing* exists yet (see DECISIONS.md), so
+    // `is_transparent = true` here would make water correctly placed
+    // by worldgen but completely invisible - exactly the trap Phase 34
+    // caught for the torch. `has_collision = false` is the real,
+    // honest difference from every solid block registered so far - a
+    // player can walk/swim straight through it, using the same is_solid
+    // predicate (BlockDefinition::has_collision) every other block's
+    // collision already goes through, not a new physics special case.
+    lcu::voxel::BlockDefinition water_def;
+    water_def.namespaced_id = "game:water";
+    water_def.display_name = "Water";
+    water_def.is_transparent = false;
+    water_def.has_collision = false;
+    water_def.color = {0.15f, 0.35f, 0.85f};
+    const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -544,7 +602,7 @@ int main() {
     }
 
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id, water_id);
     });
 
 #if defined(LCU_ENABLE_BGFX)
@@ -794,10 +852,20 @@ int main() {
     };
 
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
-    LCU_LOG_INFO("Loading world (seed={}) around spawn (radius_xz={}, chunk_y=[{},{}])...", kWorldSeed,
-                 load_settings.radius_xz, load_settings.min_chunk_y, load_settings.max_chunk_y);
-    for (lcu::i32 cx = -load_settings.radius_xz; cx <= load_settings.radius_xz; ++cx) {
-        for (lcu::i32 cz = -load_settings.radius_xz; cz <= load_settings.radius_xz; ++cz) {
+    // Phase 37: the loaded area centers on the real (possibly non-
+    // origin) dry spawn column find_dry_spawn_column found above, not
+    // always chunk (0,0) - see that function's doc comment.
+    const SpawnColumn spawn_column = find_dry_spawn_column(kWorldSeed);
+    const lcu::voxel::ChunkCoord spawn_chunk =
+        lcu::voxel::world_to_chunk_and_local({spawn_column.x, 0, spawn_column.z}, lcu::voxel::Chunk::kEdgeLength)
+            .chunk;
+    LCU_LOG_INFO("Loading world (seed={}) around spawn column ({},{}) (radius_xz={}, chunk_y=[{},{}])...",
+                 kWorldSeed, spawn_column.x, spawn_column.z, load_settings.radius_xz, load_settings.min_chunk_y,
+                 load_settings.max_chunk_y);
+    for (lcu::i32 cx = spawn_chunk.x - load_settings.radius_xz; cx <= spawn_chunk.x + load_settings.radius_xz;
+         ++cx) {
+        for (lcu::i32 cz = spawn_chunk.z - load_settings.radius_xz; cz <= spawn_chunk.z + load_settings.radius_xz;
+             ++cz) {
             // Three passes per column, not one: block light (Phase 6)
             // and sky light (Phase 30) are computed separately because
             // sky light must cascade top-down (the highest chunk_y in
@@ -835,7 +903,9 @@ int main() {
         // (guaranteed open air, regardless of the terrain height's exact
         // solid/air boundary convention) should read full sky light.
         const auto open_air_split = lcu::voxel::world_to_chunk_and_local(
-            {0, lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 5, 0}, lcu::voxel::Chunk::kEdgeLength);
+            {spawn_column.x, lcu::world::worldgen::terrain_height(kWorldSeed, spawn_column.x, spawn_column.z) + 5,
+             spawn_column.z},
+            lcu::voxel::Chunk::kEdgeLength);
         if (const auto sky_light = world_light.sky_light_at(open_air_split.chunk, open_air_split.local.x,
                                                               open_air_split.local.y, open_air_split.local.z)) {
             LCU_LOG_INFO("Sky light 5 blocks above spawn column: {}", *sky_light);
@@ -862,14 +932,18 @@ int main() {
     LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
 #endif
 
-    // --- Player: spawns resting on the terrain surface at world (0, *, 0) ---
+    // --- Player: spawns resting on dry land at spawn_column (Phase 37 - see
+    // find_dry_spawn_column's doc comment) ---
     // terrain_height() returns the topmost *solid* block's Y (worldgen.cpp:
     // world_y <= height is solid) - the first open-air cell to stand in is
     // one above that, not terrain_height() itself (an off-by-one that would
     // otherwise spawn the player embedded in the top layer of solid ground).
-    const lcu::i32 spawn_ground_y = lcu::world::worldgen::terrain_height(kWorldSeed, 0, 0) + 1;
+    const lcu::i32 spawn_ground_y =
+        lcu::world::worldgen::terrain_height(kWorldSeed, spawn_column.x, spawn_column.z) + 1;
     lcu::physics::PlayerPhysicsState player;
-    player.aabb = make_player_aabb({0.0f, static_cast<lcu::f32>(spawn_ground_y), 0.0f});
+    player.aabb = make_player_aabb(
+        {static_cast<lcu::f32>(spawn_column.x), static_cast<lcu::f32>(spawn_ground_y),
+         static_cast<lcu::f32>(spawn_column.z)});
     lcu::physics::PlayerPhysicsConfig physics_config;
 
     // Per-movement chunk streaming (brief section 22, Phase 16 - the gap
@@ -1005,8 +1079,9 @@ int main() {
     if (!networked) {
         for (int i = 0; i < kAiEntityCount; ++i) {
             const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
-            const lcu::math::Vec3 spawn_pos{4.0f * std::cos(angle), static_cast<lcu::f32>(spawn_ground_y),
-                                             4.0f * std::sin(angle)};
+            const lcu::math::Vec3 spawn_pos{static_cast<lcu::f32>(spawn_column.x) + 4.0f * std::cos(angle),
+                                             static_cast<lcu::f32>(spawn_ground_y),
+                                             static_cast<lcu::f32>(spawn_column.z) + 4.0f * std::sin(angle)};
             const lcu::ecs::EntityId entity = entity_registry.create_entity();
             entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
             entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});

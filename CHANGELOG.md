@@ -2,7 +2,72 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37
+
+### Phase 37
+
+- **Real sea level at world Y=0**: `worldgen::kSeaLevel` (new, exported
+  constant) - `terrain_height()` is now centered on it (`kBaseHeight`
+  changed from a fixed positive 32 to `kSeaLevel`, `kHeightVariation`
+  20) instead of the old always-positive [8,56] range, so roughly half
+  of all columns now land above sea level (dry land/hills) and half
+  below it (real lake/ocean basins) - not just a comment, an actual
+  change in what terrain generates.
+- **`game:water`**: `generate_terrain_chunk` gained a `water_block`
+  parameter - any cell above a column's terrain but at or below sea
+  level is filled with it (dry-land columns are completely unaffected,
+  a real behavior no-op). Deliberately `is_transparent = false` (same
+  "no transparent-layer meshing exists yet" reasoning Phase 34's torch
+  already established - `true` would make water correctly placed but
+  invisible) and `has_collision = false` (real, honest difference from
+  every other block registered so far - a player walks/swims straight
+  through it via the same `has_collision`-driven `is_solid` predicate
+  every other block's collision already goes through, no new physics
+  special case). No buoyancy/drag/swim mechanics - an honest, scoped
+  gap, not claimed as done.
+- **Quality profiles re-centered on sea level**: `ChunkLoadSettings`
+  for all four tiers shifted their `min_chunk_y`/`max_chunk_y` down to
+  straddle Y=0 instead of sitting entirely above it (Desktop: was
+  1/0/3, now 1/-1/2). Every tier's *total* chunk count is unchanged
+  (1/18/27/36) - a deliberate design choice so every prior phase's
+  "Loaded N chunks" claims stay numerically true even though the
+  loaded volume moved.
+- **Real dry spawn placement**: a fixed world (0,0) spawn column can
+  now legitimately land underwater by pure chance (no swim mechanics
+  exist), so `VoxelClient`/`VoxelServer` each gained an identical,
+  deterministic `find_dry_spawn_column` (a small square-ring search
+  outward from the origin for the nearest column at or above sea
+  level) - same seed, same search, so both sides agree on where
+  "spawn" is without sending it over the wire. The entire spawn-area
+  load region, the player, and the AI ring all recentre on this real
+  column instead of always (0,0).
+- 5 worldgen unit tests updated for the new `water_block` parameter
+  and recentered height range; 1 new test
+  (`BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel`, spanning
+  multiple chunks where a deep column's water range crosses a chunk
+  boundary). 2 quality-profile tests updated (the old "must stay
+  1/0/3" locked test now asserts 1/-1/2 with updated reasoning).
+- Verified via real runs: a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  showing the new spawn-column search finding column (-19,18) for
+  seed 1337 (dry land, `Player position: (-19.00, 1.90, 18.00)`),
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` all
+  byte-identical in behavior at the new spawn location, and a real
+  two-process networked run where client and server independently
+  compute the identical spawn column ((-19,18) on both sides) and the
+  server-reconciled player position lands on dry land, zero
+  warnings/errors.
+- `ctest` 393/393 (bgfx, up from 392) / 390/390 (non-bgfx, up from
+  389).
+- Honestly scoped: **what water actually looks like on a real
+  GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+  transparent/translucent rendering (water is a solid-looking blue
+  block, same trade-off the torch already made); no waves/current/
+  buoyancy/swimming physics; no beach/sand transition at the shoreline
+  (the same grass/dirt/stone convention continues right up to and
+  under the waterline); sky light still stops entirely at water's
+  surface (treated as opaque for light purposes, like any other solid
+  block - unrealistic but an honest consequence of the existing
+  binary open/blocked light model, not a new fake feature).
 
 ### Phase 36
 
