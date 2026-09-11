@@ -2,7 +2,38 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42
+
+### Phase 42
+
+- **README.md written** (was previously an empty file): a real
+  project-level entry point - what the project is, an honest current
+  status pointer (this repo was built and verified in a headless
+  Linux sandbox with no GPU/display; docs say so explicitly rather
+  than silently claiming more), a feature summary reflecting the
+  actual state as of Phase 41 (chunked voxel storage/meshing/lighting,
+  the full deterministic worldgen pipeline through vegetation,
+  movement/inventory/crafting/AI, real client/server networking, Lua
+  modding, mobile input/quality profiles, benchmarks), a quick-start
+  build/run block, and a documentation map linking to every other doc
+  in the repo with a one-line description of what each covers.
+- **`PROJECT_STATE.md`'s "Known Limitations" section corrected**: an
+  old Phase 17 entry still read "no climate/biome/caves/ores/
+  structures/vegetation/decoration" - stale since Phases 39-41 made
+  biome/caves/ores/vegetation all real. Updated in place (struck
+  through, not deleted, matching this file's own established
+  correction convention) to reflect that only structures (brief
+  section 21's one remaining pipeline stage) is still unimplemented,
+  and that it's out of scope for this 42-phase plan entirely rather
+  than deferred from any specific phase.
+- `BUILDING.md`/`CHANGELOG.md`/`DECISIONS.md` reviewed for accuracy
+  against the current (post-Phase-41) state and found already current
+  - each was kept up to date phase-by-phase throughout Phases 35-41,
+  so no further edits were needed there this phase.
+- This closes out the governing directive's 18-phase (Phases 25-42)
+  program. See `PROJECT_STATE.md`'s "Reality Audit" for the complete,
+  current, honest picture of what is and isn't verified.
+
 
 ### Phase 41
 

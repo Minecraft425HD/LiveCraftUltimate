@@ -1599,6 +1599,29 @@ them removes it without granting an item, the same state coal/iron ore
 were in after Phase 40); no structures pipeline stage (out of scope
 for this 42-phase plan entirely, not a gap deferred from this phase).
 
+## Phase 42 — Documentation update
+
+Final pass across the governing directive's own listed doc set
+(`BUILDING.md`/`PROJECT_STATE.md`/`CHANGELOG.md`/`DECISIONS.md`/
+`README.md`) closing out the 18-phase (Phases 25-42) program.
+
+- [x] **`README.md` written** - was previously an empty file. A real
+  project-level entry point: what the project is, an honest current
+  status pointer (built/verified in a headless Linux sandbox, no
+  GPU/display - docs say so explicitly, never silently claim more), a
+  feature summary reflecting the actual Phase 41 state, a quick-start
+  build/run block, and a documentation map.
+- [x] **`PROJECT_STATE.md`'s "Known Limitations" corrected**: a stale
+  Phase 17 entry still read "no climate/biome/caves/ores/structures/
+  vegetation/decoration" - updated in place (struck through, matching
+  this file's own established correction convention) to reflect that
+  Phases 39-41 made biome/caves/ores/vegetation all real, and only
+  structures remains unimplemented (out of scope for this plan
+  entirely, not deferred from any specific phase).
+- [x] `BUILDING.md`/`CHANGELOG.md`/`DECISIONS.md` reviewed against the
+  current state and found already current - kept up to date
+  phase-by-phase throughout Phases 35-41, no further edits needed.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

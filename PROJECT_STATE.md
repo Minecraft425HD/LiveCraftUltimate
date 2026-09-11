@@ -1523,10 +1523,15 @@ None currently tracked.
   **Fixed** (Phase 17, see "Last Completed Task" below and
   TASK_QUEUE.md): `generate_terrain_chunk` now places a real
   `game:grass` surface layer, `game:dirt` for the next few layers, and
-  `game:stone` deeper. Still no climate/biome/caves/ores/structures/
-  vegetation/decoration (brief section 21's later pipeline stages) -
-  every column still uses the same three block ids regardless of
-  position or depth beyond the fixed layering above.
+  `game:stone` deeper. ~~Still no climate/biome/caves/ores/structures/
+  vegetation/decoration~~ **Biome/caves/ores/vegetation fixed** (Phases
+  39-41, see those phases' own CHANGELOG/PROJECT_STATE entries): three
+  real climate biomes, real cave carving, two ore types, and
+  single-column tree/cactus vegetation all now vary real worldgen
+  content by position/depth/biome. Structures (brief section 21's one
+  remaining pipeline stage) are still not implemented - out of scope
+  for this 42-phase plan entirely, not deferred from any specific
+  phase.
 - ~~Chunk save/load (`engine/serialization::chunk_serializer`) is
   unit-tested in isolation but still not wired to any actual trigger in
   `VoxelClient` or `VoxelServer`~~ **Fixed** (Phase 20, server-side):
