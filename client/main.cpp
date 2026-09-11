@@ -668,6 +668,9 @@ int main() {
     // noise/top-vs-side pattern this multiplies against, since there's
     // still no texture atlas (brief section 12/Phase 12).
     stone_def.color = {0.5f, 0.5f, 0.5f};
+    // Real atlas texture (Phase 55) - same on every face, no per-face
+    // override needed (stone looks the same all around).
+    stone_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Stone);
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
     // Surface/subsurface terrain content (brief section 21) - a real
@@ -695,6 +698,14 @@ int main() {
     // to side_color, since the underside looks like the sides, not the
     // top).
     grass_def.side_color = {0.4f, 0.25f, 0.1f};
+    // Real atlas textures (Phase 55) - unlike the color-only fallback
+    // above (side_color alone covers both sides AND the underside),
+    // there's a real, dedicated dirt tile to use for the underside
+    // instead of reusing the green-capped side texture there, so
+    // bottom_texture is set explicitly rather than left to fall back.
+    grass_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::GrassTop);
+    grass_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::GrassSide);
+    grass_def.bottom_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::voxel::BlockId grass_id = block_registry.register_block(grass_def);
 
     lcu::voxel::BlockDefinition dirt_def;
@@ -706,6 +717,7 @@ int main() {
     // dirt value.
     dirt_def.hardness = 0.5f;
     dirt_def.color = {0.4f, 0.25f, 0.1f};
+    dirt_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
     // Real climate/biome content (Phase 39, brief section 21) - the
@@ -725,6 +737,7 @@ int main() {
     // phase's own directive's table): as loose/soft as dirt.
     sand_def.hardness = 0.5f;
     sand_def.color = {0.86f, 0.78f, 0.55f};
+    sand_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Sand);
     const lcu::voxel::BlockId sand_id = block_registry.register_block(sand_def);
 
     // Snow is a real surface-only cap - the Snowy biome's subsurface
@@ -740,6 +753,7 @@ int main() {
     // block registered, matching real snow.
     snow_def.hardness = 0.1f;
     snow_def.color = {0.95f, 0.97f, 1.0f};
+    snow_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Snow);
     const lcu::voxel::BlockId snow_id = block_registry.register_block(snow_def);
 
     // First real light-emitting, player-placeable block (Phase 34,
@@ -775,6 +789,7 @@ int main() {
     torch_def.hardness = 0.0f;
     torch_def.light_emission = 14;
     torch_def.color = {1.0f, 0.65f, 0.2f};
+    torch_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Torch);
     const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
 
     // Sea level + water (Phase 37, brief section 21): terrain_height()
@@ -802,6 +817,7 @@ int main() {
     // break target to begin with - already, honestly, unbreakable
     // without a special case, not by an infinite hardness value.
     water_def.color = {0.15f, 0.35f, 0.85f};
+    water_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Water);
     const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
 
     // Real ore blocks (Phase 40, brief section 21's "caves/ores" pipeline
@@ -820,6 +836,7 @@ int main() {
     // relationship.
     coal_ore_def.hardness = 3.0f;
     coal_ore_def.color = {0.2f, 0.2f, 0.22f};
+    coal_ore_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::CoalOre);
     const lcu::voxel::BlockId coal_ore_id = block_registry.register_block(coal_ore_def);
 
     lcu::voxel::BlockDefinition iron_ore_def;
@@ -829,6 +846,7 @@ int main() {
     iron_ore_def.has_collision = true;
     iron_ore_def.hardness = 3.0f;
     iron_ore_def.color = {0.82f, 0.71f, 0.58f};
+    iron_ore_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::IronOre);
     const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
 
     // Real vegetation blocks (Phase 41, brief section 21's "vegetation"
@@ -846,6 +864,14 @@ int main() {
     // wood value.
     wood_def.hardness = 1.5f;
     wood_def.color = {0.45f, 0.30f, 0.15f};
+    // Real atlas textures (Phase 55) - top and bottom both show real
+    // growth rings (same as real Minecraft's own log), so bottom_
+    // texture is set explicitly rather than left to fall back to
+    // side_texture (bark), which the fallback chain would otherwise
+    // give it once side_texture is set.
+    wood_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodTop);
+    wood_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodSide);
+    wood_def.bottom_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodTop);
     const lcu::voxel::BlockId wood_id = block_registry.register_block(wood_def);
 
     lcu::voxel::BlockDefinition leaves_def;
@@ -857,6 +883,7 @@ int main() {
     // leaves value.
     leaves_def.hardness = 0.2f;
     leaves_def.color = {0.20f, 0.55f, 0.15f};
+    leaves_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Leaves);
     const lcu::voxel::BlockId leaves_id = block_registry.register_block(leaves_def);
 
     lcu::voxel::BlockDefinition cactus_def;
@@ -868,6 +895,7 @@ int main() {
     // (a real cactus is mostly water, easy to cut through).
     cactus_def.hardness = 0.4f;
     cactus_def.color = {0.10f, 0.45f, 0.30f};
+    cactus_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Cactus);
     const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
 
     // Real crafting table (Phase 50.3): right-clicking it opens a real
@@ -883,6 +911,11 @@ int main() {
     crafting_table_def.has_collision = true;
     crafting_table_def.hardness = 2.0f;
     crafting_table_def.color = {0.55f, 0.35f, 0.15f};
+    // Real atlas textures (Phase 55) - tool-symbol top, planked sides
+    // (bottom falls back to side_texture, the same plain planks look -
+    // never visible in practice anyway, resting on the ground).
+    crafting_table_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::CraftingTableTop);
+    crafting_table_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::Planks);
     const lcu::voxel::BlockId crafting_table_id = block_registry.register_block(crafting_table_def);
 
     // Block-break's first real item consumer (brief section 55): the

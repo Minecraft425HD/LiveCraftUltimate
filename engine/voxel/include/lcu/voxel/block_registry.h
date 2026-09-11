@@ -44,6 +44,26 @@ struct BlockDefinition {
     math::Vec3 color{1.0f, 1.0f, 1.0f};
     std::optional<math::Vec3> side_color;
     std::optional<math::Vec3> bottom_color;
+
+    // Real per-face atlas texture index (Phase 55) - mirrors color/
+    // side_color/bottom_color's own fallback chain exactly: `top_
+    // texture` is the top-face (and default-everywhere) tile,
+    // `side_texture`/`bottom_texture` optionally override it per face,
+    // resolved by mesh_chunk_greedy the same way/at the same time it
+    // already resolves quad_color. A plain u32, not lcu::assets::
+    // TileId directly: engine/voxel is EngineCore-level (no SDL/bgfx,
+    // built for VoxelServer too - see ARCHITECTURE.md), so it can't
+    // depend on engine/assets (LCU_BUILD_CLIENT-only, see engine/assets/
+    // CMakeLists.txt) - each real block's own registration site in
+    // client/main.cpp is the only place that actually knows about
+    // lcu::assets::TileId, casting to u32 there. Default 0 - a block
+    // that never sets this renders atlas tile 0 everywhere, same as
+    // every block did before Phase 55 (harmless: nothing samples the
+    // atlas at all unless LCU_USE_TEXTURES is on, and even then this
+    // is purely which tile gets sampled, not whether one does).
+    u32 top_texture = 0;
+    std::optional<u32> side_texture;
+    std::optional<u32> bottom_texture;
 };
 
 // Central, namespaced block type registry (brief section 16). Namespacing

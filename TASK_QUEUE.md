@@ -2303,6 +2303,30 @@ every face/icon still renders tile 0 regardless of block type (Phase
 55/56); what any of this looks like on a real GPU/display is still
 **NOT VERIFIED — ENVIRONMENT LIMITATION**.
 
+## Phase 55 — Blocks use texture atlas
+
+- [x] `BlockDefinition` gains `top_texture`/`side_texture`/
+  `bottom_texture` (`u32`, mirrors `color`'s own fallback chain - stays
+  a plain `u32` not `TileId` since engine/voxel can't depend on the
+  `LCU_BUILD_CLIENT`-only engine/assets).
+- [x] `mesh_chunk_greedy` resolves the real per-face texture index at
+  the same place/time it resolves `quad_color`; `ChunkMeshLayer::
+  add_quad` takes the new `texture_index` param.
+- [x] Every real block in `client/main.cpp` wired to its own real
+  Phase-54 texture(s) - grass's underside is the real dirt tile (not a
+  reuse of the side texture), wood's top/bottom both show growth rings.
+- [x] 2 new `GreedyMesher.*` tests proving the real fallback chain.
+- [x] Verified via a real headless run, a real `LCU_VERIFY_BREAK_PLACE`
+  regression run (byte-identical), and a real `LCU_BUILD_SHADER_TOOLS=
+  ON` build.
+
+`ctest` 563/563 (bgfx, up from 561) / 555/555 (non-bgfx, up from 553).
+
+Honestly scoped: what any real block looks like textured on a real
+GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+crafting-table sides reuse the plain planks tile; torch/cactus show
+one texture on every face (no per-face variant exists for either).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

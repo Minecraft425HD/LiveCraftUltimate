@@ -143,6 +143,59 @@ TEST(GreedyMesher, UnsetSideAndBottomColorFallBackToTopColorOnEveryFace) {
     }
 }
 
+TEST(GreedyMesher, PerFaceTextureIndexUsesTopSideBottomFallbackChain) {
+    // Phase 55: the same real top/side/bottom fallback chain
+    // PerFaceColorUsesTopSideBottomFallbackChain above already proves
+    // for color, now proven for texture_index - a block with distinct
+    // top/side texture indices and no bottom override must mesh each
+    // of its six faces with the correct atlas tile, purely from
+    // BlockDefinition data.
+    BlockRegistry registry;
+    BlockDefinition grass_like;
+    grass_like.namespaced_id = "test:grass";
+    grass_like.top_texture = 5;  // top
+    grass_like.side_texture = 7;  // sides; bottom_texture left unset
+    const auto grass = registry.register_block(grass_like);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, grass);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+
+    const auto texture_index_of_face_with_normal = [&](const lcu::math::Vec3& normal) {
+        for (const auto& vertex : mesh.opaque.vertices) {
+            if (lcu::math::dot(vertex.normal, normal) > 0.99f) {
+                return vertex.texture_index;
+            }
+        }
+        ADD_FAILURE() << "no vertex found with the expected face normal";
+        return static_cast<lcu::u16>(0);
+    };
+
+    EXPECT_EQ(texture_index_of_face_with_normal({0.0f, 1.0f, 0.0f}), 5u);
+    // bottom_texture unset -> falls back to side_texture, not top.
+    EXPECT_EQ(texture_index_of_face_with_normal({0.0f, -1.0f, 0.0f}), 7u);
+    EXPECT_EQ(texture_index_of_face_with_normal({1.0f, 0.0f, 0.0f}), 7u);
+}
+
+TEST(GreedyMesher, UnsetSideAndBottomTextureFallBackToTopTextureOnEveryFace) {
+    BlockRegistry registry;
+    BlockDefinition stone;
+    stone.namespaced_id = "test:stone";
+    stone.top_texture = 3;
+    const auto stone_id = registry.register_block(stone);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone_id);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 3u);
+    }
+}
+
 TEST(GreedyMesher, AdjacentSameTypeBlocksMergeCoplanarFaces) {
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");

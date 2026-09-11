@@ -47,9 +47,10 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 (item entities + crafting table)**, **Phase 51 (health, hunger,
 fall damage, respawn)**, **Phase 52 (documentation)**, **Phase 53
 (texture-atlas pipeline - infrastructure only, no real textures yet)**,
-and **Phase 54 (17 real procedurally-generated MC-style textures,
-still not wired to any block/item - see Phase 55/56)** are done; a
-fourth user-directed program (Phases 53-57: texture atlas, procedural
+**Phase 54 (17 real procedurally-generated MC-style textures,
+still not wired to any block/item at that point - see Phase 56)**, and
+**Phase 55 (blocks now reference real Phase-54 textures per-face)**
+are done; a fourth user-directed program (Phases 53-57: texture atlas, procedural
 MC-style textures, blocks/items on the atlas, a bitmap font + real text
 renderer) is now in progress - see
 "Reality Audit" and

@@ -2,7 +2,45 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55
+
+### Phase 55
+
+- **Blocks now use the real texture atlas**: `BlockDefinition` gains
+  `top_texture`/`side_texture`/`bottom_texture` (`u32`, mirroring
+  `color`/`side_color`/`bottom_color`'s own fallback chain exactly) -
+  `mesh_chunk_greedy` resolves the real per-face atlas tile at the same
+  place/time it already resolves `quad_color`, and passes it through to
+  `ChunkMeshLayer::add_quad`'s new `texture_index` parameter. Every
+  real block registered in `client/main.cpp` (stone, grass, dirt, sand,
+  snow, torch, water, coal/iron ore, wood, leaves, cactus, crafting
+  table) now points at its own real Phase-54 texture(s) - grass's real
+  underside is the dedicated dirt tile (not a reuse of the green-capped
+  side texture the color-only fallback used), wood's top and bottom
+  both show real growth rings (only the sides show bark), matching real
+  Minecraft's own per-face convention more closely than color alone
+  could.
+- **Real texture-atlas tests**: `BlockDefinition` is `EngineCore`-level
+  (built for `VoxelServer` too), so `top_texture`/etc. stay a plain
+  `u32`, not `lcu::assets::TileId` directly - engine/voxel can't depend
+  on `engine/assets` (`LCU_BUILD_CLIENT`-only). Two new
+  `GreedyMesher.*` tests prove the same real top/side/bottom fallback
+  chain `PerFaceColorUsesTopSideBottomFallbackChain` already proves for
+  color, now for `texture_index`.
+- Verified via a real headless run (`atlas_texture_valid=true` with
+  real per-block textures now resolved through meshing), a real
+  `LCU_VERIFY_BREAK_PLACE` regression run (still passes byte-identical
+  - breaking/placing carries real texture indices through the whole
+  pipeline with no behavior change to the logged gameplay), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build. `ctest` 563/563 (bgfx, up from
+  561) / 555/555 (non-bgfx, up from 553).
+- Honestly scoped: what any real block actually looks like textured on
+  a real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  `game:crafting_table`'s sides reuse the plain `Planks` tile (no
+  dedicated crafted-table-side texture exists - Phase 54's own texture
+  list names only a table-top pattern); `game:torch`/`game:cactus`
+  render one real texture on every face (no per-face variation exists
+  for either in Phase 54's own texture list either).
 
 ### Phase 54
 

@@ -349,10 +349,18 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     // fallback chain.
                     const BlockDefinition& def = registry.definition_of(current.block_id);
                     math::Vec3 quad_color = def.color;
+                    // Real per-face atlas texture index (Phase 55) -
+                    // same fallback chain/face logic as quad_color just
+                    // above, resolved at the same time since both come
+                    // from the same real per-face lookup on `def`. See
+                    // BlockDefinition::top_texture's own doc comment.
+                    u32 quad_texture_index = def.top_texture;
                     if (d == 1 && !current.positive_facing) {
                         quad_color = def.bottom_color.value_or(def.side_color.value_or(def.color));
+                        quad_texture_index = def.bottom_texture.value_or(def.side_texture.value_or(def.top_texture));
                     } else if (d != 1) {
                         quad_color = def.side_color.value_or(def.color);
+                        quad_texture_index = def.side_texture.value_or(def.top_texture);
                     }
                     // Smooth per-vertex light (Phase 33): one sample per
                     // geometric grid CORNER of this merged quad (A=c0's
@@ -370,7 +378,7 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     if (current.positive_facing) {
                         mesh.opaque.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
                                               static_cast<f32>(height), quad_color, light_a, light_b, light_c,
-                                              light_d);
+                                              light_d, static_cast<u16>(quad_texture_index));
                     } else {
                         // Winding reversed (c0,c3,c2,c1) for a negative-
                         // facing quad - the light argument order must
@@ -380,7 +388,7 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         // other winding.
                         mesh.opaque.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
                                               static_cast<f32>(height), quad_color, light_a, light_d, light_c,
-                                              light_b);
+                                              light_b, static_cast<u16>(quad_texture_index));
                     }
 
                     for (i32 l = 0; l < height; ++l) {
