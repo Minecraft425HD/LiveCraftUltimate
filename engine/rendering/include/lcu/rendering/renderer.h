@@ -39,14 +39,17 @@ struct UiVertex2D {
     f32 g = 0.0f;
     f32 b = 0.0f;
     f32 a = 0.0f;
-    // Real per-vertex "sample the atlas at (u,v)" flag (Phase 56) - 0
-    // for a flat-color quad (submit_ui_quad, unchanged since Phase 44:
+    // Real per-vertex sample mode (Phase 56, extended Phase 57) - 0 for
+    // a flat-color quad (submit_ui_quad, unchanged since Phase 44:
     // borders, backgrounds, health/hunger bars), 1 for a real item-icon
-    // quad (submit_textured_ui_quad) whose (u,v) above is a real atlas
-    // sample rect, not a per-quad-local 0..1 UV. Lets both kinds of
-    // quad share the same batch/single draw call fs_ui2d.sc's own
-    // u_useTextures-style mix already established for chunk rendering
-    // (Phase 53) - see fs_ui2d.sc.
+    // quad (submit_textured_ui_quad, samples the block/item atlas's own
+    // RGB as-is), 2 for a real font-glyph quad (submit_text_glyph_quad,
+    // samples the SEPARATE font atlas and multiplies its RGB by this
+    // vertex's own color - see that method's doc comment). Whichever
+    // mode, (u,v) above is a real atlas sample rect for that quad's own
+    // atlas, not a per-quad-local 0..1 UV, except mode 0 where it's
+    // unused. Lets all three kinds of quad share the same batch/single
+    // draw call - fs_ui2d.sc's own mix chain picks the right one.
     f32 use_texture = 0.0f;
 };
 
@@ -211,6 +214,22 @@ class Renderer : public NonCopyable {
     void submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0, f32 u1,
                                   f32 v1);
 
+    // Real font-atlas glyph quad (Phase 57) - same real batch/one-draw-
+    // call contract as submit_ui_quad/submit_textured_ui_quad above,
+    // but samples the SEPARATE font atlas (`s_font`, bound by
+    // flush_ui_quads' own `font_atlas_texture` param below) instead of
+    // the block/item atlas `submit_textured_ui_quad` samples. Unlike
+    // that call, `color`'s RGB IS applied (multiplied against the
+    // sampled glyph's own white-on-transparent pixels), not just its
+    // alpha - a font atlas is deliberately colorless (see
+    // lcu::assets::generate_glyph_pixels) so one glyph texture can be
+    // tinted to any real text color at draw time, the same real
+    // "colorless glyph, tinted at draw time" technique any bitmap-font
+    // renderer uses. `engine::ui::TextRenderer` is the one real caller
+    // - most code should go through that, not this directly.
+    void submit_text_glyph_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0, f32 u1,
+                                 f32 v1);
+
     // How many quads are currently queued (real, testable state - not
     // just an implementation detail): 0 right after flush_ui_quads() or
     // before any submit_ui_quad() call this frame.
@@ -235,8 +254,16 @@ class Renderer : public NonCopyable {
     // have produced" contract Renderer::submit_chunk_mesh's own
     // `atlas_texture` parameter already establishes; pass the same
     // texture handle here as there, or an invalid one if `LCU_USE_
-    // TEXTURES` is off (see client/main.cpp).
-    void flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE);
+    // TEXTURES` is off (see client/main.cpp). `font_atlas_texture`
+    // (Phase 57) is the SAME kind of contract for submit_text_glyph_
+    // quad's own queued quads - a separate real texture bound to a
+    // separate sampler slot (`s_font`), since the font atlas is its own
+    // texture, not packed into the block/item atlas (see
+    // lcu::assets::font_atlas.h). Both atlases can be bound in the same
+    // draw call - fs_ui2d.sc's own per-vertex mode selects which one (if
+    // either) a given quad actually samples.
+    void flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE,
+                         bgfx::TextureHandle font_atlas_texture = BGFX_INVALID_HANDLE);
 
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
@@ -292,6 +319,11 @@ class Renderer : public NonCopyable {
     bgfx::UniformHandle tile_step_uniform_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle tile_inset_uniform_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle atlas_sampler_ = BGFX_INVALID_HANDLE;
+    // Phase 57 - the font atlas's own separate sampler slot (slot 1,
+    // `s_font` - `atlas_sampler_` above stays slot 0, `s_atlas`), same
+    // "created unconditionally in init(), destroyed in ~Renderer()"
+    // reasoning.
+    bgfx::UniformHandle font_sampler_ = BGFX_INVALID_HANDLE;
     // Phase 44 - this frame's queued submit_ui_quad() calls, 4 vertices/
     // 6 indices per quad, uploaded and cleared together by
     // flush_ui_quads(). Real per-frame state (not a persistent GPU

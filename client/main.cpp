@@ -23,6 +23,7 @@
 #include "game/systems/item_entity_system.h"
 #include "game/systems/player_vitals_system.h"
 #include "game/systems/replication_protocol.h"
+#include "lcu/assets/font_atlas.h"
 #include "lcu/assets/procedural_textures.h"
 #include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
@@ -86,6 +87,7 @@
 #include "lcu/ui/hud_renderer.h"
 #include "lcu/ui/inventory_screen_renderer.h"
 #include "lcu/ui/menu_renderer.h"
+#include "lcu/ui/text_renderer.h"
 #endif
 
 namespace {
@@ -1547,6 +1549,27 @@ int main() {
                                                               lcu::assets::kAtlasSize);
     }
     LCU_LOG_INFO("Texture atlas: use_textures={} atlas_texture_valid={}", use_textures, bgfx::isValid(atlas_texture));
+
+    // Real bitmap-font atlas (Phase 57) - unconditional, unlike the
+    // block/item atlas above: text rendering is its own real feature
+    // with its own real fallback (LCU_LEGACY_DEBUG_TEXT below, not
+    // LCU_USE_TEXTURES - a player who disabled block/item textures
+    // still gets real bitmap-font text, not just the coincidence that
+    // LCU_USE_TEXTURES happened to be on). See lcu::assets::font_atlas.h.
+    const std::vector<lcu::u8> font_atlas_pixels = lcu::assets::build_font_atlas_pixels();
+    const bgfx::TextureHandle font_atlas_texture = renderer.create_texture_from_pixels(
+        font_atlas_pixels.data(), lcu::assets::kFontAtlasWidth, lcu::assets::kFontAtlasHeight);
+    LCU_LOG_INFO("Font atlas: font_atlas_texture_valid={}", bgfx::isValid(font_atlas_texture));
+
+    // Real legacy-debug-text fallback toggle (Phase 57.3) - default OFF
+    // (false), meaning HUD/menu/inventory/workbench text draws through
+    // the real lcu::ui::TextRenderer bitmap-font atlas above by default
+    // now; LCU_LEGACY_DEBUG_TEXT=1 keeps the exact old bgfx built-in
+    // debug-text buffer behavior every one of those draw_*_labels
+    // functions had before this phase, as a real, working fallback, not
+    // a removed feature - see each function's own updated doc comment.
+    const char* legacy_debug_text_env = std::getenv("LCU_LEGACY_DEBUG_TEXT");
+    const bool legacy_debug_text = legacy_debug_text_env != nullptr && std::string(legacy_debug_text_env) == "1";
 
     // Real per-slot icon resolution (Phase 56) - the one real place
     // every hotbar/inventory/workbench slot-population call site below
@@ -4236,7 +4259,7 @@ int main() {
         }
 
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
-        renderer.flush_ui_quads(ui2d_program, atlas_texture);
+        renderer.flush_ui_quads(ui2d_program, atlas_texture, font_atlas_texture);
         if (ui_had_quads && bgfx::isValid(ui2d_program)) {
             ++draw_calls;
         }
@@ -4260,30 +4283,34 @@ int main() {
             lcu::ui::draw_debug_overlay(
                 renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
                 {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
-                 job_system.unfinished_job_count()});
+                 job_system.unfinished_job_count()},
+                legacy_debug_text);
         }
         // Real hotbar item-count labels (Phase 47) - same options.
         // hud_enabled gate as queue_hud_quads above.
         if (options.hud_enabled) {
-            lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height);
+            lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height,
+                                      legacy_debug_text);
         }
         // Real inventory screen slot-count labels (Phase 49.1) - drawn
         // after the debug overlay/HUD text for the same reason menu row
         // labels are (see below): the inventory screen is meant to be
         // readable while it's open.
         if (inventory_open) {
-            lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state);
+            lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state, legacy_debug_text);
         }
         // Real workbench screen slot-count labels (Phase 50.3) - same
         // reasoning as the inventory screen's own labels above.
         if (workbench_open) {
-            lcu::ui::draw_crafting_table_screen_labels(renderer, workbench_layout, workbench_state);
+            lcu::ui::draw_crafting_table_screen_labels(renderer, workbench_layout, workbench_state,
+                                                        legacy_debug_text);
         }
         // Menu row labels last - drawn on top of (after) the debug
         // overlay/HUD text, since the pause menu is meant to be the one
         // thing actually readable while it's open.
         if (!menu_stack.empty()) {
-            lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
+            lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height,
+                                       legacy_debug_text);
         }
         renderer.end_frame();
 #endif
@@ -4321,6 +4348,7 @@ int main() {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
     }
     renderer.destroy_texture(atlas_texture);
+    renderer.destroy_texture(font_atlas_texture);
 #endif
 
     LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),

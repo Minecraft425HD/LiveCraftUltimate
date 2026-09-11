@@ -4,6 +4,7 @@
 
 #include "lcu/math/vec4.h"
 #include "lcu/rendering/renderer.h"
+#include "lcu/ui/text_renderer.h"
 
 namespace lcu::ui {
 
@@ -21,6 +22,10 @@ constexpr math::Vec4 kHungerEmptyColor{0.2f, 0.15f, 0.05f, 0.8f};
 constexpr math::Vec4 kHungerFullColor{0.65f, 0.45f, 0.15f, 1.0f};
 
 constexpr f32 kSlotBorderThickness = 2.0f;
+
+// Real text-renderer color (Phase 57) matching kColorCount's legacy VGA
+// white-on-black attribute.
+constexpr math::Vec4 kTextWhite{1.0f, 1.0f, 1.0f, 1.0f};
 }  // namespace
 
 void queue_hud_quads(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height) {
@@ -70,7 +75,8 @@ void queue_hud_quads(rendering::Renderer& renderer, const HudState& state, u32 s
     }
 }
 
-void draw_hud_labels(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height) {
+void draw_hud_labels(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height,
+                      bool legacy_debug_text) {
     const std::array<HotbarSlotRect, kHotbarSlotCount> slots = hotbar_slot_layout(screen_width, screen_height);
     for (usize i = 0; i < kHotbarSlotCount; ++i) {
         const HotbarItem& item = state.hotbar[i];
@@ -78,17 +84,26 @@ void draw_hud_labels(rendering::Renderer& renderer, const HudState& state, u32 s
             continue;
         }
         const HotbarSlotRect& slot = slots[i];
-        // Bottom-right corner of the slot, in whichever real character
-        // cell that pixel position falls into - bgfx's debug-text font
-        // is a coarse 8x16 grid (see debug_overlay.cpp's own comment),
-        // so this is an approximation, not pixel-perfect alignment, the
-        // same honest trade-off every other debug-text HUD element here
-        // already makes.
-        const auto cell_x = static_cast<u16>((slot.x + slot.size - static_cast<f32>(kCharWidthPx)) /
-                                              static_cast<f32>(kCharWidthPx));
-        const auto cell_y = static_cast<u16>((slot.y + slot.size - static_cast<f32>(kCharHeightPx) * 0.5f) /
-                                              static_cast<f32>(kCharHeightPx));
-        renderer.draw_debug_text(cell_x, cell_y, kColorCount, std::to_string(item.count));
+        const std::string text = std::to_string(item.count);
+        if (legacy_debug_text) {
+            // Bottom-right corner of the slot, in whichever real
+            // character cell that pixel position falls into - bgfx's
+            // debug-text font is a coarse 8x16 grid (see
+            // debug_overlay.cpp's own comment), so this is an
+            // approximation, not pixel-perfect alignment.
+            const auto cell_x = static_cast<u16>((slot.x + slot.size - static_cast<f32>(kCharWidthPx)) /
+                                                  static_cast<f32>(kCharWidthPx));
+            const auto cell_y = static_cast<u16>((slot.y + slot.size - static_cast<f32>(kCharHeightPx) * 0.5f) /
+                                                  static_cast<f32>(kCharHeightPx));
+            renderer.draw_debug_text(cell_x, cell_y, kColorCount, text);
+        } else {
+            // Real pixel-accurate bottom-right placement - no character-
+            // cell rounding needed once actual glyph quads are drawn.
+            const f32 text_width = TextRenderer::measure_text_width(text);
+            const f32 px = slot.x + slot.size - text_width;
+            const f32 py = slot.y + slot.size - kGlyphCellHeight;
+            TextRenderer::draw_text(renderer, text, px, py, kTextWhite);
+        }
     }
 }
 

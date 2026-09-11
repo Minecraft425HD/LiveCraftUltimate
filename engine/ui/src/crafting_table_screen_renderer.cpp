@@ -4,6 +4,7 @@
 
 #include "lcu/math/vec4.h"
 #include "lcu/rendering/renderer.h"
+#include "lcu/ui/text_renderer.h"
 
 namespace lcu::ui {
 
@@ -18,6 +19,10 @@ constexpr math::Vec4 kSlotFillColor{0.15f, 0.15f, 0.15f, 0.65f};
 constexpr math::Vec4 kResultBorderColor{0.9f, 0.85f, 0.3f, 0.9f};
 constexpr f32 kSlotBorderThickness = 2.0f;
 constexpr f32 kIconInsetRatio = 0.2f;
+
+// Real text-renderer color (Phase 57) matching kColorCount's legacy VGA
+// white-on-black attribute.
+constexpr math::Vec4 kTextWhite{1.0f, 1.0f, 1.0f, 1.0f};
 
 void queue_slot(rendering::Renderer& renderer, const InventorySlotRect& rect, const InventorySlotDisplay& display,
                  bool highlight_border) {
@@ -38,15 +43,24 @@ void queue_slot(rendering::Renderer& renderer, const InventorySlotRect& rect, co
     }
 }
 
-void draw_slot_label(rendering::Renderer& renderer, const InventorySlotRect& rect, const InventorySlotDisplay& display) {
+void draw_slot_label(rendering::Renderer& renderer, const InventorySlotRect& rect, const InventorySlotDisplay& display,
+                      bool legacy_debug_text) {
     if (!display.has_item || display.count <= 1) {
         return;
     }
-    const auto cell_x =
-        static_cast<u16>((rect.x + rect.size - static_cast<f32>(kCharWidthPx)) / static_cast<f32>(kCharWidthPx));
-    const auto cell_y = static_cast<u16>((rect.y + rect.size - static_cast<f32>(kCharHeightPx) * 0.5f) /
-                                          static_cast<f32>(kCharHeightPx));
-    renderer.draw_debug_text(cell_x, cell_y, kColorCount, std::to_string(display.count));
+    const std::string text = std::to_string(display.count);
+    if (legacy_debug_text) {
+        const auto cell_x =
+            static_cast<u16>((rect.x + rect.size - static_cast<f32>(kCharWidthPx)) / static_cast<f32>(kCharWidthPx));
+        const auto cell_y = static_cast<u16>((rect.y + rect.size - static_cast<f32>(kCharHeightPx) * 0.5f) /
+                                              static_cast<f32>(kCharHeightPx));
+        renderer.draw_debug_text(cell_x, cell_y, kColorCount, text);
+    } else {
+        const f32 text_width = TextRenderer::measure_text_width(text);
+        const f32 px = rect.x + rect.size - text_width;
+        const f32 py = rect.y + rect.size - kGlyphCellHeight;
+        TextRenderer::draw_text(renderer, text, px, py, kTextWhite);
+    }
 }
 
 }  // namespace
@@ -82,22 +96,27 @@ void queue_crafting_table_screen_quads(rendering::Renderer& renderer, const Craf
 }
 
 void draw_crafting_table_screen_labels(rendering::Renderer& renderer, const CraftingTableScreenLayout& layout,
-                                        const CraftingTableScreenState& state) {
+                                        const CraftingTableScreenState& state, bool legacy_debug_text) {
     for (usize i = 0; i < kCraftingTableGridSlotCount; ++i) {
-        draw_slot_label(renderer, layout.grid_input[i], state.grid_input[i]);
+        draw_slot_label(renderer, layout.grid_input[i], state.grid_input[i], legacy_debug_text);
     }
-    draw_slot_label(renderer, layout.result, state.result);
+    draw_slot_label(renderer, layout.result, state.result, legacy_debug_text);
     for (usize i = 0; i < kInventoryMainSlotCount; ++i) {
-        draw_slot_label(renderer, layout.main_slots[i], state.main_slots[i]);
+        draw_slot_label(renderer, layout.main_slots[i], state.main_slots[i], legacy_debug_text);
     }
     for (usize i = 0; i < kHotbarSlotCount; ++i) {
-        draw_slot_label(renderer, layout.hotbar_slots[i], state.hotbar_slots[i]);
+        draw_slot_label(renderer, layout.hotbar_slots[i], state.hotbar_slots[i], legacy_debug_text);
     }
 
     if (state.cursor.has_item && state.cursor.count > 1) {
-        const auto cell_x = static_cast<u16>(state.cursor_x / static_cast<f32>(kCharWidthPx));
-        const auto cell_y = static_cast<u16>(state.cursor_y / static_cast<f32>(kCharHeightPx));
-        renderer.draw_debug_text(cell_x, cell_y, kColorCount, std::to_string(state.cursor.count));
+        const std::string text = std::to_string(state.cursor.count);
+        if (legacy_debug_text) {
+            const auto cell_x = static_cast<u16>(state.cursor_x / static_cast<f32>(kCharWidthPx));
+            const auto cell_y = static_cast<u16>(state.cursor_y / static_cast<f32>(kCharHeightPx));
+            renderer.draw_debug_text(cell_x, cell_y, kColorCount, text);
+        } else {
+            TextRenderer::draw_text(renderer, text, state.cursor_x, state.cursor_y, kTextWhite);
+        }
     }
 }
 

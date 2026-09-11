@@ -2,7 +2,61 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57
+
+### Phase 57
+
+- **Real bitmap-font atlas**: new `engine/assets::font_atlas.{h,cpp}` -
+  a real, own-design procedurally-generated monospace font covering
+  ASCII 32-126 (95 characters), one glyph per 6x8-pixel cell (a 5x7
+  glyph plus 1px right/bottom spacing), packed into its own separate
+  96x48 RGBA8 atlas (deliberately NOT merged into the Phase 53 block
+  atlas - see DECISIONS.md). Each glyph is real hand-authored 5x7 dot-
+  matrix art (95 characters, not a transcription of any existing font
+  file), rasterized to opaque-white/transparent pixels by a real,
+  deterministic `generate_glyph_pixels(char)` so one texture can be
+  tinted to any text color at draw time. Same half-texel UV-inset
+  anti-bleed technique as `texture_atlas.h`. 12 new unit tests
+  (`FontAtlasConstants`, `GlyphUvRange.*` incl. an out-of-range->'?'
+  fallback check, `GenerateGlyphPixels.*` incl. a determinism check,
+  `BuildFontAtlasPixels.*` incl. a full atlas-vs-generator byte match).
+- **Real text renderer**: new `engine::ui::TextRenderer` - stateless,
+  `draw_text(renderer, text, x, y, color, scale)` queues one real
+  textured quad per character via the new `Renderer::
+  submit_text_glyph_quad`, and `measure_text_width` for right-
+  alignment. `UiVertex2D`'s per-vertex sample flag becomes a real
+  tri-state (0 flat color / 1 item-atlas RGB-as-is / 2 font-atlas RGB
+  tinted by vertex color); `fs_ui2d.sc` gains a second real sampler
+  (`s_font`, its own texture slot) and a chained-`mix()` selector
+  picking the right one of the three per pixel, all within the SAME
+  single UI draw call/batch a frame already had - no extra draw calls
+  for text.
+- **HUD/menu/inventory/workbench now render real text**: `draw_debug_
+  overlay`/`draw_hud_labels`/`draw_menu_labels`/`draw_inventory_screen_
+  labels`/`draw_crafting_table_screen_labels` all gain a real
+  `legacy_debug_text` parameter - `false` (the new default) draws
+  through `TextRenderer`'s real bitmap-font atlas at real pixel
+  positions (no more character-cell rounding for e.g. hotbar item
+  counts); `true` keeps every one of those functions' exact previous
+  `bgfx::dbgTextPrintf`-based behavior, unchanged, as a real working
+  fallback - `LCU_LEGACY_DEBUG_TEXT=1` (`client/main.cpp`) switches all
+  five over live.
+- Verified via real headless runs (`Font atlas: font_atlas_texture_
+  valid=true`, clean 30-frame runs under both the new and legacy text
+  paths), real `LCU_VERIFY_MENU`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_
+  WORKBENCH` runs (the three real UI screens whose labels now go
+  through `TextRenderer`, all complete their full 60 frames cleanly),
+  real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs
+  (still byte-identical gameplay-logic output), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (`fs_ui2d.sc`/`vs_ui2d.sc` compile
+  cleanly to spirv/glsl/essl with the new sampler/mix logic). `ctest`
+  575/575 (bgfx, up from 563) / 567/567 (non-bgfx, up from 555).
+- Honestly scoped: what the real bitmap font actually looks like
+  rendered on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; the hand-authored 5x7 glyph shapes are plain geometric
+  block letters, not aiming for real typographic refinement; text has
+  no kerning (fixed-width monospace advance only, by design); this
+  closes out the Phase 53-57 program - see PROJECT_STATE.md.
 
 ### Phase 56
 

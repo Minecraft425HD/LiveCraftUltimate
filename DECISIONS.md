@@ -3763,3 +3763,71 @@ for, and deferred as a named, honest limitation instead of silently
 special-cased per-item hackery (e.g. hiding the torch's alpha-holed
 pixels by editing its dropped-item color) that would have masked the
 real gap rather than documenting it.
+
+## 2026-09-11 — Phase 57: a separate font atlas, a hand-authored glyph table, and a tri-state UI sample mode
+
+**Context:** Phase 57, the last phase of the "Phasen 53-57" texture/
+font program, adds a real bitmap-font atlas and text renderer, replacing
+bgfx's built-in debug-text buffer as the default way HUD/menu/inventory/
+workbench labels draw.
+
+**The font atlas is a genuinely separate texture from the Phase 53
+block/item atlas, not packed into it, even though both are real GPU
+RGBA textures the UI shader can sample.** The directive's own wording
+("font atlas separate from block atlas") already settles this, but it's
+also the right call independent of that: block/item textures and font
+glyphs change on completely unrelated schedules (adding a new block
+type vs. adding font styling), have unrelated tile-size geometry (16x16
+vs. 6x8), and packing them into one shared atlas would only have
+coupled two independent concerns for zero real benefit. The cost is a
+second real sampler slot (`s_font`, alongside the existing `s_atlas`)
+bound in the SAME `flush_ui_quads()` draw call - both atlases are
+available to every UI quad in one batch, so this doesn't cost an extra
+draw call, just one more `bgfx::setTexture()` per frame.
+
+**Font glyphs are a real, hand-authored 5x7 dot-matrix bitmap table
+(95 characters x 7 rows of 5-bit-wide ASCII art), not an algorithmically
+rendered "stroke recipe" font.** A segment-based/stroke-rasterized
+letterform generator (drawing each character from a small reusable set
+of line-segment primitives, similar in spirit to a 16-segment LED
+display) was considered first, since it would have meant less literal
+per-character data to author and verify by hand. It was rejected because
+a segment model expressive enough to cleanly render all 95 real ASCII
+characters (uppercase, lowercase, digits, and 33 varied punctuation/
+symbol shapes) at only 5x7 pixels would itself have needed real, careful
+per-character tuning to stay legible - not meaningfully less authoring
+work than hand-drawing the bitmaps directly, while adding a whole
+intermediate rasterization layer to reason about and get right. Plain
+ASCII-art bitmap rows (`.` empty, `#` lit) are directly, visually
+checkable by reading the source, and their correctness was mechanically
+verified (character-code sequence 32..126 with no gaps/dupes, every row
+exactly 5 characters, 665 total row-strings = 95 x 7) before the code
+was ever built - see BUILD_STATUS.md. Every shape here is this
+project's own original design, not a transcription of any real/existing
+font file, matching the "own design, no external font file" requirement
+the directive itself states.
+
+**`UiVertex2D`'s existing Phase 56 per-vertex `use_texture` flag became
+a real tri-state (0 flat color / 1 item-atlas / 2 font-atlas, tinted)
+rather than adding a second boolean flag alongside it.** A second flag
+would have needed its own vertex-layout attribute (another 4 bytes/
+vertex) and its own `$input`/`$output` wiring through `varying_ui2d.
+def.sc`/`vs_ui2d.sc` for a distinction that's genuinely mutually
+exclusive per-quad (a quad is flat, OR item-textured, OR font-textured
+- never two at once), so an integer tri-state on the one existing float
+field costs nothing extra and models the real constraint directly.
+`fs_ui2d.sc` implements the 3-way selection as two chained `mix()`
+calls (`clamp(mode,0,1)` then `max(mode-1,0)`) rather than a branch -
+functionally equivalent for the three real integer values 0/1/2, and
+keeps the fragment shader branch-free, consistent with how `fs_chunk.
+sc`'s own `u_useTextures` mix was written in Phase 53.
+
+**Alternatives considered:** merging the font atlas into the block/item
+atlas's own spare tile slots - rejected per the directive's own explicit
+separation and the "unrelated change schedules" reasoning above; a
+stroke/segment-based procedural letterform generator - rejected as not
+actually less authoring effort at this resolution, see above; a second
+boolean vertex flag instead of widening the existing one to a tri-state
+- rejected as unnecessary extra vertex-layout/varying surface for a
+real mutually-exclusive choice a single tri-state field already models
+correctly.

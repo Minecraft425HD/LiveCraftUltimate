@@ -2366,6 +2366,44 @@ sky-shader family still has no alpha blending, so a dropped torch's
 transparent texture pixels render solid black on its billboard rather
 than see-through (a real, accepted limitation, see DECISIONS.md).
 
+## Phase 57 — Bitmap font atlas + real text renderer
+
+- [x] New `engine/assets::font_atlas.{h,cpp}` - real, own-design
+  procedurally-generated monospace font, ASCII 32-126 (95 chars), 6x8
+  cells (5x7 glyph + 1px spacing), packed into its own SEPARATE 96x48
+  RGBA8 atlas (not merged into the Phase 53 block atlas - directive's
+  own wording + independent reasoning, see DECISIONS.md). 95
+  hand-authored 5x7 dot-matrix glyphs, deterministic
+  `generate_glyph_pixels`, same half-texel UV-inset anti-bleed as
+  `texture_atlas.h`.
+- [x] New `engine::ui::TextRenderer` - stateless `draw_text`/
+  `measure_text_width`, one real quad per character via new
+  `Renderer::submit_text_glyph_quad`.
+- [x] `UiVertex2D`'s per-vertex sample flag becomes a real tri-state (0
+  flat / 1 item-atlas as-is / 2 font-atlas tinted by vertex color);
+  `fs_ui2d.sc` gains a second sampler (`s_font`) and a chained-mix
+  3-way selector - still one draw call/batch.
+- [x] `draw_debug_overlay`/`draw_hud_labels`/`draw_menu_labels`/
+  `draw_inventory_screen_labels`/`draw_crafting_table_screen_labels`
+  all gain a real `legacy_debug_text` param - false (new default) draws
+  through TextRenderer at real pixel positions; true keeps the exact
+  old `bgfx::dbgTextPrintf` behavior (`LCU_LEGACY_DEBUG_TEXT=1`).
+- [x] 12 new unit tests (`FontAtlasConstants`, `GlyphUvRange.*`,
+  `GenerateGlyphPixels.*`, `BuildFontAtlasPixels.*`).
+- [x] Verified via real headless runs (`Font atlas: font_atlas_texture_
+  valid=true`), real `LCU_VERIFY_MENU`/`INVENTORY`/`WORKBENCH` runs
+  (all three real UI-text screens complete cleanly), real
+  `LCU_VERIFY_BREAK_PLACE`/`HEALTH` regression runs (byte-identical),
+  and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+
+`ctest` 575/575 (bgfx, up from 563) / 567/567 (non-bgfx, up from 555).
+
+Honestly scoped: what the real bitmap font looks like rendered on a
+real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+glyph shapes are plain geometric block letters, not refined typography;
+no kerning (fixed monospace advance only, by design). This closes out
+the Phase 53-57 program in full.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

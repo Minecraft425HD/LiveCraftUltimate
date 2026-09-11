@@ -58,6 +58,9 @@ Renderer::~Renderer() {
         if (bgfx::isValid(atlas_sampler_)) {
             bgfx::destroy(atlas_sampler_);
         }
+        if (bgfx::isValid(font_sampler_)) {
+            bgfx::destroy(font_sampler_);
+        }
         bgfx::shutdown();
     }
 }
@@ -130,6 +133,10 @@ bool Renderer::init(const RendererDesc& desc) {
     tile_step_uniform_ = bgfx::createUniform("u_tileStep", bgfx::UniformType::Vec4);
     tile_inset_uniform_ = bgfx::createUniform("u_tileInset", bgfx::UniformType::Vec4);
     atlas_sampler_ = bgfx::createUniform("s_atlas", bgfx::UniformType::Sampler);
+
+    // Phase 57 - the font atlas's own separate sampler slot (bound to
+    // slot 1 by flush_ui_quads, `atlas_sampler_` above stays slot 0).
+    font_sampler_ = bgfx::createUniform("s_font", bgfx::UniformType::Sampler);
 
     initialized_ = true;
     return true;
@@ -539,7 +546,31 @@ void Renderer::submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, cons
     ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
 }
 
-void Renderer::flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture) {
+void Renderer::submit_text_glyph_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0,
+                                       f32 u1, f32 v1) {
+    LCU_ASSERT(initialized_);
+
+    const f32 left = x;
+    const f32 right = x + width;
+    const f32 top = y;
+    const f32 bottom = y + height;
+    const UiVertex2D gv0{left, top, u0, v0, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv1{right, top, u1, v0, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv2{right, bottom, u1, v1, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv3{left, bottom, u0, v1, color.x, color.y, color.z, color.w, 2.0f};
+
+    const auto base = static_cast<u16>(ui_vertices_.size());
+    ui_vertices_.push_back(gv0);
+    ui_vertices_.push_back(gv1);
+    ui_vertices_.push_back(gv2);
+    ui_vertices_.push_back(gv3);
+    const u16 quad_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                  base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+    ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
+}
+
+void Renderer::flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture,
+                               bgfx::TextureHandle font_atlas_texture) {
     LCU_ASSERT(initialized_);
 
     if (bgfx::isValid(program) && !ui_vertices_.empty()) {
@@ -578,6 +609,13 @@ void Renderer::flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle a
             // atlas_texture parameter in this class establishes.
             if (bgfx::isValid(atlas_texture)) {
                 bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+            }
+            // Real font-atlas binding (Phase 57) - same "only bound
+            // when actually handed one" contract as atlas_texture
+            // above, its own separate slot (1, s_font) so both atlases
+            // can be sampled within this one draw call.
+            if (bgfx::isValid(font_atlas_texture)) {
+                bgfx::setTexture(1, font_sampler_, font_atlas_texture);
             }
             // No depth test/write (2D overlay, always on top - see
             // kUi2dViewId's own comment), real alpha blending (a menu

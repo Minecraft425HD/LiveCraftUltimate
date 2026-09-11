@@ -17,13 +17,16 @@ namespace lcu::ui {
 // into the same single draw call as the crosshair/menu backdrop.
 void queue_hud_quads(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height);
 
-// Draws each hotbar slot's real held-item count via bgfx debug text -
-// the same mechanism draw_debug_overlay/draw_menu_labels already use.
-// Calls Renderer::clear_debug_text() itself, so call this AFTER
-// draw_debug_overlay()/draw_menu_labels() if either might run the same
-// frame - otherwise their own clear would wipe these labels (or this
-// would wipe theirs - see client/main.cpp for the real ordering this
-// phase settled on).
-void draw_hud_labels(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height);
+// Draws each hotbar slot's real held-item count - via the real
+// lcu::ui::TextRenderer bitmap-font atlas by default, or bgfx's
+// built-in debug-text buffer when `legacy_debug_text` is true (Phase
+// 57, same real toggle draw_debug_overlay's own doc comment describes;
+// see client/main.cpp's LCU_LEGACY_DEBUG_TEXT). client/main.cpp owns
+// the one real Renderer::clear_debug_text() call this frame, before any
+// of the debug-text writers (this, draw_debug_overlay, draw_menu_labels)
+// run - only relevant when `legacy_debug_text` is true, TextRenderer has
+// no shared buffer to clear.
+void draw_hud_labels(rendering::Renderer& renderer, const HudState& state, u32 screen_width, u32 screen_height,
+                      bool legacy_debug_text);
 
 }  // namespace lcu::ui

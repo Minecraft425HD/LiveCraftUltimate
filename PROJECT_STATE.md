@@ -50,12 +50,15 @@ fall damage, respawn)**, **Phase 52 (documentation)**, **Phase 53
 **Phase 54 (17 real procedurally-generated MC-style textures,
 not yet wired to any block/item at that point)**,
 **Phase 55 (blocks now reference real Phase-54 textures per-face)**,
-and **Phase 56 (items - inventory, hotbar, hand, dropped items - now
+**Phase 56 (items - inventory, hotbar, hand, dropped items - now
 reference the same atlas, reusing a block's own texture where an item
-represents a block)** are done; a fourth user-directed program (Phases
+represents a block)**, and **Phase 57 (a real, own-design procedurally-
+generated bitmap-font atlas + `engine::ui::TextRenderer`, now the
+default way HUD/menu/inventory/workbench labels draw, with bgfx's old
+debug-text buffer kept as a real `LCU_LEGACY_DEBUG_TEXT=1` fallback)**
+are done - this closes out the fourth user-directed program (Phases
 53-57: texture atlas, procedural MC-style textures, blocks/items on the
-atlas, a bitmap font + real text renderer) is now in progress, with only
-Phase 57 (bitmap font atlas + real text renderer) left - see
+atlas, a bitmap font + real text renderer) in full. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2460,16 +2463,20 @@ None currently tracked.
   exist anywhere (`break_sound`/`place_sound` in `VoxelClient`), both
   procedurally generated sine tones — no real sound-effect content
   pipeline (loading/authoring actual game audio) exists yet.
-- `engine/ui::draw_debug_overlay` (and every other debug-text call site
-  - HUD item counts, menu labels, inventory/workbench slot counts)
+- ~~`engine/ui::draw_debug_overlay` (and every other debug-text call
+  site - HUD item counts, menu labels, inventory/workbench slot counts)
   still uses bgfx's built-in VGA-style debug-text character buffer, not
-  a real font/texture-atlas text renderer. ~~No texture atlas exists
-  yet~~ **No longer true** (Phase 53): a real 256x256 procedural-texture
-  atlas exists and blocks/items both render through it (Phases 54-56).
-  A real bitmap-font atlas + `engine::ui::TextRenderer` is Phase 57's
-  own job, still pending at the time of writing. Text is monospace
-  ASCII only, fixed 8x16 (or 8x8) character cells, no styling beyond the
-  VGA 16-color palette, until Phase 57 lands.
+  a real font/texture-atlas text renderer~~ **Fixed** (Phase 57): a
+  real, own-design procedurally-generated bitmap-font atlas
+  (`engine/assets::font_atlas.h`, ASCII 32-126, separate from the
+  Phase 53 block atlas) plus `engine::ui::TextRenderer` is now the
+  DEFAULT text-drawing path for all five of those functions, at real
+  pixel positions (no more character-cell rounding). bgfx's own
+  debug-text buffer stays available as a real, working fallback via
+  `LCU_LEGACY_DEBUG_TEXT=1` - not removed, just no longer the default.
+  Text is still monospace-only (no kerning) and limited to the same
+  ASCII 32-126 range the font atlas covers (a character outside that
+  falls back to '?').
 - The on-screen touch-control legend has no interactive elements of its
   own (no buttons a mouse/gamepad can click) — it draws where
   `TouchInputBackend`'s real touch-button rects are, for a player to
