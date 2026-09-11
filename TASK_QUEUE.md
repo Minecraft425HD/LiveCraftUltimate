@@ -1273,6 +1273,49 @@ reuses the exact same `chunk_serializer` API `VoxelServer` already
 round-trip-tests; lateral sky light bleed under overhangs remains
 unmodeled (documented since Phase 6).
 
+## Phase 36 — Entity boxes + extended debug overlay
+
+Real entity visualization plus real, honestly-scoped overlay numbers.
+
+- [x] **Entity debug boxes**: new `Renderer::submit_wireframe_box`
+  draws a 12-edge line-list box, reusing `submit_billboard`'s exact
+  position+color vertex format/shader (Phase 27's sky program) rather
+  than a third shader pair. Real depth testing against terrain, no
+  depth write. Wired into `VoxelClient`: one box per local AI entity
+  (single-player) or remote interpolated entity (networked), reusing
+  `make_player_aabb` (the exact box shape the player's own collision
+  already uses).
+- [x] **Extended debug overlay**: new `DebugOverlayStats` struct
+  carries chunks loaded, entity count, real draw-call count, and
+  unfinished job count into `draw_debug_overlay`'s new second
+  on-screen text line. New `JobSystem::unfinished_job_count()`
+  accessor (lock-guarded, 3 new unit tests).
+- [x] **Deliberately not added**: CPU/GPU/RAM/ping/bandwidth - no real
+  per-platform CPU/RAM reader or per-connection RTT/byte-counter
+  exists in this codebase yet, and a fake placeholder number would
+  violate this project's own "never claim more than what's verified"
+  discipline (brief section 96) - see DECISIONS.md.
+- [x] Draw-call counting mirrors each `submit_*` call's own no-op-on-
+  invalid-program condition (every `submit_*` silently no-ops when its
+  shader program is invalid), so it reflects what actually reached
+  `bgfx::submit()`, never an over-count.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`"Chunk shader program valid=true"`/`"Sky shader program
+  valid=true"` - confirming the new wireframe-box draw call executes
+  against real compiled shaders, not just `Noop`), a real
+  `LCU_VERIFY_BREAK_PLACE` run (zero regressions), and a real
+  two-process networked run (100 frames, 3 remote AI entities
+  interpolated and boxed every frame, zero warnings/errors).
+
+`ctest` 392/392 (bgfx, up from 389) / 389/389 (non-bgfx, up from 386).
+
+Honestly scoped: **what the wireframe boxes or overlay text actually
+look like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION**; CPU/GPU/RAM/ping/bandwidth remain deliberately absent
+from the overlay until this codebase has a real source for them
+(Phase 42's documentation pass, or a dedicated future phase, would be
+the place to revisit if ever prioritized).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

@@ -2,7 +2,52 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36
+
+### Phase 36
+
+- **Entity debug boxes**: new `Renderer::submit_wireframe_box` draws an
+  axis-aligned box as 12 line-list edges, reusing the exact minimal
+  position+color vertex format/shader `submit_billboard` (Phase 27)
+  already established (`vs_sky.sc`/`fs_sky.sc` - unlit, no lighting
+  concept needed) rather than adding a third shader pair. Drawn into
+  the terrain view with real depth testing (occluded correctly behind
+  solid terrain), depth write off (a debug aid shouldn't leave a mark
+  other draws test against). Wired into `VoxelClient`: one box per
+  local AI entity (single-player) or per remote interpolated entity
+  (networked), reusing `make_player_aabb` - the exact box shape the
+  player's own collision already uses, since `Position` has always
+  been a feet position for both the player and AI/remote entities.
+- **Extended debug overlay** (brief section 60's "CPU/GPU/RAM/chunks/
+  entities/ping/bandwidth/draw-calls/jobs" line): a new
+  `DebugOverlayStats` struct carries chunks loaded, entity count, real
+  draw-call count, and unfinished job count into `draw_debug_overlay`,
+  rendered as a second real on-screen text line. New
+  `JobSystem::unfinished_job_count()` accessor (lock-guarded, 3 new
+  unit tests) supplies the jobs number. CPU/GPU/RAM and ping/bandwidth
+  are deliberately NOT added - this codebase has no real per-platform
+  CPU/RAM reader or per-connection RTT/byte-counter yet, and a fake
+  placeholder number would violate this project's own "never claim
+  more than what's verified" discipline (see DECISIONS.md).
+- Draw-call counting reflects what actually reached
+  `bgfx::submit()`, not merely what was attempted: every
+  `submit_*()` call silently no-ops on an invalid program (e.g.
+  `LCU_BUILD_SHADER_TOOLS` off), so each counter increment mirrors
+  that same no-op condition rather than over-reporting a call that
+  produced nothing.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run showing
+  `"Chunk shader program valid=true"`/`"Sky shader program
+  valid=true"` (confirming the new wireframe-box draw call executes
+  against real compiled shaders, not just the `Noop` backend), a real
+  `LCU_VERIFY_BREAK_PLACE` run (zero regressions), and a real
+  two-process networked run (100 frames, 3 remote AI entities
+  interpolated and boxed every frame, zero warnings/errors).
+- `ctest` 392/392 (bgfx, up from 389) / 389/389 (non-bgfx, up from
+  386).
+- Honestly scoped: **what the wireframe boxes or overlay text actually
+  look like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; CPU/GPU/RAM/ping/bandwidth remain deliberately absent
+  from the overlay until this codebase has a real source for them.
 
 ### Phase 35
 

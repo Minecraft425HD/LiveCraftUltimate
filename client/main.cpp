@@ -215,6 +215,11 @@ constexpr lcu::f32 kCelestialHalfSize = 12.0f;
 constexpr lcu::math::Vec3 kSunColor{1.0f, 0.95f, 0.75f};
 constexpr lcu::math::Vec3 kMoonColor{0.75f, 0.8f, 0.9f};
 
+// Entity debug box color (Phase 36, brief section 60): a bright,
+// unmistakably-not-terrain red, matching the classic "debug wireframe"
+// convention most engines use.
+constexpr lcu::math::Vec3 kEntityBoxColor{1.0f, 0.1f, 0.1f};
+
 // If LCU_CONNECT_PORT is set, VoxelClient connects to a VoxelServer on
 // 127.0.0.1:<port> at startup (brief section 64/Phase 8) instead of
 // running fully single-player/local. Only loopback IPv4 is supported
@@ -1607,6 +1612,15 @@ int main() {
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
         const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(1.0f, aspect, 0.1f, 500.0f);
 
+        // Real per-frame draw-call count (Phase 36, brief section 60's
+        // debug overlay) - incremented only when a submit_*() call
+        // below actually reached bgfx::submit(), not merely attempted:
+        // every submit_* silently no-ops on an invalid program (e.g.
+        // LCU_BUILD_SHADER_TOOLS off, see BUILD_STATUS.md), so this
+        // mirrors each call's own no-op condition rather than
+        // double-counting a call that produced nothing.
+        lcu::u32 draw_calls = 0;
+
         // Sun/moon (Phase 27) - see kCelestialRadius's doc comment. Direction
         // math lives in game::systems::sun_direction (headlessly unit-tested
         // at the four cardinal phase points) rather than duplicated here.
@@ -1622,10 +1636,16 @@ int main() {
             if (sun_dir.y > -0.05f) {
                 renderer.submit_billboard(camera.position + sun_dir * kCelestialRadius, billboard_right,
                                            billboard_up, kCelestialHalfSize, kSunColor, sky_program, view, proj);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
             }
             if (moon_dir.y > -0.05f) {
                 renderer.submit_billboard(camera.position + moon_dir * kCelestialRadius, billboard_right,
                                            billboard_up, kCelestialHalfSize, kMoonColor, sky_program, view, proj);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
             }
         }
 
@@ -1635,8 +1655,47 @@ int main() {
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
             renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale());
+            if (gpu_mesh.is_valid() && bgfx::isValid(chunk_program)) {
+                ++draw_calls;
+            }
         }
-        lcu::ui::draw_debug_overlay(renderer, renderer_desc.width, renderer_desc.height, last_known_fps);
+
+        // Entity debug boxes (Phase 36, brief section 60) - a real
+        // AABB per visible entity, reusing make_player_aabb (the exact
+        // same box shape the player's own collision already uses; AI/
+        // remote entity Position is a feet position too, same
+        // convention the spawn code already established). Drawn via
+        // the sky program (position+flat-color, no lighting concept -
+        // see submit_wireframe_box's doc comment) since a dedicated
+        // debug shader would be the same shader twice for no reason.
+        lcu::u32 entity_count = 0;
+        if (networked) {
+            for (const auto& [entity_index, interpolator] : remote_entity_interpolators) {
+                const lcu::math::Vec3 pos = interpolator.interpolated_position(network_clock);
+                const lcu::physics::AABB box = make_player_aabb(pos);
+                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
+                ++entity_count;
+            }
+        } else {
+            for (const lcu::ecs::EntityId& entity :
+                 entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
+                const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
+                const lcu::physics::AABB box = make_player_aabb(pos);
+                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
+                ++entity_count;
+            }
+        }
+
+        lcu::ui::draw_debug_overlay(
+            renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
+            {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
+             job_system.unfinished_job_count()});
         renderer.end_frame();
 #endif
 

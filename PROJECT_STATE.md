@@ -32,8 +32,9 @@ sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**,
 cross-chunk propagation)**, **Phase 31 (block-light cross-chunk
 propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 **Phase 33 (VoxelClient integration + smooth lighting)**,
-**Phase 34 (torch block + lighting benchmarks)**, and **Phase 35
-(chunk unload marks neighbors dirty)** are done; see
+**Phase 34 (torch block + lighting benchmarks)**, **Phase 35
+(chunk unload marks neighbors dirty)**, and **Phase 36 (entity boxes +
+extended debug overlay)** are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1194,6 +1195,36 @@ unload is proven by the 60 real files written, and load-from-disk
 reuses the exact same `chunk_serializer` API `VoxelServer` already
 round-trip-tests; lateral sky light bleed under overhangs remains
 unmodeled (documented since Phase 6).
+
+**Phase 36 (entity boxes + extended debug overlay)**: new
+`Renderer::submit_wireframe_box` draws a 12-edge line-list box,
+reusing `submit_billboard`'s exact position+color vertex format/shader
+(Phase 27's sky program) rather than a third shader pair - real depth
+testing against terrain, no depth write. Wired into `VoxelClient`: one
+box per local AI entity or remote interpolated entity, reusing
+`make_player_aabb`. A new `DebugOverlayStats` struct carries chunks
+loaded/entity count/real draw-call count/unfinished job count into
+`draw_debug_overlay`'s new second on-screen text line; new
+`JobSystem::unfinished_job_count()` accessor. CPU/GPU/RAM/ping/
+bandwidth deliberately NOT added - no real per-platform CPU/RAM reader
+or per-connection RTT/byte-counter exists yet, and a fake placeholder
+would violate this project's own verification discipline (see
+DECISIONS.md). Draw-call counting mirrors each `submit_*` call's own
+no-op-on-invalid-program condition, so it never over-reports.
+
+3 new unit tests (`JobSystem.UnfinishedJobCount*`). Verified via a
+real `LCU_BUILD_SHADER_TOOLS=ON` run (`"Chunk shader program
+valid=true"`/`"Sky shader program valid=true"` - the new wireframe-box
+draw call executing against real compiled shaders, not just `Noop`), a
+real `LCU_VERIFY_BREAK_PLACE` run, and a real two-process networked
+run (100 frames, 3 remote AI entities boxed every frame, zero
+warnings). `ctest` 392/392 (bgfx, up from 389) / 389/389 (non-bgfx, up
+from 386).
+
+Honestly scoped: **what the wireframe boxes or overlay text actually
+look like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION**; CPU/GPU/RAM/ping/bandwidth remain deliberately absent
+from the overlay until this codebase has a real source for them.
 
 ## Build Status
 

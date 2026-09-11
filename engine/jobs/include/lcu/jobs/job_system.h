@@ -85,6 +85,18 @@ class JobSystem : public NonCopyable {
 
     u32 worker_count() const { return static_cast<u32>(workers_.size()); }
 
+    // Jobs submitted but not yet Complete/Cancelled right now (Phase 36,
+    // brief section 60's debug overlay "jobs" stat) - a real, if
+    // usually near-zero, number for this codebase's current usage
+    // pattern (every call site submits then immediately waits, so a
+    // job is rarely in flight long enough to observe here), rather
+    // than a fake/hardcoded placeholder for a stat this system doesn't
+    // otherwise track anywhere.
+    u64 unfinished_job_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return unfinished_count_;
+    }
+
    private:
     struct JobRecord {
         JobPriority priority = JobPriority::Normal;

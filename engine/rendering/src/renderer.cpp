@@ -201,6 +201,68 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
     bgfx::submit(kSkyViewId, program);
 }
 
+void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
+                                     bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    // Same minimal vertex format submit_billboard's SkyVertex already
+    // uses - position + flat color, no normal/UV/lighting concept.
+    struct LineVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+    };
+
+    const math::Vec3 corners[8] = {
+        {min.x, min.y, min.z}, {max.x, min.y, min.z}, {max.x, max.y, min.z}, {min.x, max.y, min.z},
+        {min.x, min.y, max.z}, {max.x, min.y, max.z}, {max.x, max.y, max.z}, {min.x, max.y, max.z},
+    };
+    LineVertex vertices[8];
+    for (u32 i = 0; i < 8; ++i) {
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+    }
+    // 12 edges of a box, each as one line-list segment (2 indices) -
+    // bottom face, top face, then the 4 verticals connecting them.
+    const u16 indices[24] = {
+        0, 1, 1, 2, 2, 3, 3, 0,  // bottom face (min.y)
+        4, 5, 5, 6, 6, 7, 7, 4,  // top face (max.y)
+        0, 4, 1, 5, 2, 6, 3, 7,  // verticals
+    };
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .end();
+
+    // Transient buffers, same reasoning as submit_billboard: an
+    // entity's box moves every frame, so there's no persistent GPU
+    // buffer worth owning for it.
+    if (bgfx::getAvailTransientVertexBuffer(8, layout) < 8 || bgfx::getAvailTransientIndexBuffer(24) < 24) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 8, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 24);
+    std::memcpy(tvb.data, vertices, sizeof(vertices));
+    std::memcpy(tib.data, indices, sizeof(indices));
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    // Real depth test against terrain (BGFX_STATE_DEPTH_TEST_LESS),
+    // but no depth write - the thin line geometry shouldn't leave a
+    // lasting mark in the depth buffer other draws test against, the
+    // same reasoning a debug aid overlay generally wants. BGFX_STATE_
+    // PT_LINES draws this vertex/index data as a line list instead of
+    // the default triangle list.
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_PT_LINES);
+    bgfx::submit(0, program);
+}
+
 u32 Renderer::end_frame() {
     LCU_ASSERT(initialized_);
     return bgfx::frame();

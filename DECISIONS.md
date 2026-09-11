@@ -2375,3 +2375,59 @@ verification hook (or a spawn/route guaranteed obstacle-free) would be
 the honest way to make long-distance streaming/unloading verification
 reproducible without a manual workaround - not built here, since it's
 tooling, not a product feature, and out of this phase's own scope.
+
+## 2026-09-11 — Entity boxes reuse the sky shader; overlay only shows numbers this codebase can actually produce (Phase 36)
+
+**Context:** Phase 36's brief item is entity debug boxes plus
+extending the debug overlay toward brief section 60's full line:
+"CPU/GPU/RAM/chunks/entities/ping/bandwidth/draw-calls/jobs".
+
+**Decision on boxes:** `Renderer::submit_wireframe_box` deliberately
+reuses `submit_billboard`'s exact vertex format (position + flat
+color) and the already-loaded `sky_program`, rather than adding a
+third minimal shader pair. A debug box has the same rendering need the
+sun/moon quad already established in Phase 27 - no lighting, no
+texture, just a flat color - so a second shader pair would be
+duplicated code solving an already-solved problem. Drawn with real
+depth *testing* (so a box behind a wall is correctly hidden - a debug
+aid that always painted through geometry would be confusing, not
+useful) but no depth *write* (so the thin line geometry doesn't leave
+a lasting mark other draws' depth tests would see).
+
+**Decision on the overlay - only real numbers, nothing invented:**
+`DebugOverlayStats` adds exactly four fields: chunks loaded (`World::
+loaded_chunk_count()`), entity count (a real per-frame tally of boxes
+actually drawn), draw calls (incremented only when a `submit_*` call
+genuinely reached `bgfx::submit()` - mirroring each call's own no-op-
+on-invalid-program condition, not merely "was attempted"), and
+unfinished jobs (`JobSystem::unfinished_job_count()`, a new accessor
+added specifically for this). CPU/GPU/RAM and ping/bandwidth are
+deliberately left out of this phase, not stubbed with a fake `0` or a
+misleading "N/A": this codebase has no real per-platform CPU/RAM
+reader (a Linux-only `/proc` reader would work here but leave every
+other target platform - Windows/macOS/mobile - silently unequal, and
+this project's brief targets all of them equally) and no per-
+connection RTT/byte-counter in `engine/network::Connection` yet.
+Adding a placeholder number for either would be exactly the kind of
+"claims more than what's verified" this project's own discipline
+(brief section 96) forbids - a debug overlay lying about performance
+is worse than one honestly missing a line.
+
+**`JobSystem::unfinished_job_count()`:** a thin, lock-guarded read of
+the existing internal `unfinished_count_` field - no new bookkeeping,
+just exposing a number the system already tracked for its own
+`wait_idle()` logic. Given this codebase's current usage pattern
+(every call site submits a job and immediately waits on it - see
+`remesh_and_upload`), this number is usually 0 or 1 in practice, not a
+deep queue - an honest reflection of how synchronously this vertical
+slice actually uses the job system today, not a claim of heavy
+parallelism that isn't there.
+
+**Alternatives considered:** a `/proc/self/statm`-based RAM reader
+gated to Linux only (rejected - see above, an unequal-across-platforms
+stat is worse than no stat, and the brief's own target platform list
+is explicit); tracking bandwidth via a byte counter added to
+`UdpSocket` (a real, buildable feature - deliberately deferred rather
+than rushed into this phase alongside boxes/overlay wiring, since it
+touches `engine/network` more than `engine/ui`/`engine/rendering` and
+deserves its own focused pass if ever prioritized).

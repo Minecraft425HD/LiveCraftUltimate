@@ -213,3 +213,54 @@ TEST(JobSystem, AutoWorkerCountIsAtLeastOne) {
     JobSystem jobs(0);
     EXPECT_GE(jobs.worker_count(), 1u);
 }
+
+TEST(JobSystem, UnfinishedJobCountStartsAtZero) {
+    JobSystem jobs(2);
+    EXPECT_EQ(jobs.unfinished_job_count(), 0u);
+}
+
+TEST(JobSystem, UnfinishedJobCountReflectsAJobInFlight) {
+    JobSystem jobs(2);
+    std::atomic<bool> gate_open{false};
+
+    const auto blocker = jobs.submit([&gate_open] {
+        while (!gate_open.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    });
+
+    // A brief spin-wait for the worker to actually pick up `blocker` -
+    // submit() returns immediately, before any worker has necessarily
+    // dequeued it yet.
+    while (jobs.state_of(blocker) != JobState::Running) {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(jobs.unfinished_job_count(), 1u);
+
+    gate_open = true;
+    jobs.wait(blocker);
+    EXPECT_EQ(jobs.unfinished_job_count(), 0u);
+}
+
+TEST(JobSystem, UnfinishedJobCountCountsMultiplePendingJobs) {
+    JobSystem jobs(1);  // single worker: guarantees both jobs stay queued together
+    std::atomic<bool> gate_open{false};
+
+    const auto blocker = jobs.submit([&gate_open] {
+        while (!gate_open.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    });
+    const auto second = jobs.submit([] {});
+
+    while (jobs.state_of(blocker) != JobState::Running) {
+        std::this_thread::yield();
+    }
+    // `second` can't have run yet (single worker, still busy on
+    // `blocker`) - both count as unfinished.
+    EXPECT_EQ(jobs.unfinished_job_count(), 2u);
+
+    gate_open = true;
+    jobs.wait(second);
+    EXPECT_EQ(jobs.unfinished_job_count(), 0u);
+}

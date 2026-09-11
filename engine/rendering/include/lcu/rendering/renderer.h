@@ -73,6 +73,20 @@ class Renderer : public NonCopyable {
                            const math::Vec3& color, bgfx::ProgramHandle program, const math::Mat4& view,
                            const math::Mat4& proj);
 
+    // Draws an axis-aligned wireframe box (Phase 36 - entity debug
+    // boxes, brief section 60) as 12 line-list edges from `min` to
+    // `max` in world space, tinted `color`. Reuses the same minimal
+    // position+color vertex format/shader submit_billboard already
+    // established (vs_sky.sc/fs_sky.sc - unlit, no lighting concept
+    // needed for a debug aid) rather than adding a third shader pair
+    // for what's visually the same "flat-colored, no lighting" need.
+    // Drawn into view 0 (the terrain view, not the sky view) with real
+    // depth testing against solid terrain - a box behind a wall is
+    // correctly hidden, not painted through it. No-op if `program` is
+    // invalid (e.g. LCU_BUILD_SHADER_TOOLS is off).
+    void submit_wireframe_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
+                               bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
+
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
     u32 end_frame();
