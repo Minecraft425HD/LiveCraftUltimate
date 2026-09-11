@@ -1940,6 +1940,71 @@ unchanged since Phase 43).
 
 ---
 
+## Phase 48 — Block highlight + break progress + hand
+
+Real visible feedback for the game's most-repeated action - looking at
+and breaking a block - plus the real hold-to-break mechanic Minecraft
+players expect instead of an instant click.
+
+- [x] **Real block highlight**: black wireframe box on the raycast-
+  targeted block (`Renderer::submit_wireframe_box`, a new consumer of
+  the real Phase 36 call).
+- [x] **Real hold-to-break**: `BlockDefinition::hardness` (real
+  per-block seconds - stone 2.0, wood 1.5, dirt 0.5, leaves 0.2, grass
+  0.6, sand 0.5, snow 0.1, cactus 0.4, ores 3.0, torch 0.0 = instant)
+  gates how long Interact must be held against the *same* targeted
+  block. New pure `lcu::voxel::break_progress_fraction`/`is_break_ready`
+  (`break_progress.{h,cpp}`) - one real source both the break trigger
+  and the darkening overlay read. Switching targets/releasing resets
+  progress; a real one-shot latch stops a held click from re-sending a
+  networked break request every frame while awaiting the server's own
+  `BlockChange`.
+- [x] **Real break-progress overlay**: a solid box (new `Renderer::
+  submit_solid_box`, reuses the existing sky shader - no new shader
+  files) darkens toward black as progress advances.
+- [ ] **Real crack-noise-density shader effect on the block's own
+  face** - PARTIAL, deferred: needs a new per-fragment world-position
+  uniform threaded through `fs_chunk.sc`, a real, separate shader
+  feature outside this phase's scope. The solid-box overlay above is a
+  real, visible, honestly-scoped substitute, not a placeholder. See
+  DECISIONS.md.
+- [x] **Real hand icon**: the selected placeable item's own real
+  `icon_color` (Phase 47), bottom-right corner, real elapsed-time
+  sine-ease swing on every break/place.
+- [x] **Water stays genuinely unbreakable with zero special-case
+  code**: `has_collision=false` (Phase 37) already keeps the raycast
+  from ever targeting it.
+- [x] **Real headless-hook rewrite**: `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` rewritten from single-frame
+  instant-break pulses to real elapsed-time hold windows sized to each
+  target's own hardness - a real, necessary consequence of the
+  mechanic change, not a regression.
+- [x] **A real networked timing bug found and fixed during
+  verification**: `LCU_VERIFY_CRAFT`'s networked run failed with its
+  first chosen 0.2s inter-break gap (the second break's raycast could
+  still see the stale grass block before `BlockChange` landed) -
+  confirmed by an actual failed run, then fixed by widening to a real
+  0.8s. See DECISIONS.md.
+- [x] 9 new unit tests (`BreakProgress`/`IsBreakReady`).
+- [x] Verified via all four rewritten/regression hooks (full pipelines
+  confirmed real end-to-end: break -> pick up -> cycle -> place; two
+  sequential breaks -> craft match -> craft reject), a real two-process
+  networked `LCU_VERIFY_CRAFT` run (zero warnings/errors/rejects with
+  the widened gap), real `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD` regression
+  runs (unaffected), and a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`Chunk`/`Sky`/`UI2D` shader programs all still `valid=true`).
+
+`ctest` 475/475 (bgfx, up from 466) / 467/467 (non-bgfx, up from 458).
+
+Honestly scoped: what the highlight/overlay/hand icon actually look
+like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+LIMITATION**; no real crack-noise-density shader effect (deferred, see
+above); the break-progress overlay is opaque, not alpha-blended, so it
+appears at whatever darkness the first held frame computes rather than
+fading in from invisible (a real, documented rough edge).
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet

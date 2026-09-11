@@ -106,6 +106,16 @@ class Renderer : public NonCopyable {
     void submit_wireframe_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
                                bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
 
+    // Draws an axis-aligned SOLID box (Phase 48's real break-progress
+    // overlay - the targeted block darkens as break progress advances).
+    // Reuses the exact same minimal position+color vertex format/shader
+    // submit_wireframe_box/submit_billboard already established, just
+    // with the default triangle-list topology (a real box, 12
+    // triangles) and real depth testing against terrain instead of a
+    // line list. No-op if `program` is invalid.
+    void submit_solid_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
+                           bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
+
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in
     // pixels, top-left origin, y increasing downward (SDL/mouse

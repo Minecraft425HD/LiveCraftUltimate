@@ -10,6 +10,7 @@ add_executable(VoxelTests
     voxel/chunk_coord_test.cpp
     voxel/block_registry_test.cpp
     voxel/greedy_mesher_test.cpp
+    voxel/break_progress_test.cpp
     jobs/job_system_test.cpp
     world/world_test.cpp
     world/worldgen_test.cpp

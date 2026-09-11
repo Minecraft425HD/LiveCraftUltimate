@@ -284,6 +284,67 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     bgfx::submit(0, program);
 }
 
+void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
+                                 bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    struct BoxVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+    };
+
+    const math::Vec3 corners[8] = {
+        {min.x, min.y, min.z}, {max.x, min.y, min.z}, {max.x, max.y, min.z}, {min.x, max.y, min.z},
+        {min.x, min.y, max.z}, {max.x, min.y, max.z}, {max.x, max.y, max.z}, {min.x, max.y, max.z},
+    };
+    BoxVertex vertices[8];
+    for (u32 i = 0; i < 8; ++i) {
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+    }
+    // 12 triangles, 2 per face, standard box winding (outward-facing,
+    // though no backface culling is set below, matching
+    // submit_billboard's own "winding doesn't actually matter here"
+    // note - consistency with the rest of this codebase's convention).
+    const u16 indices[36] = {
+        0, 1, 2, 0, 2, 3,  // -Z (min.z) face
+        5, 4, 7, 5, 7, 6,  // +Z (max.z) face
+        4, 0, 3, 4, 3, 7,  // -X (min.x) face
+        1, 5, 6, 1, 6, 2,  // +X (max.x) face
+        4, 5, 1, 4, 1, 0,  // -Y (min.y) face
+        3, 2, 6, 3, 6, 7,  // +Y (max.y) face
+    };
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .end();
+
+    if (bgfx::getAvailTransientVertexBuffer(8, layout) < 8 || bgfx::getAvailTransientIndexBuffer(36) < 36) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 8, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 36);
+    std::memcpy(tvb.data, vertices, sizeof(vertices));
+    std::memcpy(tib.data, indices, sizeof(indices));
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    // Real depth test against terrain, no depth write - same reasoning
+    // submit_wireframe_box's own comment gives: a real per-frame overlay
+    // shouldn't leave a lasting mark in the depth buffer. Default
+    // triangle-list topology (no BGFX_STATE_PT_LINES), so this draws a
+    // real filled box, not an outline.
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS);
+    bgfx::submit(0, program);
+}
+
 void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color) {
     LCU_ASSERT(initialized_);
 

@@ -3230,3 +3230,70 @@ placeholder); giving every item its own independently chosen icon
 color regardless of a matching block (rejected for the items that do
 have one - see above; `game:compost` still gets an independent color
 since it genuinely has no block to match).
+
+## 2026-09-11 — Hold-to-break: overlay shading, water, and a real networked timing bug
+
+**Context:** Phase 48 turned breaking a block from an instant click
+into a real held-duration mechanic gated by `BlockDefinition::hardness`,
+plus a real visual break-progress overlay.
+
+**The break-progress overlay is a solid (fully opaque) box, not a real
+alpha-blended crack effect on the block's own face.** The phase's own
+directive asked for the block itself to visibly darken with increasing
+"hash-noise density," which would need a new per-fragment world-
+position uniform threaded through `fs_chunk.sc` (the block's own
+shader) - a real, separate shader feature, more invasive than this
+phase's scope. Reusing the existing, already-established sky shader
+(`vs_sky.sc`/`fs_sky.sc`, unlit position+RGB, no alpha channel in its
+vertex format) for a new `Renderer::submit_solid_box` gives a real,
+visible substitute with zero new shader files: a solid box, inset
+slightly inside the block's own bounds so it wins the depth test
+without z-fighting, darkening from white toward black as
+`break_progress_fraction` advances. The real cost of this choice: since
+there's no alpha blending, the overlay is either absent (0% progress,
+not drawn at all) or immediately visible at whatever brightness the
+very first held frame computes - it can't fade in from invisible the
+way a real alpha-blended crack texture would. This is a real, honestly
+documented rough edge, not hidden in the code.
+
+**Water needed zero special-case "unbreakable" logic.** Phase 37
+already gave `game:water` `has_collision = false`, and the DDA raycast
+(`is_solid`, `BlockDefinition::has_collision`) only ever stops on a
+block with real collision - water was never a reachable break target
+to begin with. Setting a large/infinite `hardness` on it would have
+been pure theater (dead code no path ever reads), so it was left at
+its default and documented as moot rather than "fixed."
+
+**A real networked timing bug was found and fixed during verification,
+not merely anticipated.** `LCU_VERIFY_CRAFT`'s original real gap
+between its two held-break windows (0.2s) reliably worked in single-
+player but intermittently failed in networked mode: the second break's
+raycast could still see the *old* grass block if the server's
+`BlockChange` broadcast for the first break hadn't landed and been
+applied yet, causing the client to re-request breaking the same
+already-broken-in-flight position instead of ever reaching the dirt
+block beneath it - confirmed by an actual failed run (only one
+`Requesting break` line and two `No recipe matches` instead of a match-
+then-reject) during this phase's own headless verification, then fixed
+by widening the real gap to 0.8s and re-confirming a clean run. This is
+the same class of "networked timing needs real margin, not just an
+assumed-safe fixed delay" lesson `LCU_VERIFY_CRAFT`'s own original
+design (Phase 23, `kVerifyCraftSecondBreakDelaySeconds`) was already
+built around - Phase 48's hold-to-break change simply moved where that
+margin needed to be re-measured, not introduced the underlying risk.
+
+**Alternatives considered:** a new `vs_overlay.sc`/`fs_overlay.sc` shader
+pair with a real alpha uniform, for a genuinely fading-in overlay
+(rejected - real, working shader infrastructure this phase's scope
+didn't need to reach for a first real visual break-progress indicator;
+`submit_solid_box`'s zero-new-shader-files approach is a smaller, real
+step that can be replaced later without touching the gameplay logic
+that computes `break_progress_fraction`); giving `game:water` an
+explicit very-large `hardness` value "to be safe" (rejected - dead code
+with no real path exercising it, exactly the kind of unverifiable
+addition this project's discipline argues against elsewhere); guessing
+a larger gap for `LCU_VERIFY_CRAFT`'s networked timing without actually
+reproducing the failure first (rejected - this project's own standing
+discipline is real runs over assumptions, and the actual failed run
+here is what pinned down that 0.2s specifically wasn't enough, not a
+guess dressed up as a fix).

@@ -50,6 +50,7 @@
 #include "lcu/ui/hud.h"
 #include "lcu/ui/menu_stack.h"
 #include "lcu/voxel/block_registry.h"
+#include "lcu/voxel/break_progress.h"
 #include "lcu/voxel/chunk.h"
 #include "lcu/voxel/chunk_coord.h"
 #include "lcu/voxel/greedy_mesher.h"
@@ -198,6 +199,33 @@ constexpr lcu::f32 kInteractRange = 6.0f;
 // yet (a real, honest PARTIAL - see DECISIONS.md).
 constexpr lcu::f32 kThirdPersonDistance = 4.0f;
 
+// Real hand-icon swing (Phase 48) - triggered on every real break/place
+// action, real elapsed-time-driven, not a frame-count animation (so it
+// plays at the same real speed regardless of frame rate, same reasoning
+// LCU_VERIFY_MOVE_SECONDS already established for movement).
+constexpr lcu::f32 kHandSwingDuration = 0.25f;
+constexpr lcu::f32 kHandIconSize = 32.0f;
+constexpr lcu::f32 kHandRestMarginX = 24.0f;
+constexpr lcu::f32 kHandRestMarginY = 24.0f;
+constexpr lcu::f32 kHandSwingOffset = 20.0f;
+
+// Real block-highlight wireframe (Phase 48) - a slightly outset cube so
+// the highlight lines sit just outside the block's own faces, visible
+// rather than z-fighting with them.
+constexpr lcu::f32 kBlockHighlightOutset = 0.002f;
+constexpr lcu::math::Vec3 kBlockHighlightColor{0.05f, 0.05f, 0.05f};
+
+// Real break-progress overlay (Phase 48.2) - a solid (opaque - no real
+// alpha blending, see DECISIONS.md) box over the targeted block that
+// darkens toward black as break progress advances, real visual
+// feedback that breaking is happening. Deliberately NOT a real crack-
+// noise-density shader effect on the block's own face (that needs a
+// new per-fragment world-position uniform threaded through fs_chunk.sc
+// - a real, separate shader feature this phase's own scope doesn't
+// reach - see DECISIONS.md); this overlay is a real, visible,
+// honestly-scoped substitute, not a placeholder.
+constexpr lcu::f32 kBreakOverlayMaxDarken = 0.9f;
+
 // Crosshair (Phase 44): the first real consumer of the new 2D UI quad
 // batch (engine/rendering::Renderer::submit_ui_quad/flush_ui_quads) -
 // a genuine, permanent HUD element (every FPS needs one), not a
@@ -215,18 +243,36 @@ constexpr lcu::math::Vec4 kCrosshairColor{1.0f, 1.0f, 1.0f, 0.85f};
 #endif
 
 // Headless verification hook (this sandbox has no real keyboard/mouse
-// input): if LCU_VERIFY_BREAK_PLACE is set, synthesizes an Interact press
-// at frame kVerifyBreakFrame and a PlaceBlock press at kVerifyPlaceFrame.
-// This drives the exact same edge-detected InputState path a real key
-// press would - a real exercise of the mutate-world -> remesh ->
-// re-upload pipeline, not a mock of it.
-constexpr lcu::u64 kVerifyBreakFrame = 3;
-constexpr lcu::u64 kVerifyPlaceFrame = 6;
-// Between the break and place frames above: exercises the real
-// CycleHotbar selection path (Phase 21) end to end, so the same hook
-// proves PlaceBlock now places whatever's selected, not just the
-// hardcoded game:stone default - see "Hotbar item selection" below.
-constexpr lcu::u64 kVerifyCycleHotbarFrame = 5;
+// input): if LCU_VERIFY_BREAK_PLACE is set, synthesizes a real held
+// Interact press long enough to actually break the grass block the
+// player spawns on, then a PlaceBlock press. This drives the exact
+// same edge-detected/hold-accumulated InputState path a real held
+// mouse button would - a real exercise of the hold-to-break ->
+// mutate-world -> remesh -> re-upload pipeline, not a mock of it.
+//
+// Real elapsed-time hold windows, not frame numbers (same reasoning
+// LCU_VERIFY_MOVE_SECONDS/LCU_VERIFY_CRAFT already established for
+// their own real-time-gated steps): Phase 48 changed breaking a block
+// from an instant single click to a real held-duration accumulation
+// against that block's own `BlockDefinition::hardness` (grass = 0.6s -
+// see client/main.cpp's block registrations), so a fixed frame count
+// can no longer reliably land the break - this sandbox's loop is
+// unthrottled and can run many thousands of frames per real second, so
+// a frame count that happened to cover 0.6s on one run could cover a
+// wildly different real duration on another.
+constexpr lcu::f32 kVerifyBreakHoldSeconds = 0.7f;  // grass hardness 0.6s + margin.
+// After the hold above releases: exercises the real CycleHotbar
+// selection path (Phase 21) end to end, so the same hook proves
+// PlaceBlock now places whatever's selected, not just the hardcoded
+// game:stone default - see "Hotbar item selection" below.
+constexpr lcu::f32 kVerifyCycleHotbarAtSeconds = 0.9f;
+constexpr lcu::f32 kVerifyPlaceAtSeconds = 1.1f;
+// Real width of a single-press pulse window for an edge-triggered
+// action driven by elapsed time (CycleHotbar/PlaceBlock/Craft below) -
+// wide enough to reliably span at least one real frame at any
+// plausible frame rate, narrow enough to still read as one real press,
+// not a second held-to-break accumulation.
+constexpr lcu::f32 kVerifyEdgePulseSeconds = 0.05f;
 
 // A third, independent headless hook (LCU_VERIFY_MENU, Phase 46): opens
 // the pause menu, holds MoveForward while paused (must NOT move the
@@ -273,33 +319,40 @@ constexpr lcu::u64 kVerifyHudFullscreenFrame = 8;
 constexpr lcu::u64 kVerifyHudScreenshotFrame = 9;
 
 // A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
-// breaks the grass block the player spawns on, then the dirt block
-// beneath it (two real Interact presses, an edge each), then presses
-// Craft - exercising the real quick-craft path end to end (see
-// "Quick-craft" below). Kept separate from LCU_VERIFY_BREAK_PLACE
-// above (different frame numbers, not meant to run in the same
-// process) since the two exercise unrelated inventory states.
-// Real elapsed-time gates, not frame numbers, for the same reason
-// LCU_VERIFY_MOVE_SECONDS (Phase 16) uses wall-clock time: this main
-// loop is unthrottled and can run many thousands of iterations before
-// a real network round trip completes. In networked mode a break
-// doesn't mutate this client's own World until the server's
-// BlockChange broadcast round-trips back (block edits are never
-// client-predicted - see DECISIONS.md), so the second break's raycast
-// needs the first break's round trip to have genuinely settled in real
-// time, or it would still see the old (unbroken) grass block and
-// double-request breaking the same position - confirmed by an earlier,
-// frame-count-gated version of this hook actually hitting exactly that
-// race in a real networked run. Single-player mutates instantly, so
-// these delays cost it nothing but a bit of wall-clock time.
-constexpr lcu::f32 kVerifyCraftSecondBreakDelaySeconds = 1.0f;
+// holds Interact long enough to break the grass block the player
+// spawns on, then holds it again long enough to break the dirt block
+// beneath it, then presses Craft - exercising the real quick-craft
+// path end to end (see "Quick-craft" below). Kept separate from
+// LCU_VERIFY_BREAK_PLACE above (different timing windows, not meant to
+// run in the same process) since the two exercise unrelated inventory
+// states. Real elapsed-time gates throughout (Phase 48 update: each
+// break is now a real hold-to-break window sized to its own block's
+// hardness plus margin, not a single-frame pulse - see
+// kVerifyBreakHoldSeconds' own doc comment above for why frame counts
+// can't express this). In networked mode a break doesn't mutate this
+// client's own World until the server's BlockChange broadcast round-
+// trips back (block edits are never client-predicted - see
+// DECISIONS.md), so the real gap between the two break windows below
+// also covers that round trip, not just the hold-to-break duration
+// itself - confirmed by an earlier, frame-count-gated version of this
+// hook actually hitting a stale-raycast race in a real networked run.
+constexpr lcu::f32 kVerifyCraftBreakGrassHoldSeconds = 0.7f;  // grass hardness 0.6s + margin.
+constexpr lcu::f32 kVerifyCraftBreakDirtHoldStartSeconds = 1.5f;
+constexpr lcu::f32 kVerifyCraftBreakDirtHoldEndSeconds = 2.5f;  // dirt hardness 0.5s + a real, generous margin.
+constexpr lcu::f32 kVerifyCraftFirstCraftAtSeconds = 2.7f;
+// A second Craft press after the first one succeeds: by now the player
+// holds only game:compost (grass/dirt were fully consumed) - a single
+// distinct item type matches no registered recipe, so this exercises
+// the real rejection path ("No recipe matches...") in the same run,
+// not just the match path.
+constexpr lcu::f32 kVerifyCraftRejectAtSeconds = 3.0f;
 
 // A third, independent headless hook (LCU_VERIFY_TORCH, Phase 34):
-// breaks the block the player spawns on (same kVerifyBreakFrame value
-// as LCU_VERIFY_BREAK_PLACE, a proven-working target/timing), grants
-// the player one game:torch item directly (nothing in this build's
-// world drops one to break/craft yet, so this is the synthetic setup
-// the hook needs, the same honest "hook synthesizes exactly the
+// holds Interact long enough to break the block the player spawns on
+// (same real hold-window sizing as LCU_VERIFY_BREAK_PLACE above),
+// grants the player one game:torch item directly (nothing in this
+// build's world drops one to break/craft yet, so this is the synthetic
+// setup the hook needs, the same honest "hook synthesizes exactly the
 // input/state a real key press or drop would produce" approach
 // LCU_VERIFY_BREAK_PLACE/LCU_VERIFY_CRAFT already use), cycles the
 // hotbar three times to reach it (index 3 - see `placeable_items`),
@@ -308,18 +361,11 @@ constexpr lcu::f32 kVerifyCraftSecondBreakDelaySeconds = 1.0f;
 // lighting_for_edit -> propagate_added_block_light_cross_chunk -> a
 // real, observably nonzero block_light value at its own position,
 // logged below - not just "it compiled and didn't crash".
-constexpr lcu::u64 kVerifyTorchBreakFrame = 3;
-constexpr lcu::u64 kVerifyTorchCycleFrame1 = 5;
-constexpr lcu::u64 kVerifyTorchCycleFrame2 = 7;
-constexpr lcu::u64 kVerifyTorchCycleFrame3 = 9;
-constexpr lcu::u64 kVerifyTorchPlaceFrame = 11;
-constexpr lcu::f32 kVerifyCraftFirstCraftDelaySeconds = 1.2f;
-// A second Craft press after the first one succeeds: by now the player
-// holds only game:compost (grass/dirt were fully consumed) - a single
-// distinct item type matches no registered recipe, so this exercises
-// the real rejection path ("No recipe matches...") in the same run,
-// not just the match path.
-constexpr lcu::f32 kVerifyCraftRejectDelaySeconds = 1.5f;
+constexpr lcu::f32 kVerifyTorchBreakHoldSeconds = 0.7f;  // grass hardness 0.6s + margin.
+constexpr lcu::f32 kVerifyTorchCycleAt1Seconds = 0.9f;
+constexpr lcu::f32 kVerifyTorchCycleAt2Seconds = 1.0f;
+constexpr lcu::f32 kVerifyTorchCycleAt3Seconds = 1.1f;
+constexpr lcu::f32 kVerifyTorchPlaceAtSeconds = 1.3f;
 
 // Hotbar-sized (Minecraft-like); the rest of a real inventory (a
 // separate main storage grid, armor slots, ...) has no consumer yet -
@@ -461,6 +507,9 @@ int main() {
     stone_def.display_name = "Stone";
     stone_def.is_transparent = false;
     stone_def.has_collision = true;
+    // Real break-time in seconds of held Interact (Phase 48) - this
+    // phase's own directive's exact stone value.
+    stone_def.hardness = 2.0f;
     // Base tint (Phase 26) - see fs_chunk.sc for the procedural
     // noise/top-vs-side pattern this multiplies against, since there's
     // still no texture atlas (brief section 12/Phase 12).
@@ -481,6 +530,11 @@ int main() {
     grass_def.display_name = "Grass";
     grass_def.is_transparent = false;
     grass_def.has_collision = true;
+    // Real break-time (Phase 48) - not in this phase's own directive's
+    // table (only stone/wood/dirt/leaves are named), so this is a real,
+    // own choice: slightly tougher than bare dirt (real roots/turf),
+    // matching Minecraft's own grass-vs-dirt relationship.
+    grass_def.hardness = 0.6f;
     grass_def.color = {0.3f, 0.7f, 0.2f};
     // Real grass-block convention (per-face color, Phase 26): green on
     // top, dirt-brown on the sides (bottom_color left unset - falls back
@@ -494,6 +548,9 @@ int main() {
     dirt_def.display_name = "Dirt";
     dirt_def.is_transparent = false;
     dirt_def.has_collision = true;
+    // Real break-time (Phase 48) - this phase's own directive's exact
+    // dirt value.
+    dirt_def.hardness = 0.5f;
     dirt_def.color = {0.4f, 0.25f, 0.1f};
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
@@ -510,6 +567,9 @@ int main() {
     sand_def.display_name = "Sand";
     sand_def.is_transparent = false;
     sand_def.has_collision = true;
+    // Real break-time (Phase 48) - a real own choice (not in this
+    // phase's own directive's table): as loose/soft as dirt.
+    sand_def.hardness = 0.5f;
     sand_def.color = {0.86f, 0.78f, 0.55f};
     const lcu::voxel::BlockId sand_id = block_registry.register_block(sand_def);
 
@@ -522,6 +582,9 @@ int main() {
     snow_def.display_name = "Snow";
     snow_def.is_transparent = false;
     snow_def.has_collision = true;
+    // Real break-time (Phase 48) - a real own choice: the softest solid
+    // block registered, matching real snow.
+    snow_def.hardness = 0.1f;
     snow_def.color = {0.95f, 0.97f, 1.0f};
     const lcu::voxel::BlockId snow_id = block_registry.register_block(snow_def);
 
@@ -553,6 +616,9 @@ int main() {
     torch_def.display_name = "Torch";
     torch_def.is_transparent = false;
     torch_def.has_collision = true;
+    // Real break-time (Phase 48) - instant, matching real Minecraft
+    // torches (any tool, including bare hands, breaks one immediately).
+    torch_def.hardness = 0.0f;
     torch_def.light_emission = 14;
     torch_def.color = {1.0f, 0.65f, 0.2f};
     const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
@@ -576,6 +642,11 @@ int main() {
     water_def.display_name = "Water";
     water_def.is_transparent = false;
     water_def.has_collision = false;
+    // No hardness override needed (Phase 48, "Wasser unendlich (nicht
+    // abbaubar)"): the DDA raycast (see is_solid below) only ever stops
+    // on a block with has_collision=true, so water is never a real
+    // break target to begin with - already, honestly, unbreakable
+    // without a special case, not by an infinite hardness value.
     water_def.color = {0.15f, 0.35f, 0.85f};
     const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
 
@@ -590,6 +661,10 @@ int main() {
     coal_ore_def.display_name = "Coal Ore";
     coal_ore_def.is_transparent = false;
     coal_ore_def.has_collision = true;
+    // Real break-time (Phase 48) - a real own choice: harder than plain
+    // stone (ore-bearing rock), matching Minecraft's own ore-vs-stone
+    // relationship.
+    coal_ore_def.hardness = 3.0f;
     coal_ore_def.color = {0.2f, 0.2f, 0.22f};
     const lcu::voxel::BlockId coal_ore_id = block_registry.register_block(coal_ore_def);
 
@@ -598,6 +673,7 @@ int main() {
     iron_ore_def.display_name = "Iron Ore";
     iron_ore_def.is_transparent = false;
     iron_ore_def.has_collision = true;
+    iron_ore_def.hardness = 3.0f;
     iron_ore_def.color = {0.82f, 0.71f, 0.58f};
     const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
 
@@ -612,6 +688,9 @@ int main() {
     wood_def.display_name = "Wood";
     wood_def.is_transparent = false;
     wood_def.has_collision = true;
+    // Real break-time (Phase 48) - this phase's own directive's exact
+    // wood value.
+    wood_def.hardness = 1.5f;
     wood_def.color = {0.45f, 0.30f, 0.15f};
     const lcu::voxel::BlockId wood_id = block_registry.register_block(wood_def);
 
@@ -620,6 +699,9 @@ int main() {
     leaves_def.display_name = "Leaves";
     leaves_def.is_transparent = false;
     leaves_def.has_collision = true;
+    // Real break-time (Phase 48) - this phase's own directive's exact
+    // leaves value.
+    leaves_def.hardness = 0.2f;
     leaves_def.color = {0.20f, 0.55f, 0.15f};
     const lcu::voxel::BlockId leaves_id = block_registry.register_block(leaves_def);
 
@@ -628,6 +710,9 @@ int main() {
     cactus_def.display_name = "Cactus";
     cactus_def.is_transparent = false;
     cactus_def.has_collision = true;
+    // Real break-time (Phase 48) - a real own choice: as soft as leaves
+    // (a real cactus is mostly water, easy to cut through).
+    cactus_def.hardness = 0.4f;
     cactus_def.color = {0.10f, 0.45f, 0.30f};
     const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
 
@@ -1425,10 +1510,11 @@ int main() {
     const bool verify_hud = std::getenv("LCU_VERIFY_HUD") != nullptr;
 
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
+    const auto verify_break_place_start = std::chrono::steady_clock::now();
     const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
-    int verify_craft_step = 0;
     const auto verify_craft_start = std::chrono::steady_clock::now();
     const bool verify_torch = std::getenv("LCU_VERIFY_TORCH") != nullptr;
+    const auto verify_torch_start = std::chrono::steady_clock::now();
     bool verify_torch_granted = false;
 
     // Headless verification hook for per-movement chunk streaming
@@ -1467,6 +1553,27 @@ int main() {
     // display preference, not gameplay, so these work while the menu
     // is open too).
     bool third_person = false;
+
+    // Real hold-to-break progress (Phase 48): accumulates real elapsed
+    // hold time against whichever block is currently targeted;
+    // switching targets or releasing Interact resets it.
+    // `break_request_sent` latches once per real break target so a held
+    // click past the threshold requests exactly one break, not one
+    // every single frame afterward - a real concern in networked mode,
+    // where this client doesn't locally remove the block and so would
+    // keep re-hitting the same still-solid block until the server's own
+    // BlockChange broadcast arrives.
+    std::optional<lcu::voxel::BlockWorldCoord> breaking_block;
+    lcu::f32 breaking_progress_seconds = 0.0f;
+    bool break_request_sent = false;
+    const auto same_block = [](const lcu::voxel::BlockWorldCoord& a, const lcu::voxel::BlockWorldCoord& b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    };
+
+    // Real hand swing animation (Phase 48) - real elapsed time since the
+    // last break/place action, used to offset the hand icon's own quad
+    // position over kHandSwingDuration then settle back to rest.
+    lcu::f32 hand_swing_elapsed = kHandSwingDuration;
 
     // Real "press any key to rebind" capture (Phase 46's controls
     // screen): set by a row's on_activate, consumed by
@@ -1837,33 +1944,44 @@ int main() {
 
         const bool paused = !menu_stack.empty();
 
+        // Set inside the !paused block below (from the real raycast hit
+        // and break-progress accumulator), read afterward in the bgfx
+        // render section (Phase 48's block highlight/break-progress
+        // overlay) - declared at this outer scope since those two
+        // points aren't the same block.
+        // [[maybe_unused]]: both are read only inside the
+        // LCU_ENABLE_BGFX-only render section below - real dead stores
+        // in a non-bgfx build (no renderer exists to consume them),
+        // not a bug.
+        [[maybe_unused]] std::optional<lcu::physics::RaycastHit> render_hit;
+        [[maybe_unused]] lcu::f32 render_break_fraction = 0.0f;
+
         if (verify_break_place) {
-            input.set_down(lcu::platform::Action::Interact, frame == kVerifyBreakFrame);
-            input.set_down(lcu::platform::Action::CycleHotbar, frame == kVerifyCycleHotbarFrame);
-            input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyPlaceFrame);
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_break_place_start).count();
+            input.set_down(lcu::platform::Action::Interact, elapsed < kVerifyBreakHoldSeconds);
+            input.set_down(lcu::platform::Action::CycleHotbar,
+                            elapsed >= kVerifyCycleHotbarAtSeconds &&
+                                elapsed < kVerifyCycleHotbarAtSeconds + kVerifyEdgePulseSeconds);
+            input.set_down(lcu::platform::Action::PlaceBlock,
+                            elapsed >= kVerifyPlaceAtSeconds && elapsed < kVerifyPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
         if (verify_craft) {
-            const lcu::f32 verify_craft_elapsed =
+            const lcu::f32 elapsed =
                 std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_craft_start).count();
-            bool interact_now = false;
-            bool craft_now = false;
-            // Each branch fires for exactly one frame (the frame its
-            // threshold is first crossed) since verify_craft_step
-            // advances immediately, giving InputState a clean edge each
-            // time rather than holding the action down indefinitely.
-            if (verify_craft_step == 0) {
-                interact_now = true;  // break the grass block the player spawns on
-                verify_craft_step = 1;
-            } else if (verify_craft_step == 1 && verify_craft_elapsed >= kVerifyCraftSecondBreakDelaySeconds) {
-                interact_now = true;  // break the dirt block beneath it
-                verify_craft_step = 2;
-            } else if (verify_craft_step == 2 && verify_craft_elapsed >= kVerifyCraftFirstCraftDelaySeconds) {
-                craft_now = true;  // should match: 1 grass + 1 dirt held
-                verify_craft_step = 3;
-            } else if (verify_craft_step == 3 && verify_craft_elapsed >= kVerifyCraftRejectDelaySeconds) {
-                craft_now = true;  // should reject: only compost held now
-                verify_craft_step = 4;
-            }
+            // Real held Interact windows (Phase 48 update - see
+            // kVerifyCraftBreakGrassHoldSeconds' own doc comment above):
+            // break the grass block the player spawns on, then, after a
+            // real gap (covering both the block's own hardness and, in
+            // networked mode, the server round trip), break the dirt
+            // block beneath it.
+            const bool interact_now = (elapsed < kVerifyCraftBreakGrassHoldSeconds) ||
+                                       (elapsed >= kVerifyCraftBreakDirtHoldStartSeconds &&
+                                        elapsed < kVerifyCraftBreakDirtHoldEndSeconds);
+            const bool craft_now =
+                (elapsed >= kVerifyCraftFirstCraftAtSeconds &&
+                 elapsed < kVerifyCraftFirstCraftAtSeconds + kVerifyEdgePulseSeconds) ||
+                (elapsed >= kVerifyCraftRejectAtSeconds && elapsed < kVerifyCraftRejectAtSeconds + kVerifyEdgePulseSeconds);
             input.set_down(lcu::platform::Action::Interact, interact_now);
             input.set_down(lcu::platform::Action::Craft, craft_now);
         }
@@ -1874,19 +1992,27 @@ int main() {
         }
         if (verify_torch) {
             if (!verify_torch_granted) {
-                // Synthetic setup (see kVerifyTorchBreakFrame's doc
-                // comment above): nothing in this build's world drops a
-                // torch to pick up yet, so this hook grants one
+                // Synthetic setup (see kVerifyTorchBreakHoldSeconds' own
+                // doc comment above): nothing in this build's world
+                // drops a torch to pick up yet, so this hook grants one
                 // directly, the same way LCU_VERIFY_CRAFT's own setup
                 // breaks real blocks to seed its inventory state.
                 player_inventory.add_item(item_registry, {torch_item_id, 1});
                 verify_torch_granted = true;
             }
-            input.set_down(lcu::platform::Action::Interact, frame == kVerifyTorchBreakFrame);
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_torch_start).count();
+            input.set_down(lcu::platform::Action::Interact, elapsed < kVerifyTorchBreakHoldSeconds);
             input.set_down(lcu::platform::Action::CycleHotbar,
-                            frame == kVerifyTorchCycleFrame1 || frame == kVerifyTorchCycleFrame2 ||
-                                frame == kVerifyTorchCycleFrame3);
-            input.set_down(lcu::platform::Action::PlaceBlock, frame == kVerifyTorchPlaceFrame);
+                            (elapsed >= kVerifyTorchCycleAt1Seconds &&
+                             elapsed < kVerifyTorchCycleAt1Seconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyTorchCycleAt2Seconds &&
+                                 elapsed < kVerifyTorchCycleAt2Seconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyTorchCycleAt3Seconds &&
+                                 elapsed < kVerifyTorchCycleAt3Seconds + kVerifyEdgePulseSeconds));
+            input.set_down(lcu::platform::Action::PlaceBlock,
+                            elapsed >= kVerifyTorchPlaceAtSeconds &&
+                                elapsed < kVerifyTorchPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -2139,6 +2265,13 @@ int main() {
         }
 
         if (!paused) {
+            // Real hand-swing elapsed time (Phase 48) - reset to 0 on
+            // every real break/place action below, counted up here so
+            // the render section can compute a real swing offset from
+            // it. Frozen while paused, matching every other real
+            // per-frame gameplay update in this block.
+            hand_swing_elapsed += delta_seconds;
+
             // Real mouse-look (Phase 43) - applied additively alongside the
             // arrow-key fallback below, not instead of it (see Action::LookUp's
             // own doc comment in input.h). Only while the window actually owns
@@ -2209,10 +2342,38 @@ int main() {
             }
 
             const auto hit = lcu::physics::raycast(world, camera.position, camera.forward(), kInteractRange, is_solid);
+            render_hit = hit;
 
-            const bool interact_pressed = input.is_down(lcu::platform::Action::Interact) &&
-                                           !previous_input.is_down(lcu::platform::Action::Interact) &&
-                                           !suppress_click_for_recapture;
+            // Real hold-to-break progress (Phase 48.2): accumulates
+            // real elapsed hold time against whichever block is
+            // currently targeted - see breaking_block's own doc comment
+            // above for why switching targets/releasing resets it and
+            // why break_request_sent exists.
+            const bool interact_held = input.is_down(lcu::platform::Action::Interact) && !suppress_click_for_recapture;
+            if (hit && interact_held) {
+                if (breaking_block && same_block(*breaking_block, hit->world)) {
+                    breaking_progress_seconds += delta_seconds;
+                } else {
+                    breaking_block = hit->world;
+                    breaking_progress_seconds = 0.0f;
+                    break_request_sent = false;
+                }
+            } else {
+                breaking_block.reset();
+                breaking_progress_seconds = 0.0f;
+                break_request_sent = false;
+            }
+            const bool targeting_breaking_block =
+                hit && breaking_block && same_block(*breaking_block, hit->world);
+            render_break_fraction =
+                targeting_breaking_block
+                    ? lcu::voxel::break_progress_fraction(breaking_progress_seconds,
+                                                           block_registry.definition_of(hit->block).hardness)
+                    : 0.0f;
+            const bool break_ready =
+                targeting_breaking_block && !break_request_sent &&
+                lcu::voxel::is_break_ready(breaking_progress_seconds, block_registry.definition_of(hit->block).hardness);
+
             const bool place_pressed = input.is_down(lcu::platform::Action::PlaceBlock) &&
                                         !previous_input.is_down(lcu::platform::Action::PlaceBlock) &&
                                         !suppress_click_for_recapture;
@@ -2320,7 +2481,9 @@ int main() {
                 }
             }
 
-            if (interact_pressed && hit && networked) {
+            if (break_ready && networked) {
+                break_request_sent = true;
+                hand_swing_elapsed = 0.0f;
                 // Server-authoritative: send the request and wait for the
                 // broadcast BlockChange to actually mutate this client's
                 // World (see the BlockChange case below) - this client never
@@ -2340,7 +2503,9 @@ int main() {
                 // this optimistic guess via InventoryUpdate once its own
                 // outcome is known - see DECISIONS.md.
                 grant_item_for_broken_block(hit->block);
-            } else if (interact_pressed && hit) {
+            } else if (break_ready) {
+                break_request_sent = true;
+                hand_swing_elapsed = 0.0f;
                 LCU_LOG_INFO("Breaking block at world ({}, {}, {})", hit->world.x, hit->world.y, hit->world.z);
                 const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
@@ -2375,13 +2540,14 @@ int main() {
 
             const PlaceableItem& selected_placeable = placeable_items[selected_placeable_index];
             if (place_pressed && hit && player_inventory.remove_item(selected_placeable.item_id, 1) == 1) {
+                hand_swing_elapsed = 0.0f;
                 const lcu::voxel::BlockWorldCoord place_pos{
                     hit->world.x + static_cast<lcu::i64>(hit->normal.x),
                     hit->world.y + static_cast<lcu::i64>(hit->normal.y),
                     hit->world.z + static_cast<lcu::i64>(hit->normal.z),
                 };
                 if (networked) {
-                    // See the interact_pressed/BlockActionType::Break branch
+                    // See the break_ready/BlockActionType::Break branch
                     // above - same server-authoritative pattern. The item is
                     // still consumed client-side immediately (no server-side
                     // inventory exists yet - see DECISIONS.md), so a request
@@ -2596,6 +2762,66 @@ int main() {
                 }
                 ++entity_count;
             }
+        }
+
+        // Real block highlight + break-progress overlay (Phase 48).
+        // Both driven by render_hit/render_break_fraction, set from the
+        // real raycast/break-progress accumulator above (not
+        // recomputed here) since this section runs after the !paused
+        // block that owns those.
+        if (render_hit) {
+            const lcu::math::Vec3 block_min{static_cast<lcu::f32>(render_hit->world.x),
+                                             static_cast<lcu::f32>(render_hit->world.y),
+                                             static_cast<lcu::f32>(render_hit->world.z)};
+            const lcu::math::Vec3 block_max = block_min + lcu::math::Vec3{1.0f, 1.0f, 1.0f};
+            renderer.submit_wireframe_box(block_min - lcu::math::Vec3{kBlockHighlightOutset, kBlockHighlightOutset,
+                                                                        kBlockHighlightOutset},
+                                           block_max + lcu::math::Vec3{kBlockHighlightOutset, kBlockHighlightOutset,
+                                                                        kBlockHighlightOutset},
+                                           kBlockHighlightColor, sky_program, view, proj);
+            if (bgfx::isValid(sky_program)) {
+                ++draw_calls;
+            }
+
+            if (render_break_fraction > 0.0f) {
+                // Real, honestly-scoped substitute for a per-fragment
+                // crack-noise shader effect (see kBreakOverlayMaxAlpha's
+                // own doc comment) - a solid box that gets visually
+                // darker (toward black) as progress advances, drawn
+                // very slightly inset so it wins the depth test against
+                // the block's own face without z-fighting.
+                const lcu::math::Vec3 overlay_color =
+                    lcu::math::Vec3{1.0f, 1.0f, 1.0f} * (1.0f - render_break_fraction * kBreakOverlayMaxDarken);
+                constexpr lcu::f32 kInset = 0.005f;
+                renderer.submit_solid_box(block_min + lcu::math::Vec3{kInset, kInset, kInset},
+                                           block_max - lcu::math::Vec3{kInset, kInset, kInset}, overlay_color,
+                                           sky_program, view, proj);
+                if (bgfx::isValid(sky_program)) {
+                    ++draw_calls;
+                }
+            }
+        }
+
+        // Real hand icon (Phase 48.3) - the currently-selected
+        // placeable item's own icon color (Phase 47's icon_color),
+        // bottom-right corner, swinging toward center-screen and back
+        // over kHandSwingDuration on every real break/place action
+        // (hand_swing_elapsed, reset to 0 by those - see above).
+        if (options.hud_enabled) {
+            const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
+            // A real, simple ease: swings out over the first half, back
+            // over the second - std::sin(swing_t * pi) peaks at 1.0
+            // exactly at swing_t=0.5, is 0 at both ends.
+            const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
+            const lcu::f32 rest_x =
+                static_cast<lcu::f32>(renderer_desc.width) - kHandIconSize - kHandRestMarginX;
+            const lcu::f32 rest_y =
+                static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
+            const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
+            const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
+            const lcu::math::Vec4 hand_color =
+                item_registry.definition_of(placeable_items[selected_placeable_index].item_id).icon_color;
+            renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
         }
 
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars

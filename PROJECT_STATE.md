@@ -40,8 +40,9 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 (vegetation)**, **Phase 42 (documentation update)**, **Phase 43
 (input overhaul + mouse look + Minecraft-parity defaults)**,
 **Phase 44 (2D UI framework)**, **Phase 45 (persistent options)**,
-**Phase 46 (menu framework: pause/options/controls)**, and **Phase 47
-(HUD overhaul: hotbar + health/hunger bars + F-toggles)** are done; see
+**Phase 46 (menu framework: pause/options/controls)**, **Phase 47
+(HUD overhaul: hotbar + health/hunger bars + F-toggles)**, and **Phase
+48 (block highlight + hold-to-break + hand)** are done; see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -1730,6 +1731,62 @@ real output can't be inspected under the headless `Noop` backend (no
 real framebuffer content to capture); third-person-front deferred (see
 above); hotbar slots 5-9 still show nothing (only 4 real placeable
 items exist, unchanged since Phase 43).
+
+**Phase 48 (block highlight + hold-to-break + hand)**: a real black
+wireframe highlight on the raycast-targeted block (a new consumer of
+`submit_wireframe_box`, already real since Phase 36). **Real hold-to-
+break**: breaking a block is no longer instant - `BlockDefinition::
+hardness` (real per-block seconds: stone 2.0, wood 1.5, dirt 0.5,
+leaves 0.2, grass 0.6, sand 0.5, snow 0.1, cactus 0.4, ores 3.0, torch
+0.0 = instant) now gates how long Interact must be held against the
+*same* targeted block. New pure `lcu::voxel::break_progress_fraction`/
+`is_break_ready` (`break_progress.{h,cpp}`) - the one real source both
+the break trigger and the darkening overlay read, so they can never
+disagree. A real one-shot latch stops a held click from re-sending a
+networked break request every frame while waiting for the server's own
+`BlockChange`.
+
+Real break-progress overlay: a solid box (new `Renderer::
+submit_solid_box`, reusing the existing sky shader - no new shader
+files needed) darkens toward black as progress advances - a real,
+honestly-scoped substitute for a per-fragment crack-noise shader effect
+on the block's own face, which would need a new world-position uniform
+threaded through `fs_chunk.sc`, outside this phase's scope (see
+DECISIONS.md). Opaque, not alpha-blended - a real, documented rough
+edge (appears at whatever darkness the first held frame computes,
+doesn't fade in from invisible). Real hand icon (Phase 47's
+`icon_color`) with a real elapsed-time sine-ease swing on every
+break/place. Water needed zero special-case unbreakable logic -
+`has_collision=false` (Phase 37) already keeps the raycast from ever
+targeting it.
+
+**A real networked timing bug was found and fixed during this phase's
+own verification, not merely anticipated.** `LCU_VERIFY_BREAK_PLACE`/
+`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` were rewritten from single-frame
+instant-break pulses to real elapsed-time hold windows sized to each
+target's own hardness (a fixed frame count can't express this
+reliably in this sandbox's unthrottled loop) - a real, necessary
+consequence of the mechanic change, not a regression. `LCU_VERIFY_
+CRAFT`'s networked run specifically failed with its first chosen gap
+(0.2s) between its two held-break windows - the second break's raycast
+could still see the stale, not-yet-removed grass block if the server's
+`BlockChange` hadn't landed yet - confirmed by an actual failed run
+(only one break landed, both craft attempts rejected) during
+verification, then fixed by widening the real gap to 0.8s and
+re-confirming a clean run.
+
+9 new unit tests. Verified via all four rewritten/regression hooks
+(full pipelines confirmed real end-to-end), a real two-process
+networked `LCU_VERIFY_CRAFT` run (zero warnings/errors/rejects with the
+widened gap), real `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD` regression runs
+(unaffected), and a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/
+`Sky`/`UI2D` shader programs all still `valid=true`). `ctest` 475/475
+(bgfx, up from 466) / 467/467 (non-bgfx, up from 458).
+
+Honestly scoped: what the highlight/overlay/hand icon actually look
+like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+LIMITATION**; no real crack-noise-density shader effect on the block's
+own face (deferred, see above).
 
 ## Build Status
 

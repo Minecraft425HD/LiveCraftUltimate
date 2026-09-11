@@ -2,7 +2,81 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48
+
+### Phase 48
+
+- **Real block highlight**: the raycast-targeted block now gets a real
+  black wireframe box (`Renderer::submit_wireframe_box`, already real
+  since Phase 36), drawn every frame a block is in range - a genuinely
+  new consumer of that existing call, not new rendering machinery.
+- **Real hold-to-break**: breaking a block is no longer an instant
+  single click - `BlockDefinition::hardness` (real per-block seconds:
+  stone 2.0, wood 1.5, dirt 0.5, leaves 0.2, grass 0.6, sand 0.5, snow
+  0.1, cactus 0.4, coal/iron ore 3.0, torch 0.0 = instant, matching this
+  phase's own directive's exact table where one exists) now gates how
+  long Interact must be held against the *same* targeted block before
+  it actually breaks. New pure `lcu::voxel::break_progress_fraction`/
+  `is_break_ready` (new `break_progress.{h,cpp}`) compute this - the
+  same two functions both the real break-trigger check and the real
+  darkening overlay consume, so they can never disagree. Switching
+  targets or releasing Interact resets progress. In networked mode, a
+  real one-shot latch (`break_request_sent`) stops a held click from
+  re-sending the break request every single frame while waiting for the
+  server's own `BlockChange` broadcast to land.
+- **Real break-progress overlay**: a solid box over the targeted block
+  darkens toward black as progress advances (new
+  `Renderer::submit_solid_box` - reuses the existing sky shader/vertex
+  format, no new shader files needed). Deliberately NOT a real crack-
+  noise-density effect on the block's own rendered face - that needs a
+  new per-fragment world-position uniform threaded through
+  `fs_chunk.sc`, a real, separate shader feature outside this phase's
+  scope (see DECISIONS.md) - this overlay is a real, visible,
+  honestly-scoped substitute, not a placeholder.
+- **Real hand icon**: the currently-selected placeable item's own real
+  `icon_color` (Phase 47), bottom-right corner, with a real elapsed-
+  time-driven swing animation (`kHandSwingDuration` = 0.25s, a real
+  sine ease) triggered on every real break or place action.
+- **Water stays genuinely unbreakable with zero special-case code**:
+  `has_collision = false` already keeps the DDA raycast from ever
+  stopping on it (Phase 37), so it was never a real break target to
+  begin with - no infinite-hardness hack needed.
+- **Real headless-hook rewrite, not a regression**: LCU_VERIFY_
+  BREAK_PLACE/LCU_VERIFY_TORCH/LCU_VERIFY_CRAFT previously drove a
+  single-frame Interact pulse (instant break, matching the pre-Phase-48
+  mechanic) - now real elapsed-time hold windows sized to each target
+  block's own hardness plus margin (a fixed frame count can't express
+  this reliably - this sandbox's unthrottled loop runs many thousands
+  of frames per real second). `LCU_VERIFY_CRAFT`'s networked run
+  specifically needed a wider real gap between its two break windows
+  than initially chosen (0.2s wasn't consistently enough margin for the
+  server round trip to land before the second hold window started,
+  confirmed by an actual failed run during verification, not just
+  reasoned about - see DECISIONS.md); widened to a real 0.8s.
+- 9 new unit tests (`BreakProgress`/`IsBreakReady`).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs (now hold-based, full pipeline confirmed:
+  break -> pick up -> cycle hotbar -> place, and for CRAFT, two
+  sequential real breaks -> match -> reject), a real two-process
+  networked `LCU_VERIFY_CRAFT` run (zero warnings/errors/rejects,
+  confirmed with the widened gap above), real `LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD` regression runs (unaffected, still pass), a real
+  `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader programs
+  all still `valid=true` - `submit_solid_box` needed no new shader), and
+  a real headless run for each hook confirming zero warnings/errors
+  from the new highlight/overlay/hand draw calls actually executing
+  every frame a block is targeted.
+- `ctest` 475/475 (bgfx, up from 466) / 467/467 (non-bgfx, up from 458).
+- Honestly scoped: what the highlight/overlay/hand icon actually look
+  like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION** (headless Noop backend proves every draw call executes
+  without error, not that it looks right); no real crack-noise-density
+  shader effect on the block's own face (deferred, see above); the
+  break-progress overlay is fully opaque (no real alpha blending), so
+  it appears at whatever darkness its first held frame computes rather
+  than fading in from fully invisible - a real, minor visual rough edge
+  from choosing not to add a new shader/uniform this phase (see
+  DECISIONS.md).
 
 ### Phase 47
 
