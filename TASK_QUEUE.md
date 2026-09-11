@@ -1534,6 +1534,71 @@ structures/vegetation stages yet (Phase 41); caves/ores have no
 artificial depth ceiling (an honest consequence of the noise fields
 having no cutoff of their own, not a hidden gap - see DECISIONS.md).
 
+## Phase 41 — Vegetation
+
+Real vegetation pipeline stage - deliberately single-column tree/cactus
+shapes, no cross-chunk canopy spread.
+
+- [x] **`VegetationType`/`vegetation_at(seed, x, z, biome)`**: `None`/
+  `Tree`/`Cactus`, own independent 2D noise field per type. Tree only
+  for `Biome::Plains`, Cactus only for `Biome::Desert` - `Biome::Snowy`
+  stays vegetation-free on purpose. New `VegetationBlocks` struct
+  (`wood`/`leaves`/`cactus`, same pattern as `BiomeBlocks`/`OreBlocks`).
+- [x] **Deliberately single-column shapes**: a tree is a 4-block `wood`
+  trunk capped by a 3-block `leaves` pillar directly above it; a cactus
+  is a 3-block `cactus` stack, no canopy. No wide canopy spreading into
+  neighboring columns - a real, deliberate scope choice (see
+  DECISIONS.md for why this is achievable-but-deferred, not
+  infeasible), with a real side effect: placement also works correctly
+  across vertically-stacked chunk boundaries with zero special-casing,
+  the same way Phase 37's sea-level water fill already does.
+- [x] Three new real blocks: `game:wood`, `game:leaves`, `game:cactus` -
+  solid, collidable, distinct colors only. Registered identically, same
+  sequence position, on `VoxelClient`/`VoxelServer` right after
+  `game:iron_ore`.
+- [x] **`generate_terrain_chunk` extended**: its above-terrain branch
+  now places a dry column's own vegetation above the surface block, air
+  everywhere else - checked once per column. New trailing
+  `VegetationBlocks` parameter on every caller (`VoxelClient`,
+  `VoxelServer`, `tools/benchmark`, worldgen tests).
+- [x] **Thresholds measured from the start**: `kTreeThreshold`/
+  `kCactusThreshold` picked from `fractal_noise`'s own real,
+  empirically-measured output range (a standalone probe program) before
+  ever running the tests, applying Phase 40's "measure, don't guess"
+  lesson proactively instead of needing another failure to arrive at
+  it - both worked on the first real test run (trees ~4.5% of Plains
+  columns, cacti ~2.5% of Desert columns).
+- [x] 7 new worldgen tests (`VegetationAtIsDeterministic`,
+  `VegetationAtNeverReturnsTreeOrCactusForSnowy`,
+  `VegetationAtNeverReturnsCactusForPlainsOrTreeForDesert`,
+  `VegetationAtProducesBothTreeAndCactusOverARealArea` - a real sweep
+  confirming both genuinely occur, and
+  `GenerateTerrainChunkPlacesARealTreeWhereVegetationAtSaysOneGrows` - a
+  real end-to-end check finding an actual dry Plains column with a
+  Tree, generating its chunk, and confirming the real trunk/canopy
+  blocks appear); 1 existing test
+  (`GenerateTerrainChunkMatchesTerrainHeightColumnByColumn`) rewritten
+  since its old "always air above terrain except water" assumption
+  stopped holding once vegetation could place blocks there.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn
+  column (-84,-84), `biome=Plains`, real shader program validity), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs
+  (byte-identical to Phase 40), and a real two-process networked run
+  with matching independently-computed spawn columns, zero
+  warnings/errors/rejects.
+
+`ctest` 406/406 (bgfx, up from 401) / 403/403 (non-bgfx, up from 398).
+
+Honestly scoped: **what a real tree/cactus actually looks like on a
+real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+wide/spreading tree canopies (a real, documented scope choice, not a
+hidden gap - see DECISIONS.md); no varied tree/cactus silhouettes (one
+shape per type, not the full variety a shipped game would eventually
+want); no wood/leaves/cactus item drops/mapping yet (breaking any of
+them removes it without granting an item, the same state coal/iron ore
+were in after Phase 40); no structures pipeline stage (out of scope
+for this 42-phase plan entirely, not a gap deferred from this phase).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

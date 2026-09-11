@@ -2,7 +2,81 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41
+
+### Phase 41
+
+- **Real vegetation pipeline stage** (brief section 21, the last one
+  before "structures"): `VegetationType` (`None`/`Tree`/`Cactus`) and
+  `vegetation_at(seed, world_x, world_z, biome)` - a genuinely
+  independent noise field per vegetation type (own seed offset each),
+  reusing the existing 2D `fractal_noise`. Tree only ever returned for
+  `Biome::Plains`, Cactus only for `Biome::Desert` - `Biome::Snowy`
+  stays vegetation-free on purpose (not every biome needs unique
+  content, the same reasoning water stayed biome-independent in Phase
+  39). New `VegetationBlocks` struct (`wood`, `leaves`, `cactus`) - same
+  caller-supplied pattern `BiomeBlocks`/`OreBlocks` already established.
+- **Deliberately single-column shapes**: a tree is a `kTreeTrunkHeight`
+  (4) stack of `wood` directly above the surface block, capped by a
+  `kTreeCanopyHeight` (3) stack of `leaves` directly above the trunk - a
+  cactus is a `kCactusHeight` (3) stack of `cactus`, no canopy. No wide
+  3x3 canopy spreading into neighboring columns - a real, deliberate
+  scope choice (see DECISIONS.md), not an accidental cross-chunk gap;
+  this also means vegetation placement naturally works correctly across
+  vertically-stacked chunk boundaries with zero special-casing, the same
+  way the sea-level water fill already did.
+- **Thresholds measured, not guessed**: `kTreeThreshold`/
+  `kCactusThreshold` were picked from `fractal_noise`'s own real,
+  empirically-measured output range (a standalone probe program, the
+  same "measure, don't guess" discipline Phase 40's ore thresholds were
+  just fixed with - applied here from the start instead of after a
+  wrong guess) - trees occur at ~4.5% of Plains columns, cacti at ~2.5%
+  of Desert columns, both real and reliably found by tests on the first
+  try.
+- **`generate_terrain_chunk` extended**: its above-terrain branch now
+  places a dry column's own vegetation (Tree trunk/canopy or Cactus
+  stack) above the surface block, real air everywhere else - checked
+  once per column (not once per cell), gated on the column being dry
+  (`height > kSeaLevel`) so nothing grows underwater. New trailing
+  `VegetationBlocks` parameter on every caller (`VoxelClient`,
+  `VoxelServer`, `tools/benchmark`, worldgen tests).
+- **Three new real blocks**: `game:wood`, `game:leaves`, `game:cactus` -
+  solid, collidable, distinct colors only (no new physics/rendering
+  mechanic - a real see-through/non-collidable leaves block would need
+  cross-shaped or transparent-layer meshing, neither of which exists
+  yet). Registered identically, same sequence position, on
+  `VoxelClient`/`VoxelServer` right after `game:iron_ore`.
+- **7 new worldgen unit tests**: `VegetationAtIsDeterministic`,
+  `VegetationAtNeverReturnsTreeOrCactusForSnowy`,
+  `VegetationAtNeverReturnsCactusForPlainsOrTreeForDesert`,
+  `VegetationAtProducesBothTreeAndCactusOverARealArea` (a real sweep
+  confirming both genuinely occur), and
+  `GenerateTerrainChunkPlacesARealTreeWhereVegetationAtSaysOneGrows` (a
+  real end-to-end check: finds a real dry Plains column with a Tree,
+  generates its chunk, confirms the actual trunk/canopy blocks appear);
+  1 existing test (`GenerateTerrainChunkMatchesTerrainHeightColumnByColumn`)
+  updated since its old "always air above terrain (except water)"
+  assumption stopped holding once vegetation could place wood/leaves/
+  cactus there - now computes the expected block the same way
+  `generate_terrain_chunk` itself does, via the real `vegetation_at`
+  function, not a hardcoded constant.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn column
+  (-84,-84), `biome=Plains`, real shader program validity), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs
+  (byte-identical to Phase 40), and a real two-process networked run
+  with matching independently-computed spawn columns, zero
+  warnings/errors/rejects.
+- `ctest` 406/406 (bgfx, up from 401) / 403/403 (non-bgfx, up from 398).
+- Honestly scoped: **what a real tree/cactus actually looks like on a
+  real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+  wide/spreading tree canopies (single-column shapes only, a real,
+  documented scope choice - see DECISIONS.md); no varied tree/cactus
+  silhouettes (one shape per type, not the variety a shipped game would
+  eventually want); no wood/leaves/cactus item drops/mapping yet
+  (breaking any of them currently removes it without granting an item);
+  no structures stage yet (the one remaining unimplemented brief
+  section 21 pipeline stage, Phase 42 is documentation instead per the
+  governing directive's own phase list).
 
 ### Phase 40
 

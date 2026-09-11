@@ -102,7 +102,8 @@ static void BM_Worldgen_GenerateTerrainChunk(benchmark::State& state) {
         lcu::world::worldgen::generate_terrain_chunk(
             chunk, ChunkCoord{0, 0, 0}, 1337,
             lcu::world::worldgen::BiomeBlocks{stone_id, stone_id, stone_id, stone_id, stone_id, stone_id}, stone_id,
-            stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id});
+            stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id},
+            lcu::world::worldgen::VegetationBlocks{stone_id, stone_id, stone_id});
     }
 }
 BENCHMARK(BM_Worldgen_GenerateTerrainChunk);
@@ -351,7 +352,8 @@ static void BM_Serialization_SaveChunk(benchmark::State& state) {
     lcu::world::worldgen::generate_terrain_chunk(
         chunk, ChunkCoord{0, 0, 0}, 1337,
         lcu::world::worldgen::BiomeBlocks{stone_id, stone_id, stone_id, stone_id, stone_id, stone_id}, stone_id,
-        stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id});
+        stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id},
+        lcu::world::worldgen::VegetationBlocks{stone_id, stone_id, stone_id});
     const std::string path = bench_temp_path("save_chunk.chunk");
 
     for (auto _ : state) {
@@ -369,7 +371,8 @@ static void BM_Serialization_LoadChunk(benchmark::State& state) {
     lcu::world::worldgen::generate_terrain_chunk(
         chunk, ChunkCoord{0, 0, 0}, 1337,
         lcu::world::worldgen::BiomeBlocks{stone_id, stone_id, stone_id, stone_id, stone_id, stone_id}, stone_id,
-        stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id});
+        stone_id, lcu::world::worldgen::OreBlocks{stone_id, stone_id},
+        lcu::world::worldgen::VegetationBlocks{stone_id, stone_id, stone_id});
     const std::string path = bench_temp_path("load_chunk.chunk");
     lcu::serialization::save_chunk_to_file(chunk, path);
 

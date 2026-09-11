@@ -2779,3 +2779,67 @@ an assumed uniform distribution again after the first failure (rejected
 - exactly the mistake that caused the first numbers to fail; measuring
 the real distribution is barely more work and gets a verifiably correct
 answer instead of another guess).
+
+## 2026-09-11 — Vegetation: single-column trees/cacti, no cross-chunk canopy spread
+
+**Context:** brief section 21's worldgen pipeline lists "vegetation" as
+the stage after caves/ores (Phase 40). A real tree in most voxel games
+has a canopy wider than the trunk's own column - typically a 3x3 (or
+larger) spread of leaves overlapping several neighboring columns. This
+project's chunks are generated independently, one at a time, via a
+per-column callback (`generate_terrain_chunk`) with no visibility into
+what a neighboring chunk will contain or whether it has been generated
+yet.
+
+**Decision:** confine each column's own tree/cactus entirely to that one
+column - a tree is a trunk directly above the surface block, capped by a
+leaf "pillar" directly above the trunk (not a spreading canopy); a
+cactus is just a stack, no canopy at all. Neither ever reads or writes a
+different (world_x, world_z) column than the one that spawned it.
+
+**This was a real, deliberate scope choice, not a limitation stumbled
+into by accident.** A wider canopy IS achievable without needing actual
+neighbor `Chunk` objects to exist yet - `terrain_height`/`biome_at`/
+`vegetation_at` are all pure functions of world coordinates, callable
+for any column regardless of which chunk is currently being generated,
+so a real implementation could scan a small radius of neighboring
+columns during generation and ask "would that neighbor's own tree reach
+into this cell" using nothing but extra pure-function calls (no
+cross-chunk chunk-data dependency at all). This was considered and
+rejected for this phase specifically because of scope, not feasibility:
+it adds real complexity (a radius scan per cell, care around which
+column's decision "wins" if two candidate trees are close enough that
+their hypothetical canopies would overlap) for a phase whose honest
+goal was "close the vegetation gap that exists today" (zero vegetation
+anywhere), not "build the final tree-canopy system a shipped game would
+ship with" - the same "small honest step from zero, not the final
+system" reasoning every biome/cave/ore phase before it already used.
+Real further work, deliberately deferred, not a hidden gap.
+
+**A real, useful side effect of the single-column choice:** it also
+means vegetation placement is correct across *vertically* stacked chunk
+boundaries with zero special-casing, for the same reason the Phase 37
+sea-level water fill already is - both are expressed purely as a
+function of `world_y` and a column's own `terrain_height()`, so
+`generate_terrain_chunk` computes the right answer independently no
+matter which chunk_y it's currently filling.
+
+**Vegetation thresholds measured empirically, applied from the start,**
+not guessed and fixed after a failure the way Phase 40's ore thresholds
+were - having just been caught by that exact mistake, the same
+standalone-probe-program technique was applied to `fractal_noise`'s own
+real output range before picking `kTreeThreshold`/`kCactusThreshold`,
+rather than repeating the "assume roughly [0,1)" guess a second time.
+
+**Alternatives considered:** a real 3x3 (or radius-based) spreading
+canopy using neighbor-column pure-function lookups (rejected for this
+phase's scope - see above; a genuinely promising real technique for a
+future phase, not dismissed as infeasible); storing partially-generated
+"pending" vegetation edits for a chunk to apply once its neighbor
+generates (rejected - meaningfully more implementation complexity and
+new persistent state, when the pure-function-lookup approach above
+would get the same result without needing to persist anything);
+skipping vegetation for Snowy by giving it its own always-None branch
+explicitly written out at every call site (rejected - `vegetation_at`
+already handles this correctly and uniformly by only ever checking
+`Biome::Plains`/`Biome::Desert`, no separate carve-out needed).

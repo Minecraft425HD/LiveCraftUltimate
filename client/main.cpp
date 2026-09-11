@@ -515,6 +515,36 @@ int main() {
     iron_ore_def.color = {0.82f, 0.71f, 0.58f};
     const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
 
+    // Real vegetation blocks (Phase 41, brief section 21's "vegetation"
+    // pipeline stage): solid, collidable, dark like every other block
+    // registered so far - no new physics/rendering mechanic (a real
+    // see-through/non-collidable leaves block would need cross-shaped
+    // or transparent-layer meshing, neither of which exists yet - see
+    // DECISIONS.md, the same reasoning water/torch already established).
+    lcu::voxel::BlockDefinition wood_def;
+    wood_def.namespaced_id = "game:wood";
+    wood_def.display_name = "Wood";
+    wood_def.is_transparent = false;
+    wood_def.has_collision = true;
+    wood_def.color = {0.45f, 0.30f, 0.15f};
+    const lcu::voxel::BlockId wood_id = block_registry.register_block(wood_def);
+
+    lcu::voxel::BlockDefinition leaves_def;
+    leaves_def.namespaced_id = "game:leaves";
+    leaves_def.display_name = "Leaves";
+    leaves_def.is_transparent = false;
+    leaves_def.has_collision = true;
+    leaves_def.color = {0.20f, 0.55f, 0.15f};
+    const lcu::voxel::BlockId leaves_id = block_registry.register_block(leaves_def);
+
+    lcu::voxel::BlockDefinition cactus_def;
+    cactus_def.namespaced_id = "game:cactus";
+    cactus_def.display_name = "Cactus";
+    cactus_def.is_transparent = false;
+    cactus_def.has_collision = true;
+    cactus_def.color = {0.10f, 0.45f, 0.30f};
+    const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -698,9 +728,14 @@ int main() {
         /*coal_ore=*/coal_ore_id,
         /*iron_ore=*/iron_ore_id,
     };
+    const lcu::world::worldgen::VegetationBlocks vegetation_blocks{
+        /*wood=*/wood_id,
+        /*leaves=*/leaves_id,
+        /*cactus=*/cactus_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id,
-                                                       ore_blocks);
+                                                       ore_blocks, vegetation_blocks);
     });
 
 #if defined(LCU_ENABLE_BGFX)

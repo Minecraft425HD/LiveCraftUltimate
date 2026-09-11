@@ -255,6 +255,38 @@ constexpr f32 kIronThreshold = 0.80f;
 constexpr i32 kIronMinY = -48;
 constexpr i32 kIronMaxY = -4;
 
+// Vegetation stage (Phase 41): a genuinely separate, independent noise
+// field per vegetation type (own seed offset each, same "different
+// offset = statistically independent" reasoning used everywhere else
+// in this file), reusing the existing 2D fractal_noise (trees/cacti
+// are column decisions, not volumetric like caves/ores).
+// kVegetationNoiseScale is coarser than a per-block hash so placement
+// clusters into real patches (small forests/cactus stands) instead of
+// scattering uniformly - still fine-grained enough to vary within a
+// single loaded area, unlike the much lower-frequency climate/
+// continental fields. Thresholds picked from fractal_noise's own real,
+// empirically-measured output range (the same "measure, don't guess"
+// approach Phase 40's ore thresholds were just fixed with) -
+// kTreeThreshold keeps trees a real, regularly-occurring feature
+// (~4.5% of Plains columns); kCactusThreshold is slightly higher, so
+// cacti stay somewhat sparser than trees (~2.5% of Desert columns) -
+// both still small next to VegetationType::None's overwhelming share.
+constexpr f32 kVegetationNoiseScale = 0.15f;
+constexpr u32 kTreeSeedOffset = 668265263u;
+constexpr f32 kTreeThreshold = 0.72f;
+constexpr u32 kCactusSeedOffset = 2166136261u;
+constexpr f32 kCactusThreshold = 0.75f;
+
+// How tall a tree's trunk/canopy cap is, and a cactus' height -
+// confined entirely to the one column that spawned it (see
+// worldgen.h's own doc comment on VegetationType/vegetation_at for why
+// - a real, deliberate scope choice, not an accidental cross-chunk
+// gap). Small, simple shapes - not the varied tree/cactus silhouettes
+// a shipped game would eventually want (see DECISIONS.md).
+constexpr i32 kTreeTrunkHeight = 4;
+constexpr i32 kTreeCanopyHeight = 3;
+constexpr i32 kCactusHeight = 3;
+
 }  // namespace
 
 i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
@@ -325,6 +357,22 @@ OreType ore_at(u32 seed, i32 world_x, i32 world_y, i32 world_z) {
     return OreType::None;
 }
 
+VegetationType vegetation_at(u32 seed, i32 world_x, i32 world_z, Biome biome) {
+    const f32 x = static_cast<f32>(world_x) * kVegetationNoiseScale;
+    const f32 z = static_cast<f32>(world_z) * kVegetationNoiseScale;
+
+    if (biome == Biome::Plains) {
+        if (fractal_noise(seed + kTreeSeedOffset, x, z) > kTreeThreshold) {
+            return VegetationType::Tree;
+        }
+    } else if (biome == Biome::Desert) {
+        if (fractal_noise(seed + kCactusSeedOffset, x, z) > kCactusThreshold) {
+            return VegetationType::Cactus;
+        }
+    }
+    return VegetationType::None;
+}
+
 namespace {
 
 // Which land block ids a column's own biome maps to (Phase 39) -
@@ -350,7 +398,8 @@ SurfaceBlocks surface_blocks_for(Biome biome, const BiomeBlocks& biome_blocks) {
 }  // namespace
 
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, const BiomeBlocks& biome_blocks,
-                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks) {
+                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks,
+                             const VegetationBlocks& vegetation_blocks) {
     constexpr u32 kEdge = voxel::Chunk::kEdgeLength;
 
     for (u32 lz = 0; lz < kEdge; ++lz) {
@@ -358,23 +407,40 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
         for (u32 lx = 0; lx < kEdge; ++lx) {
             const i32 world_x = coord.x * static_cast<i32>(kEdge) + static_cast<i32>(lx);
             const i32 height = terrain_height(seed, world_x, world_z);
-            const SurfaceBlocks surface_blocks = surface_blocks_for(biome_at(seed, world_x, world_z), biome_blocks);
+            const Biome biome = biome_at(seed, world_x, world_z);
+            const SurfaceBlocks surface_blocks = surface_blocks_for(biome, biome_blocks);
+            // Vegetation (Phase 41) never grows on a below-sea-level
+            // (underwater) column - only decided once per column, not
+            // once per cell, since it's the same answer for every Y.
+            const VegetationType vegetation =
+                height > kSeaLevel ? vegetation_at(seed, world_x, world_z, biome) : VegetationType::None;
 
             for (u32 ly = 0; ly < kEdge; ++ly) {
                 const i32 world_y = coord.y * static_cast<i32>(kEdge) + static_cast<i32>(ly);
                 if (world_y > height) {
                     // Above the terrain: water fills the gap up to sea
-                    // level for a below-sea-level column (Phase 37);
-                    // above sea level (or a dry column, where height
-                    // is already >= kSeaLevel and this branch is never
-                    // reached at or below it) stays air - the chunk's
-                    // default fill, nothing to set, unchanged from
-                    // before this phase. Not biome-dependent - a
+                    // level for a below-sea-level column (Phase 37).
+                    // Above sea level, a column with real vegetation
+                    // gets its trunk (Tree/Cactus alike start directly
+                    // on top of the surface block) then, for a Tree
+                    // only, a leaf cap directly above the trunk (Phase
+                    // 41) - everything else stays air, the chunk's
+                    // default fill. Not biome-dependent for water - a
                     // below-sea-level column is water regardless of
                     // climate (no ice-cap-vs-open-water distinction
                     // yet, an honest scoped gap, not a hidden one).
                     if (world_y <= kSeaLevel) {
                         chunk.set_block(lx, ly, lz, water_block);
+                    } else if (vegetation == VegetationType::Tree) {
+                        if (world_y <= height + kTreeTrunkHeight) {
+                            chunk.set_block(lx, ly, lz, vegetation_blocks.wood);
+                        } else if (world_y <= height + kTreeTrunkHeight + kTreeCanopyHeight) {
+                            chunk.set_block(lx, ly, lz, vegetation_blocks.leaves);
+                        }
+                    } else if (vegetation == VegetationType::Cactus) {
+                        if (world_y <= height + kCactusHeight) {
+                            chunk.set_block(lx, ly, lz, vegetation_blocks.cactus);
+                        }
                     }
                     continue;
                 }

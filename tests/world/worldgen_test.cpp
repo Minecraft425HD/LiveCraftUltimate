@@ -19,6 +19,9 @@ using lcu::world::worldgen::ore_at;
 using lcu::world::worldgen::OreBlocks;
 using lcu::world::worldgen::OreType;
 using lcu::world::worldgen::terrain_height;
+using lcu::world::worldgen::vegetation_at;
+using lcu::world::worldgen::VegetationBlocks;
+using lcu::world::worldgen::VegetationType;
 
 namespace {
 
@@ -30,6 +33,17 @@ constexpr lcu::voxel::BlockId kSand = 7;
 constexpr lcu::voxel::BlockId kSnow = 8;
 constexpr lcu::voxel::BlockId kCoalOre = 9;
 constexpr lcu::voxel::BlockId kIronOre = 10;
+constexpr lcu::voxel::BlockId kWood = 11;
+constexpr lcu::voxel::BlockId kLeaves = 12;
+constexpr lcu::voxel::BlockId kCactus = 13;
+
+// Matches worldgen.cpp's own kTreeTrunkHeight/kTreeCanopyHeight/
+// kCactusHeight - same "duplicate the private constant, comment where
+// it comes from" pattern kSubsurfaceDepth already used below, since
+// these aren't (and don't need to be) exposed in worldgen.h.
+constexpr lcu::i32 kTreeTrunkHeight = 4;
+constexpr lcu::i32 kTreeCanopyHeight = 3;
+constexpr lcu::i32 kCactusHeight = 3;
 
 // Distinct ids per biome (unlike production code, which reuses kSand
 // for both Desert's surface and subsurface) so a test can tell exactly
@@ -45,6 +59,14 @@ const BiomeBlocks kTestBiomeBlocks{
 const OreBlocks kTestOreBlocks{
     /*coal_ore=*/kCoalOre,
     /*iron_ore=*/kIronOre,
+};
+
+// Distinct ids per vegetation block (Phase 41), same "distinct per
+// category" reasoning as kTestBiomeBlocks/kTestOreBlocks above.
+const VegetationBlocks kTestVegetationBlocks{
+    /*wood=*/kWood,
+    /*leaves=*/kLeaves,
+    /*cactus=*/kCactus,
 };
 
 // Mirrors generate_terrain_chunk's own stone-band logic exactly (worldgen.cpp:
@@ -66,6 +88,42 @@ lcu::voxel::BlockId expected_stone_band_block(lcu::u32 seed, lcu::i32 world_x, l
             return kStone;
     }
     return kStone;
+}
+
+// Mirrors generate_terrain_chunk's own above-terrain logic exactly
+// (worldgen.cpp: water at/below sea level; above sea level, a dry
+// column's own vegetation_at result places a Tree's trunk/canopy or a
+// Cactus' stack; anything else stays air) via the same public
+// vegetation_at function worldgen.cpp itself calls, so a test can
+// compute the expected block for any above-terrain cell without
+// duplicating worldgen.cpp's private internals (beyond the trunk/
+// canopy/cactus heights themselves - see kTreeTrunkHeight's own
+// comment above for why those are duplicated, not exposed).
+lcu::voxel::BlockId expected_above_terrain_block(lcu::u32 seed, lcu::i32 world_x, lcu::i32 world_y,
+                                                  lcu::i32 world_z, lcu::i32 height, Biome biome) {
+    if (world_y <= lcu::world::worldgen::kSeaLevel) {
+        return kWater;
+    }
+    if (height > lcu::world::worldgen::kSeaLevel) {
+        switch (vegetation_at(seed, world_x, world_z, biome)) {
+            case VegetationType::Tree:
+                if (world_y <= height + kTreeTrunkHeight) {
+                    return kWood;
+                }
+                if (world_y <= height + kTreeTrunkHeight + kTreeCanopyHeight) {
+                    return kLeaves;
+                }
+                break;
+            case VegetationType::Cactus:
+                if (world_y <= height + kCactusHeight) {
+                    return kCactus;
+                }
+                break;
+            case VegetationType::None:
+                break;
+        }
+    }
+    return lcu::voxel::kAirBlockId;
 }
 
 lcu::voxel::BlockId expected_surface_for(Biome biome) {
@@ -225,7 +283,8 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
     const ChunkCoord coord{0, 0, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/99, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
+    generate_terrain_chunk(chunk, coord, /*seed=*/99, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
 
     // Spot-check a handful of columns against terrain_height/biome_at
     // directly - that column's biome surface block at the height, that
@@ -246,11 +305,8 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
                 const lcu::i32 world_y = static_cast<lcu::i32>(ly);
                 const auto block = chunk.block_at(lx, ly, lz);
                 if (world_y > height) {
-                    if (world_y <= lcu::world::worldgen::kSeaLevel) {
-                        EXPECT_EQ(block, kWater) << "(" << lx << "," << ly << "," << lz << ")";
-                    } else {
-                        EXPECT_EQ(block, lcu::voxel::kAirBlockId) << "(" << lx << "," << ly << "," << lz << ")";
-                    }
+                    EXPECT_EQ(block, expected_above_terrain_block(99, world_x, world_y, world_z, height, biome))
+                        << "(" << lx << "," << ly << "," << lz << ")";
                 } else if (world_y == height) {
                     EXPECT_EQ(block, expected_surface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else if (world_y > height - kSubsurfaceDepth) {
@@ -270,7 +326,8 @@ TEST(Worldgen, ChunkFarAboveTerrainIsEntirelyAir) {
     const ChunkCoord coord{0, 100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
 
     EXPECT_TRUE(chunk.is_empty());
 }
@@ -286,7 +343,8 @@ TEST(Worldgen, ChunkFarBelowTerrainIsStoneCaveOrOre) {
     const ChunkCoord coord{0, -100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
 
     const auto check_cell = [&](lcu::u32 lx, lcu::u32 ly, lcu::u32 lz) {
         const lcu::i32 world_x = coord.x * static_cast<lcu::i32>(Chunk::kEdgeLength) + static_cast<lcu::i32>(lx);
@@ -319,7 +377,8 @@ TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
                                                   "different seed/column, or generate both chunks";
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
 
     EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), expected_surface_for(biome));
     EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z),
@@ -362,7 +421,8 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
         auto it = chunks_by_y.find(split.chunk.y);
         if (it == chunks_by_y.end()) {
             Chunk chunk;
-            generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
+            generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                                    kTestVegetationBlocks);
             it = chunks_by_y.emplace(split.chunk.y, std::move(chunk)).first;
         }
         return it->second;
@@ -458,4 +518,124 @@ TEST(Worldgen, OreAtProducesBothOreTypesOverARealVolume) {
     }
     EXPECT_TRUE(saw_coal) << "no Coal found in a wide underground sample";
     EXPECT_TRUE(saw_iron) << "no Iron found in a wide underground sample";
+}
+
+TEST(Worldgen, VegetationAtIsDeterministic) {
+    const VegetationType a = vegetation_at(42, 100, -50, Biome::Plains);
+    const VegetationType b = vegetation_at(42, 100, -50, Biome::Plains);
+    const VegetationType c = vegetation_at(42, 100, -50, Biome::Plains);
+
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(b, c);
+}
+
+TEST(Worldgen, VegetationAtNeverReturnsTreeOrCactusForSnowy) {
+    // Real proxy for worldgen.h's own "Snowy never gets vegetation"
+    // guarantee: scan a wide area passing Biome::Snowy explicitly and
+    // confirm every result is None, regardless of what the same column
+    // would produce for a different biome.
+    for (lcu::i32 x = -300; x <= 300; x += 11) {
+        for (lcu::i32 z = -300; z <= 300; z += 13) {
+            EXPECT_EQ(vegetation_at(9, x, z, Biome::Snowy), VegetationType::None)
+                << "at (" << x << "," << z << ")";
+        }
+    }
+}
+
+TEST(Worldgen, VegetationAtNeverReturnsCactusForPlainsOrTreeForDesert) {
+    // Real proxy for the header's own "Tree only for Plains, Cactus
+    // only for Desert" guarantee, checked at the same columns against
+    // both biomes so a real difference in outcome is exercised, not
+    // just an absence of Cactus/Tree that could also be explained by
+    // an always-None implementation.
+    for (lcu::i32 x = -300; x <= 300; x += 11) {
+        for (lcu::i32 z = -300; z <= 300; z += 13) {
+            EXPECT_NE(vegetation_at(9, x, z, Biome::Plains), VegetationType::Cactus)
+                << "at (" << x << "," << z << ")";
+            EXPECT_NE(vegetation_at(9, x, z, Biome::Desert), VegetationType::Tree)
+                << "at (" << x << "," << z << ")";
+        }
+    }
+}
+
+TEST(Worldgen, VegetationAtProducesBothTreeAndCactusOverARealArea) {
+    // Real proxy for "vegetation genuinely occurs, not just None
+    // everywhere (the common case by design, see worldgen.h)": scan a
+    // wide area and confirm both a Tree (queried as Plains) and a
+    // Cactus (queried as Desert) genuinely occur somewhere in it.
+    constexpr lcu::u32 kSeed = 5;
+    bool saw_tree = false;
+    bool saw_cactus = false;
+    for (lcu::i32 x = -300; x <= 300 && !(saw_tree && saw_cactus); x += 2) {
+        for (lcu::i32 z = -300; z <= 300 && !(saw_tree && saw_cactus); z += 2) {
+            if (vegetation_at(kSeed, x, z, Biome::Plains) == VegetationType::Tree) {
+                saw_tree = true;
+            }
+            if (vegetation_at(kSeed, x, z, Biome::Desert) == VegetationType::Cactus) {
+                saw_cactus = true;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_tree) << "no Tree found in a wide area sample";
+    EXPECT_TRUE(saw_cactus) << "no Cactus found in a wide area sample";
+}
+
+TEST(Worldgen, GenerateTerrainChunkPlacesARealTreeWhereVegetationAtSaysOneGrows) {
+    // End-to-end check that generate_terrain_chunk actually places the
+    // trunk/canopy generate_terrain_chunk's own doc comment describes,
+    // not just that vegetation_at returns Tree in isolation: find a
+    // real dry Plains column where vegetation_at says Tree, generate
+    // its chunk, and confirm the real trunk/canopy shape appears.
+    constexpr lcu::u32 kSeed = 5;
+    lcu::i32 found_x = 0;
+    lcu::i32 found_z = 0;
+    bool found = false;
+    for (lcu::i32 x = -300; x <= 300 && !found; x += 2) {
+        for (lcu::i32 z = -300; z <= 300 && !found; z += 2) {
+            if (biome_at(kSeed, x, z) != Biome::Plains) {
+                continue;
+            }
+            const lcu::i32 height = terrain_height(kSeed, x, z);
+            if (height <= lcu::world::worldgen::kSeaLevel) {
+                continue;
+            }
+            if (vegetation_at(kSeed, x, z, Biome::Plains) != VegetationType::Tree) {
+                continue;
+            }
+            // Only accept a column whose whole trunk+canopy lands in
+            // one chunk - a tree straddling two chunks is a real,
+            // separate case this deliberately single-column-scoped
+            // feature doesn't need to handle (see worldgen.h), not
+            // something this test should stumble into by chance.
+            const auto trunk_start = lcu::voxel::world_to_chunk_and_local({x, height + 1, z}, Chunk::kEdgeLength);
+            const auto canopy_end = lcu::voxel::world_to_chunk_and_local(
+                {x, height + kTreeTrunkHeight + kTreeCanopyHeight, z}, Chunk::kEdgeLength);
+            if (trunk_start.chunk != canopy_end.chunk) {
+                continue;
+            }
+            found_x = x;
+            found_z = z;
+            found = true;
+        }
+    }
+    ASSERT_TRUE(found) << "no dry Plains column with a single-chunk Tree found in a wide sample";
+
+    const lcu::i32 height = terrain_height(kSeed, found_x, found_z);
+    const auto split = lcu::voxel::world_to_chunk_and_local({found_x, height + 1, found_z}, Chunk::kEdgeLength);
+
+    Chunk chunk;
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
+
+    for (lcu::i32 world_y = height + 1; world_y <= height + kTreeTrunkHeight; ++world_y) {
+        const auto local = lcu::voxel::world_to_chunk_and_local({found_x, world_y, found_z}, Chunk::kEdgeLength);
+        ASSERT_EQ(local.chunk, split.chunk) << "trunk spans more than one chunk - pick a different seed/column";
+        EXPECT_EQ(chunk.block_at(local.local.x, local.local.y, local.local.z), kWood) << "world_y=" << world_y;
+    }
+    for (lcu::i32 world_y = height + kTreeTrunkHeight + 1; world_y <= height + kTreeTrunkHeight + kTreeCanopyHeight;
+         ++world_y) {
+        const auto local = lcu::voxel::world_to_chunk_and_local({found_x, world_y, found_z}, Chunk::kEdgeLength);
+        ASSERT_EQ(local.chunk, split.chunk) << "canopy spans more than one chunk - pick a different seed/column";
+        EXPECT_EQ(chunk.block_at(local.local.x, local.local.y, local.local.z), kLeaves) << "world_y=" << world_y;
+    }
 }

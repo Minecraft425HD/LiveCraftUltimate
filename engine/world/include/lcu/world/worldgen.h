@@ -99,6 +99,43 @@ struct OreBlocks {
     voxel::BlockId iron_ore;
 };
 
+// Real vegetation pipeline stage (Phase 41, brief section 21): a
+// deliberately small, honest set - one tree shape for Biome::Plains,
+// one cactus shape for Biome::Desert, nothing for Biome::Snowy (not
+// every biome needs unique content - Snowy stayed vegetation-free the
+// same way water stayed biome-independent in Phase 39). `None` (no
+// vegetation at this column) is the common outcome by design, the same
+// "rare/common" reasoning Phase 40's OreType::None already established.
+// Each column's own tree/cactus is confined to that single column - no
+// wide canopy spreading into neighboring columns - a real, deliberate
+// scope choice (see DECISIONS.md), not an accidental cross-chunk gap.
+enum class VegetationType {
+    None,
+    Tree,
+    Cactus,
+};
+
+// Deterministic vegetation decision at a given world X/Z column, for a
+// given seed and that column's own already-computed `biome` (the
+// caller - generate_terrain_chunk - already has it via biome_at, no
+// reason to recompute it here) - same pure/deterministic contract as
+// terrain_height/biome_at. Tree is only ever returned for
+// Biome::Plains, Cactus only for Biome::Desert - each its own
+// independent noise field (own seed offset) so tree/cactus placement
+// patterns don't visibly correlate with each other or with the
+// terrain/climate/cave/ore noise fields.
+VegetationType vegetation_at(u32 seed, i32 world_x, i32 world_z, Biome biome);
+
+// The real block ids VegetationType::Tree/Cactus map to (Phase 41) -
+// caller-supplied, the same pattern BiomeBlocks/OreBlocks already
+// established. A tree uses both `wood` (trunk) and `leaves` (canopy
+// cap directly above the trunk); a cactus uses only `cactus`.
+struct VegetationBlocks {
+    voxel::BlockId wood;
+    voxel::BlockId leaves;
+    voxel::BlockId cactus;
+};
+
 // Fills `chunk` (at chunk coordinate `coord`) from terrain_height()
 // and biome_at(): the biome's own surface block at the topmost solid
 // layer, that biome's subsurface block for the next kSubsurfaceDepth
@@ -109,10 +146,12 @@ struct OreBlocks {
 // left over is `stone_block`. Above the terrain height: `water_block`
 // for any cell at or below kSeaLevel (Phase 37 - a below-sea-level
 // column's "hole" between its terrain and the sea surface, unaffected
-// by biome/caves/ores), air everywhere else. Still no structures/
-// vegetation (later brief section 21 pipeline stages, not
-// implemented).
+// by biome/caves/ores); otherwise `vegetation_at`'s own trunk/canopy
+// blocks (Phase 41) for a column with real vegetation, air everywhere
+// else. Still no structures (the one remaining unimplemented brief
+// section 21 pipeline stage).
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, const BiomeBlocks& biome_blocks,
-                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks);
+                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks,
+                             const VegetationBlocks& vegetation_blocks);
 
 }  // namespace lcu::world::worldgen

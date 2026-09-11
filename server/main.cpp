@@ -333,6 +333,33 @@ int main(int argc, char** argv) {
     iron_ore_def.has_collision = true;
     const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
 
+    // Mirrors VoxelClient's own registration exactly (Phase 41: real
+    // vegetation pipeline stage) - the server needs its own
+    // authoritative copy so a chunk it generates has the same
+    // trees/cacti a client generating the same seed/coord independently
+    // would compute, and so BlockId alignment across both sides holds
+    // the same as every block above.
+    lcu::voxel::BlockDefinition wood_def;
+    wood_def.namespaced_id = "game:wood";
+    wood_def.display_name = "Wood";
+    wood_def.is_transparent = false;
+    wood_def.has_collision = true;
+    const lcu::voxel::BlockId wood_id = block_registry.register_block(wood_def);
+
+    lcu::voxel::BlockDefinition leaves_def;
+    leaves_def.namespaced_id = "game:leaves";
+    leaves_def.display_name = "Leaves";
+    leaves_def.is_transparent = false;
+    leaves_def.has_collision = true;
+    const lcu::voxel::BlockId leaves_id = block_registry.register_block(leaves_def);
+
+    lcu::voxel::BlockDefinition cactus_def;
+    cactus_def.namespaced_id = "game:cactus";
+    cactus_def.display_name = "Cactus";
+    cactus_def.is_transparent = false;
+    cactus_def.has_collision = true;
+    const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
+
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
     // register the same one item in the same order, so their ItemIds
@@ -401,9 +428,14 @@ int main(int argc, char** argv) {
         /*coal_ore=*/coal_ore_id,
         /*iron_ore=*/iron_ore_id,
     };
+    const lcu::world::worldgen::VegetationBlocks vegetation_blocks{
+        /*wood=*/wood_id,
+        /*leaves=*/leaves_id,
+        /*cactus=*/cactus_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
         lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id,
-                                                       ore_blocks);
+                                                       ore_blocks, vegetation_blocks);
     });
 
     // Real chunk persistence trigger (Phase 20) - `engine/serialization::
