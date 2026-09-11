@@ -28,6 +28,17 @@ class Inventory {
     // kNoItemId or a zero count.
     u32 add_item(const ItemRegistry& registry, ItemStack stack);
 
+    // Same fill order as add_item (matching stacks first, then empty
+    // slots), but confined to the half-open slot index range
+    // [range_begin, range_end) - the real primitive shift-click transfer
+    // needs (Phase 49): "move this stack into the *other* inventory
+    // section" (hotbar <-> main storage, or a craft grid <-> main
+    // inventory) has to land only in that section, not anywhere in the
+    // whole inventory the plain add_item would search. Asserts the range
+    // is in bounds; a range with range_begin >= range_end is asserted
+    // against too (callers always pass real, non-empty ranges).
+    u32 add_item_to_range(const ItemRegistry& registry, ItemStack stack, usize range_begin, usize range_end);
+
     // Removes up to `count` of `item`, earliest slots first, emptying a
     // slot (resetting it to kNoItemId) once it reaches zero. Returns how
     // many were actually removed - may be less than `count` if the

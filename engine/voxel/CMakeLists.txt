@@ -1,6 +1,7 @@
 add_library(LcuVoxel STATIC
     src/chunk_coord.cpp
     src/block_registry.cpp
+    src/break_progress.cpp
 )
 add_library(Lcu::Voxel ALIAS LcuVoxel)
 

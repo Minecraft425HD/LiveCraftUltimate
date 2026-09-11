@@ -52,7 +52,11 @@ Window::Window(Window&& other) noexcept
     : handle_(other.handle_),
       width_(other.width_),
       height_(other.height_),
-      should_close_(other.should_close_) {
+      should_close_(other.should_close_),
+      relative_mouse_mode_(other.relative_mouse_mode_),
+      wheel_delta_y_(other.wheel_delta_y_),
+      focus_lost_(other.focus_lost_),
+      fullscreen_(other.fullscreen_) {
     other.handle_ = nullptr;
 }
 
@@ -66,6 +70,10 @@ Window& Window::operator=(Window&& other) noexcept {
         width_ = other.width_;
         height_ = other.height_;
         should_close_ = other.should_close_;
+        relative_mouse_mode_ = other.relative_mouse_mode_;
+        wheel_delta_y_ = other.wheel_delta_y_;
+        focus_lost_ = other.focus_lost_;
+        fullscreen_ = other.fullscreen_;
         other.handle_ = nullptr;
     }
     return *this;
@@ -85,11 +93,80 @@ bool Window::pump_events() {
                 width_ = event.window.data1;
                 height_ = event.window.data2;
                 break;
+            case SDL_EVENT_MOUSE_WHEEL:
+                // Real per-frame accumulation (Phase 43) - a frame with
+                // multiple wheel events (a fast scroll, or just several
+                // queued since the last pump) sums them, matching how a
+                // real scroll gesture's total magnitude should read.
+                wheel_delta_y_ += event.wheel.y;
+                break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                // Latched, not overwritten - consume_focus_lost() clears
+                // it, so a focus-lost that happens between two
+                // consume_focus_lost() calls (unlikely at one poll per
+                // frame, but real) isn't silently dropped.
+                focus_lost_ = true;
+                break;
             default:
                 break;
         }
     }
     return !should_close_;
 }
+
+void Window::set_relative_mouse_mode(bool enabled) {
+    if (handle_ != nullptr) {
+        // Real return-value check, not ignored: under a headless/dummy
+        // SDL video driver (this sandbox's own verification runs - see
+        // BUILDING.md) there's no real mouse device to capture, so this
+        // genuinely fails - logged, not fatal, since the caller (client/
+        // main.cpp) still needs to keep running headlessly either way.
+        if (!SDL_SetWindowRelativeMouseMode(handle_, enabled)) {
+            LCU_LOG_WARN("SDL_SetWindowRelativeMouseMode({}) failed: {} (expected under a headless/dummy video driver)",
+                         enabled, SDL_GetError());
+        }
+    }
+    relative_mouse_mode_ = enabled;
+}
+
+f32 Window::consume_wheel_delta_y() {
+    const f32 delta = wheel_delta_y_;
+    wheel_delta_y_ = 0.0f;
+    return delta;
+}
+
+bool Window::consume_focus_lost() {
+    const bool was_lost = focus_lost_;
+    focus_lost_ = false;
+    return was_lost;
+}
+
+void Window::set_fullscreen(bool enabled) {
+    if (handle_ != nullptr) {
+        // Same real, non-fatal tolerance set_relative_mouse_mode already
+        // has: a headless/dummy video driver has no real display to
+        // occupy fullscreen, so a genuine failure here is expected under
+        // this sandbox's own verification runs, not a bug to crash over.
+        if (!SDL_SetWindowFullscreen(handle_, enabled)) {
+            LCU_LOG_WARN("SDL_SetWindowFullscreen({}) failed: {} (expected under a headless/dummy video driver)",
+                         enabled, SDL_GetError());
+        }
+    }
+    fullscreen_ = enabled;
+}
+
+std::string Window::executable_base_path() {
+    const char* base = SDL_GetBasePath();
+    return base != nullptr ? std::string(base) : std::string();
+}
+
+Window::MousePosition Window::mouse_position() {
+    float x = 0.0f;
+    float y = 0.0f;
+    SDL_GetMouseState(&x, &y);
+    return {x, y};
+}
+
+void Window::warp_mouse(f32 x, f32 y) { SDL_WarpMouseInWindow(handle_, x, y); }
 
 }  // namespace lcu::platform

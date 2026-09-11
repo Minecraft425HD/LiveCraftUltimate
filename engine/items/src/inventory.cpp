@@ -19,12 +19,19 @@ void Inventory::set_slot(usize index, ItemStack stack) {
 }
 
 u32 Inventory::add_item(const ItemRegistry& registry, ItemStack stack) {
+    return add_item_to_range(registry, stack, 0, slots_.size());
+}
+
+u32 Inventory::add_item_to_range(const ItemRegistry& registry, ItemStack stack, usize range_begin, usize range_end) {
+    LCU_ASSERT(range_begin <= range_end);
+    LCU_ASSERT(range_end <= slots_.size());
     if (stack.item == kNoItemId || stack.count == 0) {
         return stack.count;
     }
     const u32 max_stack = registry.definition_of(stack.item).max_stack_size;
 
-    for (ItemStack& slot : slots_) {
+    for (usize i = range_begin; i < range_end; ++i) {
+        ItemStack& slot = slots_[i];
         if (stack.count == 0) {
             break;
         }
@@ -36,7 +43,8 @@ u32 Inventory::add_item(const ItemRegistry& registry, ItemStack stack) {
         }
     }
 
-    for (ItemStack& slot : slots_) {
+    for (usize i = range_begin; i < range_end; ++i) {
+        ItemStack& slot = slots_[i];
         if (stack.count == 0) {
             break;
         }

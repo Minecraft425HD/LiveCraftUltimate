@@ -19,7 +19,6 @@ constexpr u8 kColorYellowOnBlack = 0x0e;
 
 void draw_debug_overlay(rendering::Renderer& renderer, u32 screen_width, u32 screen_height, f32 fps,
                          const DebugOverlayStats& stats) {
-    renderer.clear_debug_text();
     renderer.draw_debug_text(0, 0, kColorWhiteOnBlack, "fps=" + std::to_string(static_cast<int>(fps)));
     renderer.draw_debug_text(0, 1, kColorWhiteOnBlack,
                               "chunks=" + std::to_string(stats.chunks_loaded) +

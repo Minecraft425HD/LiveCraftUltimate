@@ -10,6 +10,7 @@ add_executable(VoxelTests
     voxel/chunk_coord_test.cpp
     voxel/block_registry_test.cpp
     voxel/greedy_mesher_test.cpp
+    voxel/break_progress_test.cpp
     jobs/job_system_test.cpp
     world/world_test.cpp
     world/worldgen_test.cpp
@@ -18,6 +19,7 @@ add_executable(VoxelTests
     physics/collision_test.cpp
     items/item_registry_test.cpp
     items/inventory_test.cpp
+    items/inventory_ops_test.cpp
     items/recipe_registry_test.cpp
     ecs/registry_test.cpp
     lighting/propagation_test.cpp
@@ -25,6 +27,8 @@ add_executable(VoxelTests
     game/systems/ai_wander_system_test.cpp
     game/systems/day_night_cycle_test.cpp
     game/systems/replication_protocol_test.cpp
+    game/systems/item_entity_system_test.cpp
+    game/systems/player_vitals_system_test.cpp
     game/items/block_item_mapping_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp
@@ -58,7 +62,8 @@ target_link_libraries(VoxelTests PRIVATE
 # built when engine/platform exists (LCU_BUILD_CLIENT=ON), since that's
 # the only configuration LcuPlatform (and the SDL3 it links) is built in.
 if(TARGET Lcu::Platform)
-    target_sources(VoxelTests PRIVATE platform/input_test.cpp platform/touch_input_test.cpp)
+    target_sources(VoxelTests PRIVATE platform/input_test.cpp platform/touch_input_test.cpp
+                                       platform/key_bindings_test.cpp platform/options_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Platform)
 endif()
 
@@ -73,8 +78,18 @@ endif()
 # LCU_ENABLE_BGFX both ON) - these tests initialize a real (headless
 # Noop-backend) bgfx context to upload GPU buffers.
 if(TARGET Lcu::Rendering)
-    target_sources(VoxelTests PRIVATE rendering/chunk_mesh_upload_test.cpp)
+    target_sources(VoxelTests PRIVATE rendering/chunk_mesh_upload_test.cpp rendering/quad_batch_2d_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Rendering)
+endif()
+
+# MenuStack (Phase 46) is pure logic - no bgfx needed to test its
+# navigation/layout/hit-testing - so this is built alongside
+# Lcu::Platform's own tests, in both the bgfx and non-bgfx configs (see
+# engine/ui/CMakeLists.txt).
+if(TARGET Lcu::Ui)
+    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp ui/inventory_screen_test.cpp
+                                       ui/crafting_table_screen_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
 endif()
 
 # Waveform/positional-audio math is pure logic (no real audio device

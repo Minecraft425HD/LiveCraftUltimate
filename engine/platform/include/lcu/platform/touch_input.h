@@ -44,7 +44,7 @@ class TouchInputBackend {
 
     // Recomputes InputState from this frame's active touches. Call once
     // per frame with the full current touch list (not deltas) - like
-    // KeyboardInputBackend::update, this fully overwrites every Action
+    // DesktopInputBackend::update, this fully overwrites every Action
     // Action it's responsible for, so a released finger's action clears
     // automatically the frame it stops appearing in `active_touches`.
     void update(const std::vector<TouchPoint>& active_touches, InputState& state);

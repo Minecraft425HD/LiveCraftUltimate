@@ -117,6 +117,35 @@ TEST(Inventory, AddItemNoOpForNoItemOrZeroCount) {
     EXPECT_TRUE(inventory.slot_at(0).is_empty());
 }
 
+TEST(Inventory, AddItemToRangeStaysWithinTheGivenSlotRange) {
+    lcu::items::ItemId stone_id = 0;
+    lcu::items::ItemId wand_id = 0;
+    const ItemRegistry registry = make_registry_with_stone_and_wand(stone_id, wand_id);
+
+    Inventory inventory(4);
+    const lcu::u32 leftover = inventory.add_item_to_range(registry, ItemStack{stone_id, 100}, 2, 4);
+
+    // Only slots 2-3 are eligible - 64 fit in slot 2, 36 spill into slot
+    // 3, nothing may land in slots 0-1.
+    EXPECT_EQ(leftover, 0u);
+    EXPECT_TRUE(inventory.slot_at(0).is_empty());
+    EXPECT_TRUE(inventory.slot_at(1).is_empty());
+    EXPECT_EQ(inventory.slot_at(2).count, 64u);
+    EXPECT_EQ(inventory.slot_at(3).count, 36u);
+}
+
+TEST(Inventory, AddItemToRangeReturnsLeftoverWhenRangeIsFull) {
+    lcu::items::ItemId stone_id = 0;
+    lcu::items::ItemId wand_id = 0;
+    const ItemRegistry registry = make_registry_with_stone_and_wand(stone_id, wand_id);
+
+    Inventory inventory(4);
+    const lcu::u32 leftover = inventory.add_item_to_range(registry, ItemStack{stone_id, 100}, 2, 3);
+
+    EXPECT_EQ(leftover, 100u - 64u);
+    EXPECT_EQ(inventory.slot_at(2).count, 64u);
+}
+
 TEST(Inventory, RemoveItemTakesFromEarliestSlotsFirstAndEmptiesSlot) {
     Inventory inventory(3);
     inventory.set_slot(0, ItemStack{7, 5});

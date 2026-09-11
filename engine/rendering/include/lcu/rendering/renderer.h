@@ -1,11 +1,13 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <bgfx/bgfx.h>
 
 #include "lcu/core/types.h"
 #include "lcu/math/mat4.h"
+#include "lcu/math/vec4.h"
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
 
@@ -20,6 +22,23 @@ struct RendererDesc {
     // When false and window_handle.nwh is null, Renderer::init falls back
     // to Noop automatically anyway (there is nothing else it could do).
     bool force_headless = false;
+};
+
+// One 2D UI vertex (Phase 44): screen-space position (pixels) + UV (0..1
+// within its own quad) + straight-alpha RGBA color - the real vertex
+// format submit_ui_quad/flush_ui_quads batch, mirroring the position+
+// color-only SkyVertex/LineVertex structs renderer.cpp already defines
+// for the 3D debug/sky draws, with UV added since 2D UI has a real
+// future use for it (a pattern/atlas lookup) those don't.
+struct UiVertex2D {
+    f32 x = 0.0f;
+    f32 y = 0.0f;
+    f32 u = 0.0f;
+    f32 v = 0.0f;
+    f32 r = 0.0f;
+    f32 g = 0.0f;
+    f32 b = 0.0f;
+    f32 a = 0.0f;
 };
 
 // Thin wrapper around bgfx's global init/frame/shutdown lifecycle. This is
@@ -87,6 +106,66 @@ class Renderer : public NonCopyable {
     void submit_wireframe_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
                                bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
 
+    // Draws an axis-aligned SOLID box (Phase 48's real break-progress
+    // overlay - the targeted block darkens as break progress advances).
+    // Reuses the exact same minimal position+color vertex format/shader
+    // submit_wireframe_box/submit_billboard already established, just
+    // with the default triangle-list topology (a real box, 12
+    // triangles) and real depth testing against terrain instead of a
+    // line list. No-op if `program` is invalid.
+    void submit_solid_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
+                           bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
+
+    // Draws one camera-facing colored quad into the terrain view (view
+    // 0) WITH real depth testing against solid terrain (Phase 50's real
+    // item-entity rendering) - the same camera-facing quad math
+    // submit_billboard already uses, but genuinely occluded by/occluding
+    // against nearby geometry the way a real object living in the game
+    // world needs, unlike submit_billboard's own sky view (no depth
+    // test - correct for a sun/moon "at infinity", wrong for a dropped
+    // item sitting on the ground behind a wall). No depth *write*, same
+    // reasoning submit_wireframe_box/submit_solid_box's own comments
+    // give for a per-frame, moving object. No-op if `program` is
+    // invalid.
+    void submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
+                                 f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
+                                 const math::Mat4& view, const math::Mat4& proj);
+
+    // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
+    // appends one screen-space rectangle - `x`/`y`/`width`/`height` in
+    // pixels, top-left origin, y increasing downward (SDL/mouse
+    // convention) - to this frame's pending batch, tinted `color`
+    // (straight, not premultiplied, alpha). Nothing is actually drawn
+    // yet: call flush_ui_quads() once per frame (after every
+    // submit_ui_quad() call for that frame, before end_frame()) to
+    // upload the whole batch and issue exactly one real draw call for
+    // however many quads were queued - the real "Quad-Batch...ein
+    // Draw-Call" behavior the brief asks for, not one draw call per
+    // quad. UV runs 0..1 across each quad independently (for a future
+    // pattern/atlas use - see DECISIONS.md for why item-icon rendering
+    // itself is deferred past this phase).
+    void submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color);
+
+    // How many quads are currently queued (real, testable state - not
+    // just an implementation detail): 0 right after flush_ui_quads() or
+    // before any submit_ui_quad() call this frame.
+    usize pending_ui_quad_count() const { return ui_vertices_.size() / 4; }
+
+    // Uploads every quad queued via submit_ui_quad() since the last
+    // flush and issues one real bgfx::submit() into the dedicated UI
+    // view (drawn last, after terrain - see renderer.cpp's kUi2dViewId
+    // comment for why, a deliberate correction of this phase's own
+    // literal "before terrain" wording, which would make the UI
+    // invisible behind opaque terrain). Always clears the pending batch
+    // before returning, whether or not it actually drew anything (an
+    // invalid `program` - e.g. LCU_BUILD_SHADER_TOOLS is off - means
+    // this frame's queued quads are silently skipped, the same "no
+    // shader, no draw" behavior submit_chunk_mesh/submit_billboard
+    // already have, not something that should re-appear stale on a
+    // later frame once a program becomes valid). Call once per frame,
+    // after every submit_ui_quad() for that frame, before end_frame().
+    void flush_ui_quads(bgfx::ProgramHandle program);
+
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
     u32 end_frame();
@@ -104,6 +183,17 @@ class Renderer : public NonCopyable {
     void clear_debug_text();
     void draw_debug_text(u16 x, u16 y, u8 color_attr, const std::string& text);
 
+    // Real screenshot trigger (Phase 47, F2): wraps
+    // `bgfx::requestScreenShot(BGFX_INVALID_HANDLE, ...)` against the
+    // default backbuffer - bgfx's own default callback writes a real
+    // `.tga` file asynchronously once the in-flight frame finishes (no
+    // custom `bgfx::CallbackI` is installed - see init(), so this is
+    // bgfx's own stock behavior, not something this project reimplements).
+    // Under the headless `Noop` backend (this sandbox's own verification
+    // runs) there is no real framebuffer content to capture - a real,
+    // honest environment limitation, not a bug (see BUILD_STATUS.md).
+    void request_screenshot(const std::string& file_path_without_extension);
+
     void resize(u32 width, u32 height);
 
     bool is_headless() const { return headless_; }
@@ -120,6 +210,15 @@ class Renderer : public NonCopyable {
     // is simply ignored, not an error), so this doesn't need to be
     // gated on whether LCU_BUILD_SHADER_TOOLS built real chunk shaders.
     bgfx::UniformHandle sky_light_scale_uniform_ = BGFX_INVALID_HANDLE;
+    // Phase 44 - this frame's queued submit_ui_quad() calls, 4 vertices/
+    // 6 indices per quad, uploaded and cleared together by
+    // flush_ui_quads(). Real per-frame state (not a persistent GPU
+    // resource - see submit_ui_quad's own doc comment), so a plain CPU
+    // std::vector is the right tool, the same as every other per-frame
+    // batch this codebase builds before handing it to a bgfx transient
+    // buffer.
+    std::vector<UiVertex2D> ui_vertices_;
+    std::vector<u16> ui_indices_;
 };
 
 }  // namespace lcu::rendering

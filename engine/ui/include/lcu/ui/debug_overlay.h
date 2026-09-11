@@ -41,6 +41,13 @@ struct DebugOverlayStats {
 // itself - ARCHITECTURE.md restricts bgfx-header inclusion to
 // engine/rendering, and this keeps that true. Call once per frame, after
 // Renderer::begin_frame() and before Renderer::end_frame().
+//
+// Does NOT call Renderer::clear_debug_text() itself (Phase 47 change):
+// the debug-text buffer is now shared by up to three real writers this
+// same frame (this overlay, hud_renderer's item-count labels,
+// menu_renderer's row labels) - see client/main.cpp for the one real
+// clear_debug_text() call that now owns clearing it once per frame,
+// before any of the three run.
 void draw_debug_overlay(rendering::Renderer& renderer, u32 screen_width, u32 screen_height, f32 fps,
                          const DebugOverlayStats& stats);
 

@@ -60,6 +60,35 @@ handle, which makes `engine/rendering::Renderer` fall back to bgfx's
 `Noop` backend automatically (or force it explicitly with
 `LCU_FORCE_HEADLESS_RENDERER=1`).
 
+## Options file (`options.txt`)
+
+`VoxelClient` persists key bindings, mouse sensitivity, FOV, and the
+HUD/debug-overlay toggles to a plain-text `options.txt` (Phase 45) -
+loaded at startup, saved whenever you leave the Options/Controls screen
+or the process exits cleanly. Its path is **not** relative to the
+working directory or the executable: it comes from `SDL_GetPrefPath
+("LiveCraftUltimate", "LiveCraftUltimate")`, an OS-provided per-user
+settings directory, printed to the log on every run (`Loaded options
+from "..."` / `Saved options to "..."`). In this project's own
+sandbox that resolves to:
+
+```
+~/.local/share/LiveCraftUltimate/LiveCraftUltimate/options.txt
+```
+
+On a real desktop it resolves per-OS instead - typically
+`%APPDATA%\LiveCraftUltimate\LiveCraftUltimate\options.txt` on Windows
+and `~/Library/Application Support/LiveCraftUltimate/LiveCraftUltimate/
+options.txt` on macOS (see `SDL_GetPrefPath`'s own documentation for
+the exact rule on each platform - this project has never independently
+verified the Windows/macOS paths, only the Linux one, since this
+sandbox has no other OS to run on). If `SDL_GetPrefPath` itself fails,
+`Options::default_path` falls back to a plain `options.txt` relative to
+the current working directory instead, logged as a warning. Deleting
+the file (or the whole directory) is a safe, real way to reset every
+persisted option back to code defaults on the next run - `VoxelClient`
+handles a missing file the same as a first-time run, not an error.
+
 ## Testing under ThreadSanitizer
 
 Concurrent code (currently `engine/jobs::JobSystem`) is additionally

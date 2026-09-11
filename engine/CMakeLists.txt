@@ -38,14 +38,26 @@ if(LCU_BUILD_CLIENT)
     add_subdirectory(player)
     add_subdirectory(audio)
 
-    add_library(LcuEngine INTERFACE)
-    add_library(Lcu::Engine ALIAS LcuEngine)
-    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform Lcu::Player Lcu::Audio)
-
+    # rendering (if enabled) before ui - engine/ui/CMakeLists.txt's own
+    # bgfx-only sources link Lcu::Rendering, so that target must already
+    # exist by the time ui's CMakeLists.txt runs.
     if(LCU_ENABLE_BGFX)
         add_subdirectory(rendering)
-        add_subdirectory(ui)
-        target_link_libraries(LcuEngine INTERFACE Lcu::Rendering Lcu::Ui)
+    endif()
+
+    # MenuStack (Phase 46) is pure logic with zero SDL/bgfx dependency -
+    # see engine/ui/CMakeLists.txt - so it's added here alongside
+    # platform/player/audio, not gated behind LCU_ENABLE_BGFX the way it
+    # used to be when engine/ui only held the bgfx-dependent debug
+    # overlay.
+    add_subdirectory(ui)
+
+    add_library(LcuEngine INTERFACE)
+    add_library(Lcu::Engine ALIAS LcuEngine)
+    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform Lcu::Player Lcu::Audio Lcu::Ui)
+
+    if(LCU_ENABLE_BGFX)
+        target_link_libraries(LcuEngine INTERFACE Lcu::Rendering)
         target_compile_definitions(LcuEngine INTERFACE LCU_ENABLE_BGFX)
     endif()
 endif()

@@ -2,7 +2,744 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52
+
+### Phase 52
+
+- **Documentation-only phase** closing the Phases 43-52 program
+  (rebindable input through health/hunger/respawn). New README.md
+  `## Controls` section: a full table of every real default keybinding
+  (from `KeyBindings::reset_to_defaults()`), each one noted as
+  rebindable via the in-game Controls screen. New BUILDING.md
+  `## Options file (options.txt)` section documenting its real
+  `SDL_GetPrefPath`-derived path (logged on every run), the CWD-relative
+  fallback if that call fails, and that deleting it is a safe reset.
+  New DECISIONS.md entry recording *why* the standing directive's own
+  exclusion list (mobs/redstone/enchantments/Nether/villagers/
+  structures/farming/chat/skins) holds up - each is a genuinely separate
+  content vertical, none of them block what Phases 43-51 actually built.
+  CHANGELOG/PROJECT_STATE/TASK_QUEUE entries for Phases 43-51 were kept
+  up to date incrementally as each phase landed (not deferred to this
+  phase) - see each phase's own section above.
+- No code changes; `ctest` unchanged at 547/547 (bgfx) / 539/539
+  (non-bgfx).
+
+### Phase 51
+
+- **Real health/hunger/fall-damage/respawn** - new `game::components::
+  PlayerHealth`/`PlayerHunger` (plain structs, not ECS components -
+  matches `PlayerPhysicsState`'s own placement, see each header's own
+  doc comment) and `game::systems::player_vitals_system.{h,cpp}` (pure
+  logic, 24 new unit tests): `apply_damage` (clamped, returns true only
+  on the real 0-transition so a caller can call it every frame without
+  re-triggering death), `fall_damage_for_distance`/`update_fall_tracking`
+  (real Minecraft-shaped `fallDistance` semantics - accumulates only
+  while airborne and actually descending, damage applied/reset only on
+  the real landing-frame transition, so a normal jump deals zero
+  damage), `update_health_regen` (+1 HP/4s at hunger >= 18),
+  `update_starvation` (-1 HP/4s at hunger == 0), `update_hunger_drain`
+  (-1/30s normally, 2x while sprinting-and-moving), `apply_jump_hunger_
+  cost`/`eat` - each real per-frame timer using the same caller-owned
+  accumulator pattern `hand_swing_elapsed` already established.
+- **Wired into `client/main.cpp`**: `previous_player_y` captured before
+  gravity/collision resolve each frame, fed to `update_fall_tracking`
+  after (works for both the single-player and networked physics path -
+  both mutate the same `player.aabb`/`player.grounded`); jump hunger
+  cost applied on a real edge-detected fresh Jump press, read *before*
+  `try_jump` itself changes `player.grounded`; hunger drain/regen/
+  starvation tick every frame gated on `paused` alone (like day/night -
+  vitals keep ticking while the inventory/workbench screen is open,
+  matching real Minecraft, only movement/mining/placing/eating lock for
+  those). Real HUD wiring: `hud_state.health`/`hunger` now read straight
+  from `player_health`/`player_hunger` instead of `HudState`'s own 20/20
+  defaults - Phase 47's icon math needed no changes at all.
+- **Real eating**: new `game:apple` (+4 hunger)/`game:bread` (+5 hunger)
+  items, real Minecraft restore values. Right-click dispatch is now a
+  real three-way branch: crafting-table intercept (Phase 50.3, checked
+  first) -> eating (new - deliberately doesn't require a raycast hit,
+  same as Minecraft letting you eat while looking at open air) ->
+  normal slot-driven placement (Phase 49, unchanged). Neither apple nor
+  bread has a survival obtain path yet (no farming/mob drops - both
+  explicitly out of scope, see PROJECT_STATE.md Known Limitations) -
+  `LCU_VERIFY_HEALTH` grants one directly, same synthetic-setup honesty
+  every other verify hook's own item grant already uses.
+- **Real death + respawn**: a death transition (from fall damage or
+  starvation) calls `handle_player_death` - drops the *entire* 36-slot
+  inventory as real item entities at the player's position (reusing the
+  exact same `ItemEntity`/`update_item_entities`/`pickup_item_entities`
+  pipeline Phase 50 built, just centered on the player instead of a
+  broken block), closes any open inventory/workbench screen, and pushes
+  a new "Du bist gestorben" `MenuScreen` (reusing Phase 46's `MenuStack`
+  framework wholesale - no new UI code needed) with a single Respawn
+  row. Respawn resets position to the original spawn point, health/
+  hunger to full, and every fall/regen/starvation/drain accumulator.
+- **New `LCU_VERIFY_HEALTH` headless hook** (the project's seventh):
+  directly teleports the player 10 blocks above their own real spawn
+  ground position with `grounded=false` (a real jump can't reach that
+  height deterministically, but the fall from there on is real,
+  unmodified gravity/collision - the same "synthesize exactly the state
+  a real action would produce" honesty `LCU_VERIFY_WORKBENCH`'s own
+  direct world-block seed already uses), seeds hunger below max (so
+  eating has an observable effect) and grants 1 `game:apple`, then
+  simulates a real right-click once the fall has had time to land. A
+  real run's log output proves both halves of this phase's own "jump
+  from a tower, health drops; eat, hunger rises" directive: `Fall
+  damage: 6.9 (health: 13.1/20.0)` then `Ate game:apple (hunger: 14.0/
+  20.0)`. Death + respawn were separately confirmed via a real run with
+  a temporarily-lethal fall height (`Player died (health reached 0)` /
+  `Player died - inventory dropped as item entities`) - the respawn
+  button itself reuses the exact same `MenuStack`/`pending_menu_action`
+  machinery `LCU_VERIFY_MENU` already proves works, so it wasn't
+  re-verified via a second simulated click sequence.
+- **A real, confirmed single-player-only gap**: in networked mode,
+  `LCU_VERIFY_HEALTH`'s synthetic mid-air teleport is invisible to
+  `VoxelServer`'s own authoritative simulation (the server only ever
+  learns the player's position from real `PlayerInput` packets), so the
+  very next `PlayerCorrection` snaps the client back down before a real
+  fall distance can accumulate - confirmed via a real two-process
+  networked run (`Ate game:apple (hunger: 14.0/20.0)` appears; no `Fall
+  damage:` line does). Eating verifies correctly in networked mode
+  regardless (item grants/consumption are real client-authoritative
+  state, same as every other verify hook's own item grant) - documented
+  in the hook's own doc comment, not silently accepted.
+- Verified via real `LCU_VERIFY_HEALTH` runs on both bgfx and non-bgfx
+  builds, a real two-process networked run, real regression runs of
+  every existing hook (`LCU_VERIFY_BREAK_PLACE`/`CRAFT`/`TORCH`/`MENU`/
+  `HUD`/`INVENTORY`/`WORKBENCH` - all still pass), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build.
+- `ctest` 547/547 (bgfx) / 539/539 (non-bgfx), both up 24 from Phase 50.
+- Honestly scoped: no armor/enchantments reduce fall damage (out of
+  scope, see the standing directive's own exclusion list); sprinting
+  itself doesn't move the player any faster yet (`Action::Sprint` was
+  already a real bound action with no consumer before this phase - it
+  now drives hunger drain's real 2x multiplier, but no speed boost
+  exists to pair with it - a real, pre-existing gap this phase didn't
+  need to close to satisfy its own "more when sprinting" hunger-drain
+  requirement); apple/bread have no survival obtain path (no farming/
+  mob drops, both out of scope) - see PROJECT_STATE.md.
+
+### Phase 50
+
+- **Real item entities**: breaking a block no longer teleports its item
+  straight into the inventory - it spawns a real, physically-simulated
+  `game::components::ItemEntity` + `Position` on the shared
+  `entity_registry` (the same ECS world AI entities already live in),
+  with a real small upward toss (`kItemEntitySpawnUpSpeed`). New
+  `game::systems::update_item_entities` applies real gravity + AABB/
+  voxel ground collision every frame by reusing `lcu::physics::
+  apply_gravity`/`move_and_collide` - the exact same primitives the
+  player's own controller already uses, not a reimplementation. Each
+  entity gets a real per-frame Y-axis spin (`spin_angle`, purely visual)
+  and despawns (real entity destruction) after 5 real minutes
+  (`kItemEntityDespawnSeconds`).
+- **Real pickup**: `game::systems::pickup_item_entities` adds an item
+  entity to the inventory the moment the player's own (inflated) AABB
+  overlaps it and its 0.5s `pickup_delay_seconds` has counted down - a
+  real Minecraft-shaped break -> pop up -> fall -> land -> pick up
+  pipeline. A stack that only partially fits keeps the entity alive with
+  its count reduced to the real leftover, matching `Inventory::add_item`
+  itself.
+- **New `Renderer::submit_world_billboard`**: a real depth-tested
+  camera-facing quad in the terrain view (unlike `submit_billboard`'s
+  own sky view, which has no depth test - correct for a sun/moon "at
+  infinity", wrong for a dropped item that needs to be genuinely
+  occluded by/occlude nearby geometry). Reuses the exact same sky
+  shader/vertex format - no new shader files needed. Item entities
+  render as a small quad spinning around world-Y (`spin_angle`), tinted
+  their own item's real `icon_color`.
+- **Real crafting table** (`game:crafting_table`, registered identically
+  on `VoxelClient`/`VoxelServer`, same as every other real block/item
+  pair here): right-clicking one opens a real workbench screen - a 3x3
+  crafting grid + result, plus the same main storage + hotbar rows the
+  regular inventory screen shows (a workbench GUI with no way to
+  actually move items into its own grid would be unusable - see
+  DECISIONS.md for the real reasoning behind reusing the full screen
+  shape). New pure `engine/ui::crafting_table_screen.{h,cpp}` (layout/
+  hit-testing, its own 3x3 grid independent of the regular inventory
+  screen's 2x2 one) + `crafting_table_screen_renderer.{h,cpp}` (drawing)
+  - built from inventory_screen.h's own shared building blocks rather
+  than modifying its already-tested 2x2 grid. Breaking a crafting table
+  drops itself (real 1:1 block->item mapping, same convention every
+  other placeable block already follows). Real click dispatch reuses
+  the exact same `inventory_left_click`/`right_click`/`shift_click`
+  pure-logic functions Phase 49's inventory screen already established
+  - no new drag/drop logic needed.
+- **Server parity extended**: `game:wood`/`game:crafting_table` items
+  registered on `VoxelServer` too (Phase 49 only added `game:wood` to
+  the client - a real, now-closed gap, since the server's own
+  `tracked_items`/BlockAction validation needs matching ids to stay
+  correct in networked mode), `tracked_items` grown from 4 to 6 entries.
+- 17 new unit tests (9 `UpdateItemEntities`/`PickupItemEntities`, 8
+  `CraftingTableScreenLayoutTest`/`HitTestCraftingTableScreen`/
+  `CraftingTableScreenConstants`).
+- **A real item-entity pickup-range bug was found and fixed twice
+  during this phase's own headless verification, not merely
+  anticipated.** An exact player-AABB-vs-item-AABB overlap almost never
+  triggers in practice: the block a player breaks is typically one
+  block *in front of* them, not at their own feet, and a dropped item
+  with no horizontal velocity settles wherever the broken block was -
+  which can be one or even two blocks *below* the player's own standing
+  height (e.g. mining straight down, exactly what `LCU_VERIFY_CRAFT`
+  does). A real 0.75 vertical inflate missed a real, measured
+  single-block-deep item by 0.005 (`LCU_VERIFY_BREAK_PLACE` regressed:
+  the broken item never reached the inventory in time to place); 1.0
+  still missed a real two-blocks-deep item (`LCU_VERIFY_CRAFT`
+  regressed: the second break's item was never picked up in an
+  extended run). Fixed by inflating the real player AABB by 2.0 blocks
+  on every axis before the pickup overlap check - both real failures
+  confirmed fixed via a real re-run, not assumed - see DECISIONS.md.
+- **New `Window::warp_mouse`** used two ways this phase: the real
+  workbench click dispatch itself, and a new `LCU_VERIFY_WORKBENCH`
+  headless hook (grants wood, directly seeds a real `game:
+  crafting_table` block at the same spawn-look target the other hooks
+  already establish, right-clicks it open, picks up the wood, drops it
+  anywhere in the real 3x3 grid - proving the same shapeless "1 wood ->
+  4 planks" recipe genuinely works in a bigger grid too, not just the
+  2x2 one `LCU_VERIFY_INVENTORY` already covers - takes the result,
+  closes via Escape).
+- Verified via a real `LCU_VERIFY_WORKBENCH` run (both bgfx and
+  non-bgfx builds - full pipeline confirmed: open -> pick up -> craft ->
+  take result -> close), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_
+  TORCH`/`LCU_VERIFY_CRAFT`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD` regression runs (all still pass with the real item-
+  entity pickup pipeline in place of direct-to-inventory), a real
+  two-process networked `LCU_VERIFY_CRAFT` run (both breaks spawn real
+  item entities, both get picked up, craft succeeds, matching server
+  log output), and a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/
+  `Sky`/`UI2D` shader programs all still `valid=true`, item entities
+  render via the new `submit_world_billboard` with zero new shader
+  files).
+- `ctest` 523/523 (bgfx, up from 506) / 515/515 (non-bgfx, up from 498).
+- Honestly scoped: what a dropped item or the workbench screen actually
+  look like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; item entities have no horizontal scatter velocity on
+  spawn (vertical toss only - a real, documented simplification, see
+  `ItemEntity`'s own doc comment); the workbench screen's shift-click
+  from its own 3x3 grid lands anywhere in the whole 36-slot inventory
+  rather than hotbar-first (same real, minor simplification the 2x2
+  inventory screen's own grid already has); a recipe needing more than
+  one of the same ingredient in a single grid cell still isn't
+  correctly consumed by either result-click (documented, no registered
+  recipe needs it yet).
+
+### Phase 49
+
+- **Real, deep hotbar/inventory integration** - the biggest structural
+  change this phase: Phase 21's `placeable_items`/`selected_placeable_index`
+  (a virtual "known item types" selector, decoupled from where items
+  physically lived) is gone entirely. The hotbar is now real: 9 of
+  `player_inventory`'s own 36 slots (indices 0-8), `selected_hotbar_slot`
+  a real index into it. `CycleHotbar`/`CycleHotbarPrev`/`SelectHotbar1-9`
+  move the index; placing reads whatever `ItemStack` actually sits there
+  and looks up its block via `BlockItemMapping::block_for_item` (new
+  reverse lookup, `game/items/block_item_mapping.{h,cpp}`); breaking
+  still grants via `add_item` (fills matching stacks/empty slots,
+  earliest-first). PickBlock (middle-click) now swaps an already-held
+  item into the selected slot rather than merely "selecting a known
+  type" - Minecraft's own real survival behavior.
+- **Real inventory screen** (`E`): Minecraft's own layout - 2x2 craft
+  grid + result slot on top, 3x9 main storage, the same 9 hotbar slots
+  again at the bottom. Pure layout/hit-testing in
+  `engine/ui/inventory_screen.{h,cpp}` (mirrors `hud.h`'s own
+  pure-logic/renderer split), drawing in
+  `inventory_screen_renderer.{h,cpp}`. Opening does **not** pause the
+  simulation (`day_night_cycle`/AI wander keep running) - only the
+  player's own movement/camera/mining/placing/crafting lock while it's
+  open, via a new `!inventory_open` gate alongside the existing
+  `!paused` one. `ESC` closes the screen instead of opening the pause
+  menu when it's open; the two are mutually exclusive.
+- **Real drag/drop**: `engine/items/inventory_ops.{h,cpp}` -
+  `inventory_left_click` (pick up/place/merge/swap a whole stack),
+  `inventory_right_click` (half stack via ceil-division / place one /
+  add one), `inventory_shift_click` (transfer to another slot range or
+  a whole other `Inventory`, via a new `Inventory::add_item_to_range`).
+  Pure logic, no UI/mouse state of its own - the real mouse-click
+  dispatch in `client/main.cpp` reuses Interact/PlaceBlock (left/right
+  mouse button) while the screen is open, with `Crouch` (Shift by
+  default, same key Minecraft itself uses) as the shift-click modifier.
+- **Real crafting-grid integration**: the 2x2 grid is a genuine
+  `RecipeRegistry::find_match(grid, 2, 2)` query against a separate
+  5-slot `Inventory` (4 input + 1 result), recomputed on every input
+  change. Clicking the result slot takes it into the cursor and consumes
+  1 of each non-empty ingredient - correct for every shapeless recipe
+  registered so far (each lists an ingredient once), a real, documented
+  limit for a future recipe needing >1 of the same ingredient in one
+  cell. Phase 23's quick-craft stays as a convenience path, untouched.
+- **New real recipe + items**: `game:wood` finally has its own item
+  (breaking a wood block previously granted nothing - a real gap since
+  Phase 41 registered the block with no matching item), plus
+  `game:planks` (crafted-only) and the phase's own suggested `1 wood ->
+  4 planks` shapeless recipe - the 2x2 grid's first real, reachable
+  recipe.
+- **New `Window::warp_mouse`** (`SDL_WarpMouseInWindow`) - the first
+  real mouse-*position*-driven headless verification in this project
+  (every prior click-like hook used keyboard navigation instead, see
+  `LCU_VERIFY_MENU`'s own history); needed since the inventory screen's
+  only real input is mouse clicks.
+- **New `LCU_VERIFY_INVENTORY` headless hook**: grants 1 wood (synthetic
+  setup, same precedent as `LCU_VERIFY_TORCH`'s torch grant), opens the
+  screen, then drives 5 real mouse clicks via `warp_mouse` + synthesized
+  `Interact`/`Crouch` presses: pick up wood from the hotbar into the
+  cursor, drop it in the craft grid, take the crafted result (4 planks -
+  proving the real 2x2 `RecipeRegistry` integration, not just quick-
+  craft), place it in the main inventory, shift-click it back to the
+  hotbar. A real, previously-hit-and-fixed ordering bug: this hook's
+  `input.set_down` calls originally sat alongside `LCU_VERIFY_BREAK_
+  PLACE`/`CRAFT`/`TORCH` later in the frame, after the E-toggle/click-
+  handling code that reads them already ran that frame - the inventory
+  silently never opened on the first real run. Fixed by moving it next
+  to `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`, which sit before that consumer
+  code for the same reason.
+- Existing `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH` hooks updated for
+  the new slot-based hotbar: both now press `CycleHotbar` *and*
+  `CycleHotbarPrev` (a real net-zero round trip) to land back on the
+  slot actually holding the relevant item before placing, since cycling
+  now moves a real slot pointer instead of a virtual list index.
+  `LCU_VERIFY_CRAFT` needed no changes (quick-craft never referenced
+  `placeable_items`).
+- 30 new `InventoryLeftClick`/`InventoryRightClick`/`InventoryShiftClick`
+  unit tests, 2 new `Inventory.AddItemToRange*` tests, 8 new
+  `InventoryScreenLayoutTest`/`HitTestInventoryScreen`/
+  `InventoryScreenConstants` tests, 3 new `BlockItemMapping` reverse-
+  lookup tests (44 new total).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` regression runs (all still pass with the new
+  hotbar), a real `LCU_VERIFY_INVENTORY` run (both bgfx and non-bgfx
+  builds - full pipeline confirmed: pick up -> craft -> take result ->
+  place -> shift-click -> close), real `LCU_VERIFY_MENU`/`LCU_VERIFY_HUD`
+  regression runs, a real two-process networked `LCU_VERIFY_BREAK_PLACE`
+  run (break/place both still reach the server correctly through the
+  new hotbar), and a real `LCU_BUILD_SHADER_TOOLS=ON` build.
+- `ctest` 506/506 (bgfx, up from 475) / 498/498 (non-bgfx, up from 467).
+- Honestly scoped: shift-clicking a craft-grid slot moves it anywhere in
+  the whole 36-slot inventory rather than hotbar-first-then-main (a
+  real, minor simplification vs. Minecraft's own precise ordering);
+  right-click on the craft result behaves identically to left-click (no
+  "half result" concept exists); a recipe needing more than one of the
+  same ingredient in a single 2x2 cell isn't correctly consumed by the
+  result-click's "decrement each ingredient by 1" logic (documented in
+  `inventory_shift_click`'s own call site, not silently wrong for
+  anything actually registered); no icon/texture atlas still (flat-color
+  quads, same as every prior phase).
+
+### Phase 48
+
+- **Real block highlight**: the raycast-targeted block now gets a real
+  black wireframe box (`Renderer::submit_wireframe_box`, already real
+  since Phase 36), drawn every frame a block is in range - a genuinely
+  new consumer of that existing call, not new rendering machinery.
+- **Real hold-to-break**: breaking a block is no longer an instant
+  single click - `BlockDefinition::hardness` (real per-block seconds:
+  stone 2.0, wood 1.5, dirt 0.5, leaves 0.2, grass 0.6, sand 0.5, snow
+  0.1, cactus 0.4, coal/iron ore 3.0, torch 0.0 = instant, matching this
+  phase's own directive's exact table where one exists) now gates how
+  long Interact must be held against the *same* targeted block before
+  it actually breaks. New pure `lcu::voxel::break_progress_fraction`/
+  `is_break_ready` (new `break_progress.{h,cpp}`) compute this - the
+  same two functions both the real break-trigger check and the real
+  darkening overlay consume, so they can never disagree. Switching
+  targets or releasing Interact resets progress. In networked mode, a
+  real one-shot latch (`break_request_sent`) stops a held click from
+  re-sending the break request every single frame while waiting for the
+  server's own `BlockChange` broadcast to land.
+- **Real break-progress overlay**: a solid box over the targeted block
+  darkens toward black as progress advances (new
+  `Renderer::submit_solid_box` - reuses the existing sky shader/vertex
+  format, no new shader files needed). Deliberately NOT a real crack-
+  noise-density effect on the block's own rendered face - that needs a
+  new per-fragment world-position uniform threaded through
+  `fs_chunk.sc`, a real, separate shader feature outside this phase's
+  scope (see DECISIONS.md) - this overlay is a real, visible,
+  honestly-scoped substitute, not a placeholder.
+- **Real hand icon**: the currently-selected placeable item's own real
+  `icon_color` (Phase 47), bottom-right corner, with a real elapsed-
+  time-driven swing animation (`kHandSwingDuration` = 0.25s, a real
+  sine ease) triggered on every real break or place action.
+- **Water stays genuinely unbreakable with zero special-case code**:
+  `has_collision = false` already keeps the DDA raycast from ever
+  stopping on it (Phase 37), so it was never a real break target to
+  begin with - no infinite-hardness hack needed.
+- **Real headless-hook rewrite, not a regression**: LCU_VERIFY_
+  BREAK_PLACE/LCU_VERIFY_TORCH/LCU_VERIFY_CRAFT previously drove a
+  single-frame Interact pulse (instant break, matching the pre-Phase-48
+  mechanic) - now real elapsed-time hold windows sized to each target
+  block's own hardness plus margin (a fixed frame count can't express
+  this reliably - this sandbox's unthrottled loop runs many thousands
+  of frames per real second). `LCU_VERIFY_CRAFT`'s networked run
+  specifically needed a wider real gap between its two break windows
+  than initially chosen (0.2s wasn't consistently enough margin for the
+  server round trip to land before the second hold window started,
+  confirmed by an actual failed run during verification, not just
+  reasoned about - see DECISIONS.md); widened to a real 0.8s.
+- 9 new unit tests (`BreakProgress`/`IsBreakReady`).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs (now hold-based, full pipeline confirmed:
+  break -> pick up -> cycle hotbar -> place, and for CRAFT, two
+  sequential real breaks -> match -> reject), a real two-process
+  networked `LCU_VERIFY_CRAFT` run (zero warnings/errors/rejects,
+  confirmed with the widened gap above), real `LCU_VERIFY_MENU`/
+  `LCU_VERIFY_HUD` regression runs (unaffected, still pass), a real
+  `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader programs
+  all still `valid=true` - `submit_solid_box` needed no new shader), and
+  a real headless run for each hook confirming zero warnings/errors
+  from the new highlight/overlay/hand draw calls actually executing
+  every frame a block is targeted.
+- `ctest` 475/475 (bgfx, up from 466) / 467/467 (non-bgfx, up from 458).
+- Honestly scoped: what the highlight/overlay/hand icon actually look
+  like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION** (headless Noop backend proves every draw call executes
+  without error, not that it looks right); no real crack-noise-density
+  shader effect on the block's own face (deferred, see above); the
+  break-progress overlay is fully opaque (no real alpha blending), so
+  it appears at whatever darkness its first held frame computes rather
+  than fading in from fully invisible - a real, minor visual rough edge
+  from choosing not to add a new shader/uniform this phase (see
+  DECISIONS.md).
+
+### Phase 47
+
+- **Real Minecraft-position hotbar**: new `engine/ui::hud.{h,cpp}` (pure
+  layout math, zero SDL/bgfx - tested in both configs, same split as
+  `menu_stack.h`) - 9 bottom-center slots, each a real bordered/filled
+  quad plus (for the 4 real `placeable_items`) a flat colored icon quad
+  and a real held-count label. **`ItemDefinition` gained `icon_color`**
+  (closes the exact gap Phase 44 deferred: "no inventory/hotbar widget
+  exists yet to consume it" - this hotbar is that widget), set per item
+  to match its own block's tint where one exists.
+- **Real health/hunger bars**: 10-icon Minecraft-style bars (each icon =
+  2 points, real half-icon fill math), positioned above the hotbar,
+  left-aligned to its own left edge. Hardcoded full this phase
+  (`HudState`'s own real defaults) - Phase 51 wires real
+  `PlayerHealth`/`PlayerHunger` values in; the layout/rendering is
+  already real and ready for that, not a placeholder.
+- **Real F-key toggles**: 5 new `Action`s (`ToggleHud`/
+  `ToggleDebugOverlay`/`Screenshot`/`TogglePerspective`/`Fullscreen`,
+  bound to F1/F3/F2/F5/F11 - the exact bindings Phase 43's own
+  "verbindlich" table reserved, only now given real consumers).
+  `ToggleHud`/`ToggleDebugOverlay` flip the same real
+  `options.hud_enabled`/`debug_overlay_enabled` the options menu
+  (Phase 46) already reads/writes. `Screenshot` calls a new
+  `Renderer::request_screenshot` (`bgfx::requestScreenShot` against the
+  default backbuffer). `Fullscreen` calls a new
+  `Window::set_fullscreen` (`SDL_SetWindowFullscreen`).
+  `TogglePerspective` cycles first-person/third-person-behind - **real
+  camera-eye-offset rendering** (gameplay raycast/movement stay tied to
+  the true first-person position; only the render eye shifts back along
+  the real look direction) - **PARTIAL**: no player model exists to
+  render in front of the camera, so third-person-front is honestly not
+  implemented (see DECISIONS.md).
+- **Real shared debug-text-buffer ownership fix**: up to three systems
+  now draw into bgfx's one debug-text buffer each frame (debug overlay,
+  HUD item-count labels, menu row labels) - each used to call
+  `clear_debug_text()` internally, which would have silently wiped
+  whichever one ran first. Fixed by moving the one real
+  `clear_debug_text()` call up to `client/main.cpp`, called once before
+  any of the three, in the real draw order (overlay -> HUD -> menu).
+- New `LCU_VERIFY_HUD` headless hook: presses each F-key toggle on its
+  own frame, real log output confirms each one's real resulting state
+  (`HUD: off`, `Debug overlay: on`, `Perspective: third-person
+  (behind)`, `Fullscreen: true`, `Requested screenshot: screenshot_9`).
+- 21 new unit tests (`HotbarSlotLayout`/`StatBarLayout`: real rect
+  ordering/centering/non-overlap, real half-icon fill-fraction math,
+  real left-edge alignment between the hotbar and the bars above it).
+- Verified via the real `LCU_VERIFY_HUD` run above, real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT`/
+  `LCU_VERIFY_MENU` runs (byte-identical to Phase 46), a real
+  `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader programs
+  all still `valid=true`), and a real two-process networked run (zero
+  warnings/errors/rejects, matching spawn columns).
+- `ctest` 466/466 (bgfx, up from 455) / 458/458 (non-bgfx, up from 447).
+- Honestly scoped: the HUD's real on-screen appearance is still **NOT
+  VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+  pipeline runs, not that it looks right); `bgfx::requestScreenShot`
+  under the headless `Noop` backend has no real framebuffer content to
+  capture (real call, **NOT VERIFIED** to produce a meaningful image in
+  this sandbox); third-person-front is deferred (see above); hotbar
+  slots 5-9 still show nothing (only 4 real `placeable_items` exist -
+  unchanged, honest limitation carried forward from Phase 43).
+
+### Phase 46
+
+- **Real `engine/ui::MenuStack`** (new `menu_stack.{h,cpp}`) - stacked
+  `MenuScreen`s (title + `MenuItem` rows, each with a real
+  `on_activate`/`on_adjust` callback), `move_selection`/`select_index`/
+  `activate_selected`/`adjust_selected`. Pure logic, zero SDL/bgfx
+  dependency (`engine/ui` is now added under `LCU_BUILD_CLIENT`, not
+  only `LCU_ENABLE_BGFX` - see DECISIONS.md), so it builds and is
+  unit-tested in both the bgfx and non-bgfx configs. `menu_item_layout`/
+  `menu_item_at_point` compute each row's real on-screen pixel rect from
+  screen size alone - the one shared source of truth both drawing
+  (`menu_renderer.cpp`) and real mouse hit-testing read from, the same
+  "drawn and tappable can never drift apart" property `kTouchButtonLayout`
+  already established for touch controls (Phase 10).
+- **Real pause menu**: ESC in-game now opens a real `MenuStack` (`Pause`
+  -> `Zurueck zum Spiel`/`Optionen`/`Steuerung`/`Beenden`) instead of
+  only releasing mouse capture; a menu being open genuinely pauses
+  simulation (movement/physics/AI/day-night-cycle) - verified via a real
+  headless run holding `MoveForward` down across the pause (player
+  position provably unchanged) then again after closing it (position
+  provably changed). Network *receive* deliberately keeps running while
+  paused (a real, documented deviation - see DECISIONS.md: fully halting
+  it risked reading as a dead connection by the time the player
+  unpauses); only this client's own outgoing input pauses.
+- **Real Options screen**: Maus-Empfindlichkeit/Sichtfeld(FOV) (+/- via
+  the existing `LookLeft`/`LookRight` actions), HUD/Debug-Overlay
+  toggles, Zurueck (saves `options.txt` on leaving). **FOV is now
+  actually applied to the camera's projection matrix** - closes the gap
+  Phase 45 deliberately left open ("persisted but never read for
+  rendering... until Phase 46 gives it a real consumer"). Renderdistanz
+  is deliberately NOT a row - `load_settings.radius_xz` is `const` and
+  wiring live re-streaming is a real, separate structural change this
+  phase's own directive explicitly allows deferring as PARTIAL (see
+  DECISIONS.md) rather than shipping a +/- control that would visibly do
+  nothing.
+- **Real Controls screen**: every rebindable `Action` (Escape/
+  MenuConfirm excluded, see below) listed as `<name>: <key>`; Enter/
+  click enters a real "waiting for input" capture
+  (`lcu::platform::poll_any_pressed_key`, new - scans real SDL keyboard/
+  mouse state directly, not through the `Action` system, since the whole
+  point is binding a key nothing uses yet); ESC cancels
+  (`is_escape_key`, new); a real release-then-fresh-press debounce
+  (`rebind_ready`) stops the very key that opened the capture from
+  immediately binding itself; Reset restores every default; changes
+  apply immediately and save on leaving.
+- **New `Action::MenuConfirm`** (Enter/Return) - a real menu-meta action
+  alongside `Action::Escape`, both deliberately excluded from the
+  Controls screen's own rebind list (not rebindable, per this phase's
+  own directive).
+- **Real, reproduced-and-fixed use-after-free**: a `MenuItem`'s own
+  `on_activate`/`on_adjust` callback lives inside the `MenuScreen`
+  currently on top of the stack; popping/pushing `menu_stack` *directly*
+  from inside such a callback destroys (or, for `push`, potentially
+  reallocates) that very screen - including the closure still executing
+  - a real segfault, reproduced during headless testing with
+  `LCU_VERIFY_MENU` before being fixed. Fixed by deferring every such
+  mutation via a `pending_menu_action` processed once per frame, after
+  `activate_selected()`/`adjust_selected()` have fully returned - see
+  DECISIONS.md for the full explanation.
+- New `LCU_VERIFY_MENU` headless hook: opens the pause menu, holds
+  `MoveForward` while paused (position provably unchanged), navigates
+  into Options via real edge-detected `LookDown`/`MenuConfirm`, adjusts
+  mouse sensitivity twice via `LookRight` (options.txt round-trip
+  confirms both edits landed: `0.0022` -> `0.0026`), saves back out,
+  closes the menu, then holds `MoveForward` again while resumed
+  (position provably changed this time). Deliberately does NOT exercise
+  the controls screen's rebind capture - `poll_any_pressed_key` reads
+  real SDL hardware state the dummy input driver never produces (see
+  DECISIONS.md, same category of gap as Phase 43's own mouse-look).
+- 21 new unit tests (`MenuStack`: push/pop/clear, wraparound selection,
+  per-screen selection surviving a pop, activate/adjust with and without
+  a real callback; `MenuItemLayout`/`MenuItemAtPoint`: real rect
+  ordering/non-overlap/hit-testing).
+- Verified via the real `LCU_VERIFY_MENU` run above, real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs
+  (byte-identical to Phase 45), a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`Chunk`/`Sky`/`UI2D` shader programs all still `valid=true`), and a
+  real two-process networked run (zero warnings/errors/rejects, matching
+  spawn columns).
+- `ctest` 455/455 (bgfx, up from 436) / 447/447 (non-bgfx, up from 428).
+- Honestly scoped: the menu's real on-screen appearance is still **NOT
+  VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+  batching/text-drawing pipeline runs end-to-end, not that it looks
+  right); the controls screen's rebind capture is real code, reviewed,
+  but **NOT VERIFIED against a real keyboard/mouse** (see above); no
+  live Renderdistanz control (deferred, see above); no chat, no
+  multiplayer UI, no advancements (out of scope per this phase's own
+  directive).
+
+### Phase 45
+
+- **Real persistent options**: `engine/platform::Options` (new
+  `options.{h,cpp}`) - `mouse_sensitivity`, `fov`, `hud_enabled`,
+  `debug_overlay_enabled`, and a full `KeyBindings` instance, all
+  loaded from and saved to a real `key=value` text file
+  (`# comments`, blank lines skipped) at `SDL_GetPrefPath(
+  "LiveCraftUltimate", "LiveCraftUltimate")` (a genuine per-OS user
+  config directory, e.g. `~/.local/share/LiveCraftUltimate/
+  LiveCraftUltimate/options.txt` on Linux) via `Options::default_path()`.
+  Every one of `KeyBindings`' 29 `Action`s round-trips through a new
+  bidirectional `action_name`/`parse_action_name` table (`key.<action>=
+  <key>`, plus `key.<action>.alt=<key>` only when a real second binding
+  exists).
+- **Real tolerance, not just a happy path**: a missing file leaves
+  every default untouched and `load()` returns `false` (not an error -
+  first run always looks like this); a corrupt or unrecognized line
+  (bad number, unknown action name, unknown key name) is skipped and
+  every other real line still loads, verified by dedicated tests that
+  deliberately interleave garbage lines between real ones.
+- **`VoxelClient` now genuinely uses this instead of hardcoded
+  constants**: the former `kMouseSensitivity` constant is gone,
+  replaced by `options.mouse_sensitivity`; the crosshair (Phase 44) is
+  now gated behind `options.hud_enabled`; the debug overlay is now
+  gated behind `options.debug_overlay_enabled` - a real behavior
+  change, since that option defaults to `false` (matching this
+  project's own Phase 45 spec example and Minecraft's own F3-gated
+  convention), so the overlay no longer renders unconditionally as it
+  did through Phase 44. Options load at startup and save on exit; no
+  menu UI writes to it yet (Phase 46).
+- 7 new `Options` unit tests (default values, missing-file behavior,
+  scalar round-trip, keybinding round-trip, corrupt-line tolerance,
+  unrecognized-name tolerance, conditional `.alt` line) plus 2 new
+  `ActionName` tests (every one of the 29 real `Action`s has a real
+  name and round-trips; an unknown name fails to parse rather than
+  aliasing to some action).
+- Verified via real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+  `LCU_VERIFY_CRAFT` runs (byte-identical to Phase 44, plus the new
+  "Loaded options from"/"No options file at"/"Saved options to" log
+  lines), a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D`
+  shader programs all still `valid=true`), a real two-process networked
+  run (zero warnings/errors/rejects, matching spawn columns), and a
+  real inspection of the actual written `options.txt` confirming every
+  field including every one of the 29 keybindings round-trips as
+  human-readable text at the real OS-provided path - not just asserted
+  in a unit test against a temp file.
+- `ctest` 436/436 (bgfx, up from 427) / 428/428 (non-bgfx, up from
+  419).
+- Honestly scoped: no options menu UI exists yet to change these values
+  in-game (Phase 46 - this phase is the storage layer only, per its own
+  spec); FOV is persisted but **not yet actually applied to the camera
+  projection - NOT VERIFIED, deferred** (nothing in the client currently
+  reads `options.fov` for rendering; wiring it in without a menu to
+  change it would be speculative, so it stays honestly unused until
+  Phase 46 gives it a real consumer).
+
+### Phase 44
+
+- **Real 2D UI quad batch**: `engine/rendering::Renderer::submit_ui_quad`/
+  `flush_ui_quads` - screen-space rectangles (pixel position/size, RGBA
+  color, UV 0..1 per quad) queued across a frame and uploaded/drawn in
+  exactly one real `bgfx::submit()` call via transient buffers, the
+  same idiom `submit_billboard`/`submit_wireframe_box` already use for
+  other per-frame geometry. New `Mat4::orthographic` (real unit tests:
+  screen corners map to clip-space corners, center maps to the origin).
+  New dedicated `kUi2dViewId` bgfx view, own `vs_ui2d.sc`/`fs_ui2d.sc`
+  shader pair (position + UV + color, no lighting - same minimal
+  approach `vs_sky.sc`/`fs_sky.sc` already established).
+- **Real, deliberate deviation from this phase's own literal view-order
+  wording** ("NACH Sky, VOR Terrain" - after sky, before terrain): the
+  UI view is submitted *last* (after terrain), not before it - a UI
+  view submitted before terrain would have every pixel simply
+  overdrawn the instant terrain's own opaque geometry rendered into
+  the same spot, making the UI invisible behind anything solid, the
+  opposite of what a HUD needs. Documented in DECISIONS.md as a
+  real "working feature over literal wording" call, not silently
+  ignored.
+- **Real first consumer**: a genuine, permanent crosshair (two thin
+  bars, screen-centered) submitted every frame - doubles as this
+  phase's own "Test-Rechteck in Bildschirmmitte sichtbar" verification,
+  not a throwaway test element separate from real usage.
+- **`ItemDefinition::icon_color`/item-icon pattern rendering deferred**
+  (PARTIAL, real limit): this project's own `ItemDefinition` doc
+  comment already establishes "fields are added when something needs
+  them, not speculatively" - no inventory/hotbar widget exists yet to
+  actually place an item icon into, so adding the field now would be
+  exactly the kind of speculative addition that comment argues
+  against. The vertex format already carries real UV data ready for
+  this once a real consumer exists (see DECISIONS.md).
+- 5 new `QuadBatch2D` unit tests (batch accumulation, flush clears
+  it, empty-flush safety) plus 2 new `Mat4::orthographic` tests.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`UI2D shader program valid=true`, a real compiled/linked shader
+  program, not just "no error"), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+  43), and a real two-process networked run with matching
+  independently-computed spawn columns, zero warnings/errors/rejects.
+- `ctest` 427/427 (bgfx, up from 420) / 419/419 (non-bgfx, up from
+  417).
+- Honestly scoped: **what the crosshair/any future UI quad actually
+  looks like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+  LIMITATION** (headless Noop backend proves the pipeline runs
+  end-to-end without error, not that it looks right); no item-icon
+  rendering yet (deferred, see above); no slot backgrounds/health/
+  hunger/menu backgrounds yet (Phase 46+, real future consumers of
+  this same batch API, not separate machinery); debug text (bgfx's
+  own built-in overlay) composites independently of this new UI view -
+  not touched this phase, already real since Phase 12.
+
+
+### Phase 43
+
+- **Real rebindable keymap**: new `engine/platform::KeyBindings` - each
+  `Action` maps to up to 2 physical keys (a unified `PhysicalKey` space
+  covering both SDL scancodes and 3 mouse buttons), starting from real
+  Minecraft-parity defaults and rebindable in place via `bind()`/
+  `reset_to_defaults()` - the actual data structure a future controls
+  menu will read/write, not a stub. `physical_key_name`/
+  `parse_physical_key` round-trip a binding to/from a human-readable
+  string (SDL-provided for keyboard keys, `MOUSE_LEFT`/`MOUSE_RIGHT`/
+  `MOUSE_MIDDLE` for mouse buttons) for future persistence/display.
+- **`KeyboardInputBackend` renamed `DesktopInputBackend`** and rewritten
+  to poll through `KeyBindings` instead of a fixed table baked into
+  input.cpp - every Action now resolves through the same physical-key
+  lookup, mouse buttons included, so `Action::Interact`/`PlaceBlock`/
+  `PickBlock` are driven by real mouse clicks with zero special-casing
+  in client/main.cpp's existing break/place logic.
+- **Real relative mouse-look**: `InputState::mouse_delta_x/y` (from
+  `SDL_GetRelativeMouseState`, polled once per frame) applied to
+  `FirstPersonCamera::add_yaw_pitch` alongside (not instead of) the
+  existing arrow-key look fallback. `Window::set_relative_mouse_mode`/
+  `relative_mouse_mode()` wrap SDL's own capture mechanism; a real
+  ESC/Tab (new `Action::Escape`) releases it, a click while free
+  re-captures it (the re-capture click itself doesn't also register as
+  a break/place - see `suppress_click_for_recapture`), and a real
+  `Window::consume_focus_lost()` (SDL_EVENT_WINDOW_FOCUS_LOST) releases
+  it automatically on alt-tab.
+- **Real mouse-wheel hotbar cycling**: `Window::consume_wheel_delta_y()`
+  accumulates `SDL_EVENT_MOUSE_WHEEL` events per frame; client/main.cpp
+  turns a nonzero delta into a one-frame `Action::CycleHotbar`/new
+  `Action::CycleHotbarPrev` pulse, reusing the exact same edge-detection
+  as a real key press.
+- **Direct hotbar selection**: 9 new `Action::SelectHotbar1..9` bound to
+  the number row, directly setting the selected placeable index (a
+  silent no-op past the real hotbar's current size, not a crash or
+  wraparound). New `Action::PickBlock` (mouse middle button, Minecraft's
+  "pick block") selects whichever placeable entry matches the
+  looked-at block, without granting the item for free.
+- **Real Minecraft-parity default fix**: this project's own pre-Phase-43
+  defaults had Sprint/Crouch backwards (Sprint=Shift, Crouch=Ctrl) -
+  corrected to Sprint=Ctrl, Crouch=Shift.
+- **Hygiene fixes**: the chunk/sky shader load path now resolves against
+  `Window::executable_base_path()` (`SDL_GetBasePath`) instead of the
+  current working directory - real, not cosmetic: verified via a real
+  run of the client from the repo root and from `/tmp`, both correctly
+  loading real shaders (`Chunk shader program valid=true`) from
+  whatever directory it was launched from, not just the executable's
+  own directory as every prior verification run in this repo happened
+  to already be. Rendering-only constants (`kNightSkyColor` etc., Phase
+  27/36) gated behind `#if defined(LCU_ENABLE_BGFX)` - genuinely dead
+  declarations in a non-bgfx build, the real cause of an unused-variable
+  warning reported from a real macOS/Apple-Clang build (not reproduced
+  by this sandbox's own GCC/Clang - see BUILD_STATUS.md). A real,
+  verified redundant `Lcu::Math` link entry removed from
+  `game/CMakeLists.txt` (already provided transitively via
+  `Lcu::EngineCore`) - one real contributor to a reported "ignoring
+  duplicate libraries" linker warning (also an Apple-`ld`-specific
+  message, not reproduced here).
+- 20 new unit tests (`KeyBindings`/`PhysicalKey`: defaults, rebinding,
+  reset, name round-trip; `InputState`: mouse-delta get/set).
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (from the repo
+  root AND from `/tmp`, not just `bin/`), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+  41 - mouse-driven Interact/PlaceBlock still fire correctly from the
+  same `set_down` calls these hooks always used), and a real
+  two-process networked run with matching independently-computed spawn
+  columns, zero warnings/errors/rejects.
+- `ctest` 420/420 (bgfx, up from 406) / 417/417 (non-bgfx, up from 403).
+- Honestly scoped: **real mouse-look/click/wheel/capture behavior on an
+  actual GPU/display and mouse device is still NOT VERIFIED —
+  ENVIRONMENT LIMITATION** (this sandbox has no real mouse; `SDL_
+  SetWindowRelativeMouseMode` under the dummy video driver here
+  happened to report success with nothing to actually capture, logged
+  either way - see `Window::set_relative_mouse_mode`); the unused-
+  variable and duplicate-library linker warnings' exact reproduction is
+  also NOT VERIFIED here for the same reason (real fixes applied on
+  code-reading grounds, not by watching the warning disappear); no 2D
+  UI/menu yet to actually rebind a key through (Phase 44/46); `Action::
+  Inventory`/`SwapOffhand` still have no consumer (unchanged from
+  before this phase, now joined by `Escape`'s pause-menu half and most
+  `SelectHotbar5-9` slots, which the real 4-item hotbar can't reach
+  yet).
+
 
 ### Phase 42
 
