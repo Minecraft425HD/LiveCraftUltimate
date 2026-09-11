@@ -92,6 +92,14 @@ if(TARGET Lcu::Ui)
     target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
 endif()
 
+# TextureAtlas (Phase 53) is pure logic - no SDL/bgfx dependency at all
+# (see engine/assets/CMakeLists.txt) - built and tested in both the
+# bgfx and non-bgfx configs, same as Lcu::Ui above.
+if(TARGET Lcu::Assets)
+    target_sources(VoxelTests PRIVATE assets/texture_atlas_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Assets)
+endif()
+
 # Waveform/positional-audio math is pure logic (no real audio device
 # needed); only built alongside engine/audio (LCU_BUILD_CLIENT - see
 # engine/audio/CMakeLists.txt).

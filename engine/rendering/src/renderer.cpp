@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "lcu/assets/texture_atlas.h"
 #include "lcu/core/assert.h"
 #include "lcu/core/log.h"
 
@@ -44,6 +45,18 @@ Renderer::~Renderer() {
     if (initialized_) {
         if (bgfx::isValid(sky_light_scale_uniform_)) {
             bgfx::destroy(sky_light_scale_uniform_);
+        }
+        if (bgfx::isValid(use_textures_uniform_)) {
+            bgfx::destroy(use_textures_uniform_);
+        }
+        if (bgfx::isValid(tile_step_uniform_)) {
+            bgfx::destroy(tile_step_uniform_);
+        }
+        if (bgfx::isValid(tile_inset_uniform_)) {
+            bgfx::destroy(tile_inset_uniform_);
+        }
+        if (bgfx::isValid(atlas_sampler_)) {
+            bgfx::destroy(atlas_sampler_);
         }
         bgfx::shutdown();
     }
@@ -105,6 +118,19 @@ bool Renderer::init(const RendererDesc& desc) {
     // fs_chunk.sc.
     sky_light_scale_uniform_ = bgfx::createUniform("u_skyLightScale", bgfx::UniformType::Vec4);
 
+    // Phase 53 - texture-atlas uniforms/sampler. u_tileStep.xy is one
+    // atlas grid cell's pitch (1/kTilesPerRow), .zw its real inset
+    // (anti-bleed) visible width/height - both fixed atlas geometry, set
+    // once here rather than recomputed per submit_chunk_mesh call.
+    // u_tileInset.xy is the same inset expressed as a UV offset (added
+    // to each tile's own grid origin) - see fs_chunk.sc for the exact
+    // formula this feeds. See lcu::assets::texture_atlas.h for where
+    // these numbers come from.
+    use_textures_uniform_ = bgfx::createUniform("u_useTextures", bgfx::UniformType::Vec4);
+    tile_step_uniform_ = bgfx::createUniform("u_tileStep", bgfx::UniformType::Vec4);
+    tile_inset_uniform_ = bgfx::createUniform("u_tileInset", bgfx::UniformType::Vec4);
+    atlas_sampler_ = bgfx::createUniform("s_atlas", bgfx::UniformType::Sampler);
+
     initialized_ = true;
     return true;
 }
@@ -139,7 +165,7 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
 
 void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
                                   const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj,
-                                  f32 sky_light_scale) {
+                                  f32 sky_light_scale, bgfx::TextureHandle atlas_texture) {
     LCU_ASSERT(initialized_);
     if (!mesh.is_valid() || !bgfx::isValid(program)) {
         return;
@@ -152,7 +178,44 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     bgfx::setState(BGFX_STATE_DEFAULT);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
     bgfx::setUniform(sky_light_scale_uniform_, uniform_value);
+
+    // Phase 53 - real atlas sampling, only when the caller actually
+    // bound one this draw (see this function's own doc comment on why
+    // atlas_texture's own validity IS u_useTextures, not a second,
+    // separately-tracked toggle).
+    const bool use_textures = bgfx::isValid(atlas_texture);
+    const f32 use_textures_value[4] = {use_textures ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    bgfx::setUniform(use_textures_uniform_, use_textures_value);
+    if (use_textures) {
+        constexpr f32 kPitch = 1.0f / static_cast<f32>(assets::kTilesPerRow);
+        constexpr f32 kInset = assets::kTileInsetTexels / static_cast<f32>(assets::kAtlasSize);
+        constexpr f32 kInner = (static_cast<f32>(assets::kTileSize) - 2.0f * assets::kTileInsetTexels) /
+                                static_cast<f32>(assets::kAtlasSize);
+        const f32 tile_step_value[4] = {kPitch, kPitch, kInner, kInner};
+        const f32 tile_inset_value[4] = {kInset, kInset, 0.0f, 0.0f};
+        bgfx::setUniform(tile_step_uniform_, tile_step_value);
+        bgfx::setUniform(tile_inset_uniform_, tile_inset_value);
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
+
     bgfx::submit(0, program);
+}
+
+bgfx::TextureHandle Renderer::create_texture_from_pixels(const u8* pixels, u32 width, u32 height) {
+    LCU_ASSERT(initialized_);
+    const bgfx::Memory* mem = bgfx::copy(pixels, width * height * 4);
+    // BGFX_SAMPLER_POINT (nearest filtering) + BGFX_SAMPLER_[UVW_]CLAMP
+    // baked into the texture itself, per Phase 53.1's own "Nearest-
+    // Filter, Clamp-Mode" requirement - see this function's own doc
+    // comment in renderer.h.
+    return bgfx::createTexture2D(static_cast<u16>(width), static_cast<u16>(height), false, 1,
+                                  bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP, mem);
+}
+
+void Renderer::destroy_texture(bgfx::TextureHandle handle) {
+    if (bgfx::isValid(handle)) {
+        bgfx::destroy(handle);
+    }
 }
 
 void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,

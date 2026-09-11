@@ -2,7 +2,68 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53
+
+### Phase 53
+
+- **Real texture-atlas pipeline** (infrastructure only - no actual block
+  textures yet, see Phase 54): new `engine/assets::texture_atlas.{h,cpp}`
+  (pure logic, no bgfx dependency) - a fixed 256x256 RGBA atlas packed
+  as a 16x16 grid of 16x16-pixel tiles, `tile_uv_range(tile_index)`
+  returning each tile's real sample rect. Anti-bleed is a real half-texel
+  UV inset, not literal padding pixels between tiles (the atlas's own
+  fixed 256x256/16x16-tiles-of-16x16-pixels size leaves no spare pixel
+  budget for a literal border without shrinking real tile content or
+  growing the atlas - see DECISIONS.md).
+- **New `Renderer::create_texture_from_pixels`/`destroy_texture`**:
+  real bgfx 2D RGBA8 texture upload, nearest-filtered + clamp-addressed
+  (`BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP`) baked into the
+  texture's own creation flags.
+- **`voxel::MeshVertex` gains a real `u16 texture_index` field** (Phase
+  53.4) - placed *before* the trailing `light` byte, not after, so its
+  2-byte alignment needs zero compiler-inserted padding (see the field's
+  own doc comment for the real bug this avoids: an internal gap the
+  existing tightly-packed `chunk_mesh_vertex_layout()` doesn't account
+  for). `ChunkMeshLayer::add_quad` takes a new, defaulted
+  `texture_index` parameter - existing call sites (including
+  `mesh_chunk_greedy`'s own two) are unaffected, still resolving to
+  atlas tile 0 until Phase 55 gives `BlockDefinition` real per-face
+  texture assignments.
+- **Real chunk-shader atlas sampling**: `vs_chunk.sc`/`fs_chunk.sc`/
+  `varying.def.sc` extended with the tile index + 3 new uniforms
+  (`u_useTextures`, `u_tileStep`, `u_tileInset`) and an `s_atlas`
+  sampler. `local_uv = fract(v_texcoord0)` wraps a greedy-meshed quad's
+  per-block UV back into 0..1 so a merged multi-block face tiles the
+  same texture repeatedly instead of stretching one tile across the
+  whole run. `u_useTextures.x` mixes between the real atlas sample and
+  the existing flat-color/noise path - driven directly by whether
+  `Renderer::submit_chunk_mesh` was actually handed a valid atlas
+  texture this draw (a real, always-in-sync source of truth, not a
+  separately-tracked toggle that could drift).
+- **New `LCU_USE_TEXTURES` env toggle** (default ON, `=0` forces the
+  exact pre-Phase-53 procedural-only path). `client/main.cpp` creates a
+  real placeholder 256x256 flat-white atlas texture when textures are
+  on - proves the real GPU round-trip (`create_texture_from_pixels` ->
+  a valid `bgfx::TextureHandle` under the real, headless Noop backend)
+  end to end this phase, not just declared/unused API surface; Phase 54
+  replaces this placeholder with real procedurally-generated content.
+- 6 new unit tests (`TextureAtlasConstants`/`TileUvRange`).
+- Verified via real `LCU_USE_TEXTURES=1`/`=0` headless runs (bgfx build
+  - `Texture atlas: use_textures=true atlas_texture_valid=true` /
+  `use_textures=false atlas_texture_valid=false`), real regression runs
+  of `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` (both still pass
+  byte-identical to Phase 52 - fall damage/eating/item pickup all still
+  log correctly with the new vertex format in place), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (`vs_chunk.sc`/`fs_chunk.sc` compile
+  cleanly to all 3 real shader profiles - spirv/glsl/essl). `ctest`
+  553/553 (bgfx, up from 547) / 545/545 (non-bgfx, up from 539).
+- **Deliberately deferred, marked PARTIAL**: Phase 53.2's optional
+  stb_image-based debug PNG dump of the atlas was not implemented -
+  this sandbox has no display to actually view a dumped debug image
+  against, the directive itself marks it optional, and pulling in a new
+  third-party dependency for a feature nobody here can currently use to
+  verify anything would be real, avoidable scope creep. See
+  DECISIONS.md.
 
 ### Phase 52
 

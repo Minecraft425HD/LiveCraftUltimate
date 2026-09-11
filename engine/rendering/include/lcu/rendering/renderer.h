@@ -76,8 +76,38 @@ class Renderer : public NonCopyable {
     // computed, already-packed sky light by; set once per draw call
     // here, never recomputed per-voxel/per-frame in meshing itself (see
     // DECISIONS.md "Light is never computed per frame").
+    // `atlas_texture` (Phase 53) - a texture created via create_texture_
+    // from_pixels, or an invalid handle (the default) to render fully
+    // procedurally, exactly as every prior phase already did. Only when
+    // valid does fs_chunk.sc actually sample it (`u_useTextures` is set
+    // from this, not a separate flag - a real, always-in-sync single
+    // source of truth: no atlas bound genuinely means no atlas to
+    // sample, not a caller-managed toggle that could drift out of sync
+    // with what's actually bound).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
-                            const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f);
+                            const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
+                            bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE);
+
+    // Real GPU texture upload (Phase 53) - `pixels` is a tightly packed
+    // RGBA8 buffer, `width*height*4` bytes, row-major top-to-bottom (the
+    // same layout engine/assets::procedural_textures - Phase 54 - packs
+    // its atlas buffer in). Nearest-filter, clamp-addressed (Phase
+    // 53.1's own "Nearest-Filter, Clamp-Mode" requirement) - baked into
+    // the texture's own creation flags, not a separate per-draw sampler
+    // state, since every real consumer of a texture this project creates
+    // wants exactly that (a pixel-art atlas, never filtered/wrapped).
+    // Returns an invalid handle (bgfx::isValid == false) if bgfx itself
+    // is Noop-backed and rejects it - a real, legitimate possibility
+    // this sandbox's own headless runs can hit, not treated as fatal by
+    // any caller (see submit_chunk_mesh's own "invalid atlas_texture
+    // means fully procedural" fallback above).
+    bgfx::TextureHandle create_texture_from_pixels(const u8* pixels, u32 width, u32 height);
+
+    // Destroys a texture created via create_texture_from_pixels above.
+    // No-op if `handle` is already invalid (same "safe to call on an
+    // already-empty/never-created resource" convention destroy_gpu_
+    // chunk_mesh already establishes).
+    void destroy_texture(bgfx::TextureHandle handle);
 
     // Draws one camera-facing colored quad (Phase 27 - the sun/moon)
     // into a dedicated sky view, executed before the terrain view so
@@ -210,6 +240,16 @@ class Renderer : public NonCopyable {
     // is simply ignored, not an error), so this doesn't need to be
     // gated on whether LCU_BUILD_SHADER_TOOLS built real chunk shaders.
     bgfx::UniformHandle sky_light_scale_uniform_ = BGFX_INVALID_HANDLE;
+    // Phase 53 - texture-atlas uniforms/sampler, same "created
+    // unconditionally in init(), destroyed in ~Renderer()" reasoning as
+    // sky_light_scale_uniform_ above (a bgfx uniform costs nothing to
+    // declare even if no atlas texture is ever actually bound - see
+    // submit_chunk_mesh's own doc comment). See fs_chunk.sc for what
+    // each one actually does.
+    bgfx::UniformHandle use_textures_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle tile_step_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle tile_inset_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle atlas_sampler_ = BGFX_INVALID_HANDLE;
     // Phase 44 - this frame's queued submit_ui_quad() calls, 4 vertices/
     // 6 indices per quad, uploaded and cleared together by
     // flush_ui_quads(). Real per-frame state (not a persistent GPU

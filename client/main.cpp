@@ -23,6 +23,7 @@
 #include "game/systems/item_entity_system.h"
 #include "game/systems/player_vitals_system.h"
 #include "game/systems/replication_protocol.h"
+#include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
 #include "lcu/audio/waveform.h"
@@ -1472,6 +1473,35 @@ int main() {
     LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
     LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
     LCU_LOG_INFO("UI2D shader program valid={}", bgfx::isValid(ui2d_program));
+
+    // Real texture-atlas pipeline (Phase 53.5) - LCU_USE_TEXTURES
+    // defaults ON (real per-block/per-item content isn't wired up until
+    // Phase 54-56 give BlockDefinition/ItemDefinition real texture
+    // indices - today every face/icon still resolves to atlas tile 0,
+    // see MeshVertex::texture_index's own doc comment), set to "0" to
+    // force the exact pre-Phase-53 flat-color/noise-only path instead
+    // (real regression-free fallback - see submit_chunk_mesh's own "no
+    // atlas bound" behavior). atlas_texture stays BGFX_INVALID_HANDLE
+    // (its own real default) whenever textures are off or bgfx itself
+    // declines to create one (this sandbox's own headless Noop backend
+    // is a real, legitimate case of that, not an error - see
+    // create_texture_from_pixels' own doc comment).
+    const char* use_textures_env = std::getenv("LCU_USE_TEXTURES");
+    const bool use_textures = use_textures_env == nullptr || std::string(use_textures_env) != "0";
+    bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE;
+    if (use_textures) {
+        // Real placeholder content (Phase 53 builds the pipeline only -
+        // see this phase's own directive; Phase 54 replaces this flat
+        // white 256x256 buffer with real procedurally-generated MC-style
+        // block textures). Proves the real GPU round-trip
+        // (create_texture_from_pixels -> a valid bgfx::TextureHandle)
+        // end to end this phase, not just declared/unused API surface.
+        std::vector<lcu::u8> placeholder_atlas_pixels(
+            static_cast<lcu::usize>(lcu::assets::kAtlasSize) * lcu::assets::kAtlasSize * 4, 255);
+        atlas_texture = renderer.create_texture_from_pixels(placeholder_atlas_pixels.data(), lcu::assets::kAtlasSize,
+                                                              lcu::assets::kAtlasSize);
+    }
+    LCU_LOG_INFO("Texture atlas: use_textures={} atlas_texture_valid={}", use_textures, bgfx::isValid(atlas_texture));
 #endif
 
     // --- Player: spawns resting on dry land at spawn_column (Phase 37 - see
@@ -3819,7 +3849,8 @@ int main() {
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
-            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale());
+            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale(),
+                                        atlas_texture);
             if (gpu_mesh.is_valid() && bgfx::isValid(chunk_program)) {
                 ++draw_calls;
             }
@@ -4194,6 +4225,7 @@ int main() {
     for (auto& [coord, gpu_mesh] : gpu_meshes) {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
     }
+    renderer.destroy_texture(atlas_texture);
 #endif
 
     LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),

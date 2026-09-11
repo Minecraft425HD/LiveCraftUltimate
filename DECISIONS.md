@@ -3639,3 +3639,76 @@ rejected as exactly the kind of unplanned scope growth the standing
 directive's own phase structure exists to prevent, and none of these
 verticals are actually small once a real implementation (not a stub) is
 attempted.
+
+## 2026-09-11 — Texture atlas: a UV inset instead of literal padding pixels, and why stb_image was deferred
+
+**Context:** Phase 53 built the real GPU texture-atlas pipeline (no
+actual block textures yet - that's Phase 54): atlas geometry, GPU
+upload, and chunk-shader UV mapping.
+
+**The directive's own "1-pixel padding between tiles" was implemented
+as a half-texel UV inset, not literal border pixels, because the
+directive also fixed the atlas at exactly 256x256 = 16x16 tiles of
+16x16 pixels - a size with zero spare pixel budget for a literal
+border.** Adding real padding pixels between tiles necessarily means
+either each tile's own authored content shrinks (e.g. 14x14 usable
+pixels inside a 16x16 cell) or the atlas itself grows past its own
+stated fixed size (e.g. 18px cells needing a 288x288 atlas) - both real
+costs the literal reading would impose that the directive's own fixed-
+size framing didn't leave room for. A half-texel inward inset from each
+tile's edge achieves the identical goal - nearest-filter sampling never
+reads a neighboring tile's pixel - at zero pixel-budget cost: unlike
+bilinear filtering (which blends across a wide footprint and genuinely
+needs a padding border), NEAREST sampling only risks bleeding from
+floating-point rounding landing a UV coordinate exactly on a tile's own
+boundary, which an inset this small already fully prevents. This is a
+real, working, deliberately-chosen alternative reading, in the same
+spirit as Phase 50's "read 'like inventory UI, grid+result only' as
+reuse-the-shape, not a literal grid-only screen" decision - the
+literal instruction and the atlas's own stated fixed size were in
+tension, and the reading that keeps both real constraints
+(no-bleeding AND the stated 256x256/16x16-tiles-of-16x16 size) intact
+was chosen over a reading that would have silently broken one of them.
+
+**`voxel::MeshVertex::texture_index` (u16) is declared BEFORE the
+trailing `light` byte, not after it - a real, deliberate field-order
+choice, not arbitrary.** `chunk_mesh_vertex_layout()`
+(`chunk_mesh_upload.cpp`) has always assumed the C++ struct has zero
+*internal* padding between fields, only a single *trailing* gap
+accounted for by one `layout.skip()` call at the end (see that
+function's own long-standing doc comment). Appending `texture_index`
+*after* `light` would have inserted exactly the kind of internal gap
+that scheme doesn't handle (a u16 needs 2-byte alignment; the offset
+right after a single trailing u8 is usually odd), which would have
+silently corrupted every vertex's light/texture-index bytes on GPU
+upload - a real, verified-in-advance failure mode, not a hypothetical
+one, caught by working through the exact byte offsets before writing
+the code rather than after debugging a broken render. Placing it
+*before* `light` instead lands its 2-byte alignment requirement on an
+already-even offset (right after the `Vec3 color` field), so the
+existing "tightly-packed .add() calls, one trailing skip()" scheme
+still holds exactly, with zero code changes to the general pattern
+needed.
+
+**Phase 53.2's optional stb_image-based debug PNG dump of the atlas was
+deliberately not implemented.** The directive itself marks it optional
+("nur Debug"); this sandbox has no display, so a dumped debug PNG has
+no real consumer here to view it against (the same "no GPU/display in
+this sandbox" limitation every other visual feature in this project
+already documents); and pulling in a new third-party single-header
+dependency (`stb_image_write.h`, not actually `stb_image.h` itself,
+which reads rather than writes PNGs - the directive's own wording
+conflates the two) for a feature nobody currently using this sandbox
+can act on would be real, avoidable scope creep this project's own
+"no overengineering ahead of need" discipline argues against. Marked
+PARTIAL rather than silently dropped - see CHANGELOG.md.
+
+**Alternatives considered:** literal padding pixels with a shrunk atlas
+tile budget (14x14 usable per 16x16 cell) - rejected as contradicting
+the directive's own explicit "16x16 Tiles à 16x16 Pixel" sizing;
+literal padding pixels with a grown atlas (288x288) - rejected as
+contradicting the directive's own explicit "256x256" sizing; a larger
+inset (a full texel instead of half) - rejected as unnecessarily
+wasteful of each tile's real usable area for no additional anti-bleed
+benefit over a half-texel inset, which already fully closes the real
+floating-point-rounding failure mode NEAREST filtering can hit.

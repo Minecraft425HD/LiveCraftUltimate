@@ -2244,6 +2244,41 @@ Closes the Phases 43-52 program. Documentation-only, no code changes.
 - [x] `ctest` unchanged at 547/547 (bgfx) / 539/539 (non-bgfx) - no
   code touched this phase.
 
+## Phase 53 — Texture-atlas pipeline
+
+Starts the Phases 53-57 program. Infrastructure only - no real block
+textures yet (Phase 54).
+
+- [x] New `engine/assets::texture_atlas.{h,cpp}` (pure logic): fixed
+  256x256 atlas, 16x16 grid of 16x16-pixel tiles, `tile_uv_range()`.
+  Anti-bleed via a real half-texel UV inset, not literal padding pixels
+  (see DECISIONS.md for why).
+- [x] New `Renderer::create_texture_from_pixels`/`destroy_texture` -
+  real bgfx RGBA8 2D texture, nearest-filtered + clamp-addressed.
+- [x] `voxel::MeshVertex::texture_index` (u16), placed before the
+  trailing `light` byte to avoid a real internal-padding corruption bug
+  (see the field's own doc comment). `ChunkMeshLayer::add_quad` takes a
+  new defaulted `texture_index` param; every face still resolves to
+  tile 0 until Phase 55.
+- [x] Real chunk-shader atlas sampling: `vs_chunk.sc`/`fs_chunk.sc`/
+  `varying.def.sc` extended (3 new uniforms + `s_atlas` sampler),
+  `fract(v_texcoord0)` wraps per-block UV for real tiling across
+  greedy-meshed multi-block quads.
+- [x] New `LCU_USE_TEXTURES` toggle (default ON, `=0` = exact pre-
+  Phase-53 path). `client/main.cpp` creates a real placeholder flat-
+  white atlas when on, proving the GPU round-trip works end to end.
+- [x] 6 new unit tests.
+- [x] Verified via real `LCU_USE_TEXTURES=1`/`=0` headless runs, real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs (still
+  pass byte-identical), and a real `LCU_BUILD_SHADER_TOOLS=ON` build
+  (all 3 shader profiles compile cleanly).
+
+`ctest` 553/553 (bgfx, up from 547) / 545/545 (non-bgfx, up from 539).
+
+Honestly scoped: no real block textures exist yet (flat white
+placeholder atlas - Phase 54); Phase 53.2's optional stb_image debug
+PNG dump deliberately not implemented (PARTIAL, see DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

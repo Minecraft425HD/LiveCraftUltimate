@@ -19,6 +19,20 @@ struct MeshVertex {
     // layout attribute order in lockstep (this struct is memcpy'd
     // straight into a GPU buffer, see upload_chunk_mesh_layer).
     math::Vec3 color{1.0f, 1.0f, 1.0f};
+    // Texture-atlas tile index (Phase 53, lcu::assets::TextureAtlas) -
+    // deliberately placed HERE, before the trailing `light` byte below,
+    // not after it: a u16 needs 2-byte alignment, and this offset
+    // (right after `color`) already lands on one with zero compiler-
+    // inserted padding, so chunk_mesh_vertex_layout()'s existing "one
+    // tightly-packed .add() per field, single trailing skip() at the
+    // end" scheme (see its own doc comment) still holds exactly. Putting
+    // it after `light` instead would silently insert a 1-byte internal
+    // gap that same scheme doesn't account for, corrupting every
+    // vertex's light/texture_index bytes on GPU upload. Defaults to 0 -
+    // Phase 53 wires the *pipeline* only; every real face still resolves
+    // to atlas tile 0 until Phase 55 gives BlockDefinition real per-face
+    // texture assignments.
+    u16 texture_index = 0;
     // Packed per-voxel light (Phase 28): low nibble = sky light, high
     // nibble = block light, each 0-15 - the exact same packing
     // lcu::lighting::LightStorage itself uses (see its doc comment), one
@@ -52,14 +66,18 @@ struct ChunkMeshLayer {
     // default to full-bright so the light-less mesh_chunk_greedy
     // overload and any caller that doesn't care about lighting (this
     // engine's existing rendering test included) don't need updating.
+    // `texture_index` (Phase 53) is the same real atlas tile for all 4
+    // corners - a quad is one flat block face, never split across two
+    // different textures - defaults to 0 (atlas tile 0) for the same
+    // "existing callers don't need updating" reason.
     void add_quad(const math::Vec3& v0, const math::Vec3& v1, const math::Vec3& v2, const math::Vec3& v3,
                   const math::Vec3& normal, f32 width, f32 height, const math::Vec3& color = {1.0f, 1.0f, 1.0f},
-                  u8 light0 = 0xFF, u8 light1 = 0xFF, u8 light2 = 0xFF, u8 light3 = 0xFF) {
+                  u8 light0 = 0xFF, u8 light1 = 0xFF, u8 light2 = 0xFF, u8 light3 = 0xFF, u16 texture_index = 0) {
         const u32 base = static_cast<u32>(vertices.size());
-        vertices.push_back({v0, normal, 0.0f, 0.0f, color, light0});
-        vertices.push_back({v1, normal, width, 0.0f, color, light1});
-        vertices.push_back({v2, normal, width, height, color, light2});
-        vertices.push_back({v3, normal, 0.0f, height, color, light3});
+        vertices.push_back({v0, normal, 0.0f, 0.0f, color, texture_index, light0});
+        vertices.push_back({v1, normal, width, 0.0f, color, texture_index, light1});
+        vertices.push_back({v2, normal, width, height, color, texture_index, light2});
+        vertices.push_back({v3, normal, 0.0f, height, color, texture_index, light3});
 
         indices.push_back(base + 0);
         indices.push_back(base + 1);

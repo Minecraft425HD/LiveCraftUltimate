@@ -45,7 +45,11 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 48 (block highlight + hold-to-break + hand)**, **Phase 49
 (inventory screen + drag/drop + crafting grid)**, **Phase 50
 (item entities + crafting table)**, **Phase 51 (health, hunger,
-fall damage, respawn)**, and **Phase 52 (documentation)** are done; see
+fall damage, respawn)**, **Phase 52 (documentation)**, and **Phase 53
+(texture-atlas pipeline - infrastructure only, no real textures yet)**
+are done; a fourth user-directed program (Phases 53-57: texture atlas,
+procedural MC-style textures, blocks/items on the atlas, a bitmap font
++ real text renderer) is now in progress - see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
