@@ -96,6 +96,24 @@ enum class Action : u8 {
     // choice (never listed as editable), not an architectural
     // restriction here.
     MenuConfirm,
+    // F-key HUD/display toggles (Phase 47, the "verbindlich" keybinding
+    // table Phase 43 already reserved F1/F2/F3/F5/F11 for, only now
+    // given real consumers). ToggleHud/ToggleDebugOverlay flip the same
+    // real `Options::hud_enabled`/`debug_overlay_enabled` fields the
+    // options menu already reads/writes (Phase 46) - two real paths to
+    // one real piece of state, not a second, independent toggle.
+    ToggleHud,
+    ToggleDebugOverlay,
+    // Real `bgfx::requestScreenShot` trigger (Phase 47) - writes a real
+    // file via bgfx's own screenshot callback, not a placeholder.
+    Screenshot,
+    // Cycles first-person -> third-person-behind (Phase 47) - real
+    // camera-offset behavior, PARTIAL: no player model exists to render
+    // in third person, so "third-person-front" (which needs a visible
+    // player model in front of the camera to look at all) is honestly
+    // not implemented yet - see DECISIONS.md.
+    TogglePerspective,
+    Fullscreen,
     Count,
 };
 

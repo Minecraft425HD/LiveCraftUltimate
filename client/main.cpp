@@ -47,6 +47,7 @@
 #include "lcu/replication/position_interpolator.h"
 #include "lcu/replication/prediction_buffer.h"
 #include "lcu/serialization/chunk_serializer.h"
+#include "lcu/ui/hud.h"
 #include "lcu/ui/menu_stack.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
@@ -70,6 +71,7 @@
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
 #include "lcu/ui/debug_overlay.h"
+#include "lcu/ui/hud_renderer.h"
 #include "lcu/ui/menu_renderer.h"
 #endif
 
@@ -190,6 +192,11 @@ constexpr lcu::f32 kEyeHeight = 1.62f;
 constexpr lcu::f32 kMoveSpeed = 4.3f;    // blocks/s
 constexpr lcu::f32 kLookSpeed = 2.0f;    // radians/s, arrow-key look (see platform/input.h)
 constexpr lcu::f32 kInteractRange = 6.0f;
+// Third-person-behind camera distance (Phase 47, F5) - real, chosen to
+// clear the player's own AABB (kPlayerHeight/kPlayerHalfWidth above)
+// comfortably; no real collision check pulls it closer against a wall
+// yet (a real, honest PARTIAL - see DECISIONS.md).
+constexpr lcu::f32 kThirdPersonDistance = 4.0f;
 
 // Crosshair (Phase 44): the first real consumer of the new 2D UI quad
 // batch (engine/rendering::Renderer::submit_ui_quad/flush_ui_quads) -
@@ -253,6 +260,17 @@ constexpr lcu::u64 kVerifyMenuActivateBackFrame = 54;
 constexpr lcu::u64 kVerifyMenuCloseFrame = 56;
 constexpr lcu::u64 kVerifyMenuMoveWhileResumedStart = 58;
 constexpr lcu::u64 kVerifyMenuMoveWhileResumedEnd = 87;
+
+// A fourth, independent headless hook (LCU_VERIFY_HUD, Phase 47): each
+// F-key toggle pressed on its own frame (different actions, so no
+// same-action-adjacency debounce concern - see kVerifyMenuAdjustSensitivityFrame2's
+// own comment for why that matters for a *repeated* press of the same
+// action).
+constexpr lcu::u64 kVerifyHudToggleHudFrame = 5;
+constexpr lcu::u64 kVerifyHudToggleDebugOverlayFrame = 6;
+constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame = 7;
+constexpr lcu::u64 kVerifyHudFullscreenFrame = 8;
+constexpr lcu::u64 kVerifyHudScreenshotFrame = 9;
 
 // A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
 // breaks the grass block the player spawns on, then the dirt block
@@ -623,6 +641,10 @@ int main() {
     stone_item_def.namespaced_id = "game:stone";
     stone_item_def.display_name = "Stone";
     stone_item_def.max_stack_size = 64;
+    // Real hotbar icon colors (Phase 47) - matching each item's own
+    // block's tint where one exists (BlockDefinition::color above), the
+    // same "flat color, no atlas" convention, not a coincidence.
+    stone_item_def.icon_color = {0.5f, 0.5f, 0.5f, 1.0f};
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
     // Phase 17's grass/dirt terrain content gets the same direct 1:1
@@ -635,18 +657,21 @@ int main() {
     grass_item_def.namespaced_id = "game:grass";
     grass_item_def.display_name = "Grass";
     grass_item_def.max_stack_size = 64;
+    grass_item_def.icon_color = {0.3f, 0.7f, 0.2f, 1.0f};
     const lcu::items::ItemId grass_item_id = item_registry.register_item(grass_item_def);
 
     lcu::items::ItemDefinition dirt_item_def;
     dirt_item_def.namespaced_id = "game:dirt";
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
+    dirt_item_def.icon_color = {0.4f, 0.25f, 0.1f, 1.0f};
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
     lcu::items::ItemDefinition torch_item_def;
     torch_item_def.namespaced_id = "game:torch";
     torch_item_def.display_name = "Torch";
     torch_item_def.max_stack_size = 64;
+    torch_item_def.icon_color = {1.0f, 0.65f, 0.2f, 1.0f};
     const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
     // First crafted-only item (Phase 23, closing brief section 55's
@@ -659,6 +684,7 @@ int main() {
     compost_item_def.namespaced_id = "game:compost";
     compost_item_def.display_name = "Compost";
     compost_item_def.max_stack_size = 64;
+    compost_item_def.icon_color = {0.25f, 0.15f, 0.05f, 1.0f};
     const lcu::items::ItemId compost_item_id = item_registry.register_item(compost_item_def);
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
@@ -1390,6 +1416,14 @@ int main() {
     // DECISIONS.md).
     const bool verify_menu = std::getenv("LCU_VERIFY_MENU") != nullptr;
 
+    // Headless verification hook for the Phase 47 HUD/F-key toggles:
+    // presses ToggleHud/ToggleDebugOverlay/TogglePerspective/Fullscreen/
+    // Screenshot each on their own frame and logs the real resulting
+    // state, so a real run's log output proves each binding actually
+    // flipped its real target (options.hud_enabled, window.fullscreen(),
+    // etc.), not just that the Action exists.
+    const bool verify_hud = std::getenv("LCU_VERIFY_HUD") != nullptr;
+
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
     const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
     int verify_craft_step = 0;
@@ -1427,6 +1461,12 @@ int main() {
     // every frame below).
     lcu::ui::MenuStack menu_stack;
     bool quit_requested = false;
+
+    // Real F-key HUD/display state (Phase 47) - toggled by their own
+    // edge-detected Actions below, independent of pause state (a
+    // display preference, not gameplay, so these work while the menu
+    // is open too).
+    bool third_person = false;
 
     // Real "press any key to rebind" capture (Phase 46's controls
     // screen): set by a row's on_activate, consumed by
@@ -1652,6 +1692,14 @@ int main() {
                              "({:.2f}, {:.2f}, {:.2f})",
                              player.aabb.center().x, player.aabb.center().y, player.aabb.center().z);
             }
+        }
+
+        if (verify_hud) {
+            input.set_down(lcu::platform::Action::ToggleHud, frame == kVerifyHudToggleHudFrame);
+            input.set_down(lcu::platform::Action::ToggleDebugOverlay, frame == kVerifyHudToggleDebugOverlayFrame);
+            input.set_down(lcu::platform::Action::TogglePerspective, frame == kVerifyHudTogglePerspectiveFrame);
+            input.set_down(lcu::platform::Action::Fullscreen, frame == kVerifyHudFullscreenFrame);
+            input.set_down(lcu::platform::Action::Screenshot, frame == kVerifyHudScreenshotFrame);
         }
 
         // Real mouse-capture management (Phase 43, extended Phase 46):
@@ -2389,6 +2437,39 @@ int main() {
             }
         }  // if (!paused)
 
+        // Real F-key HUD/display toggles (Phase 47) - work regardless
+        // of pause state (see `third_person`'s own doc comment above).
+        if (input.is_down(lcu::platform::Action::ToggleHud) &&
+            !previous_input.is_down(lcu::platform::Action::ToggleHud)) {
+            options.hud_enabled = !options.hud_enabled;
+            LCU_LOG_INFO("HUD: {}", options.hud_enabled ? "on" : "off");
+        }
+        if (input.is_down(lcu::platform::Action::ToggleDebugOverlay) &&
+            !previous_input.is_down(lcu::platform::Action::ToggleDebugOverlay)) {
+            options.debug_overlay_enabled = !options.debug_overlay_enabled;
+            LCU_LOG_INFO("Debug overlay: {}", options.debug_overlay_enabled ? "on" : "off");
+        }
+        if (input.is_down(lcu::platform::Action::Screenshot) &&
+            !previous_input.is_down(lcu::platform::Action::Screenshot)) {
+#if defined(LCU_ENABLE_BGFX)
+            const std::string screenshot_path = "screenshot_" + std::to_string(frame);
+            renderer.request_screenshot(screenshot_path);
+            LCU_LOG_INFO("Requested screenshot: {}", screenshot_path);
+#else
+            LCU_LOG_INFO("Screenshot requested but this build has no renderer (LCU_ENABLE_BGFX=OFF)");
+#endif
+        }
+        if (input.is_down(lcu::platform::Action::TogglePerspective) &&
+            !previous_input.is_down(lcu::platform::Action::TogglePerspective)) {
+            third_person = !third_person;
+            LCU_LOG_INFO("Perspective: {}", third_person ? "third-person (behind)" : "first-person");
+        }
+        if (input.is_down(lcu::platform::Action::Fullscreen) &&
+            !previous_input.is_down(lcu::platform::Action::Fullscreen)) {
+            window.set_fullscreen(!window.fullscreen());
+            LCU_LOG_INFO("Fullscreen: {}", window.fullscreen());
+        }
+
         previous_input = input;
 
         if (networked) {
@@ -2402,7 +2483,20 @@ int main() {
         const lcu::f32 sky_t = day_night_cycle.sky_light_scale();
         const lcu::math::Vec3 sky_color = kNightSkyColor + (kDaySkyColor - kNightSkyColor) * sky_t;
         renderer.begin_frame(sky_color);
-        const lcu::math::Mat4 view = camera.view_matrix();
+        // Real third-person-behind camera (Phase 47, F5) - only the
+        // render eye position shifts backward along the real look
+        // direction; gameplay (raycast, movement, camera.position
+        // itself) is untouched, matching Minecraft's own "aim from
+        // where you're looking, not from the pulled-back eye" behavior.
+        // PARTIAL: no player model exists to render in front of the
+        // camera, so there is no real third-person-front mode - see
+        // DECISIONS.md.
+        const lcu::math::Vec3 render_eye =
+            third_person ? camera.position - camera.forward() * kThirdPersonDistance : camera.position;
+        const lcu::math::Mat4 view = third_person
+                                          ? lcu::math::Mat4::look_at(render_eye, render_eye + camera.forward(),
+                                                                      lcu::math::Vec3{0.0f, 1.0f, 0.0f})
+                                          : camera.view_matrix();
         const lcu::f32 aspect =
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
         // Real FOV (Phase 46 - closes the gap Phase 45 deliberately left
@@ -2424,6 +2518,14 @@ int main() {
         // mirrors each call's own no-op condition rather than
         // double-counting a call that produced nothing.
         lcu::u32 draw_calls = 0;
+
+        // Populated below (hotbar contents/selection), consumed by both
+        // queue_hud_quads (before flush_ui_quads) and draw_hud_labels
+        // (after the debug overlay's own text) - see hud.h's own doc
+        // comment. Health/hunger stay at HudState's own real defaults
+        // (20/20, full) this phase - Phase 51 wires real per-frame
+        // values in once PlayerHealth/PlayerHunger exist.
+        lcu::ui::HudState hud_state;
 
         // Sun/moon (Phase 27) - see kCelestialRadius's doc comment. Direction
         // math lives in game::systems::sun_direction (headlessly unit-tested
@@ -2513,6 +2615,26 @@ int main() {
                                      kCrosshairColor);
         }
 
+        // Real HUD: hotbar (real held-item icons/counts from
+        // placeable_items + player_inventory) and health/hunger bars
+        // (Phase 47 - hardcoded full this phase; Phase 51 wires real
+        // values in). Same options.hud_enabled gate as the crosshair -
+        // one real "HUD" toggle, not several independent ones. `hud_state`
+        // is declared once above (see draw_calls) and reused below by
+        // draw_hud_labels, since the quad- and text-drawing halves can't
+        // happen at the same call site (same split menu_renderer.h's own
+        // doc comment explains for the pause menu).
+        hud_state.selected_hotbar_slot = selected_placeable_index;
+        for (lcu::usize i = 0; i < lcu::ui::kHotbarSlotCount && i < placeable_items.size(); ++i) {
+            const auto& placeable = placeable_items[i];
+            hud_state.hotbar[i].has_item = true;
+            hud_state.hotbar[i].icon_color = item_registry.definition_of(placeable.item_id).icon_color;
+            hud_state.hotbar[i].count = player_inventory.count_item(placeable.item_id);
+        }
+        if (options.hud_enabled) {
+            lcu::ui::queue_hud_quads(renderer, hud_state, renderer_desc.width, renderer_desc.height);
+        }
+
         // Real pause/options/controls menu (Phase 46) - its backdrop/
         // selection-highlight quads queue into this same batch as the
         // crosshair above (one real draw call for both), its row labels
@@ -2529,6 +2651,15 @@ int main() {
             ++draw_calls;
         }
 
+        // Real single owner of the shared bgfx debug-text buffer (Phase
+        // 47 change): up to three systems below write into it this
+        // frame (debug overlay, HUD hotbar item counts, menu row
+        // labels) - exactly one clear_debug_text() call, here, before
+        // any of them, replaces the three separate internal clears each
+        // used to do on its own (which would have wiped each other's
+        // text out - see debug_overlay.h's own updated doc comment).
+        renderer.clear_debug_text();
+
         // Debug overlay (FPS/chunks/entities/draw-calls/jobs) gated on
         // options.debug_overlay_enabled (Phase 45) - real use of the
         // second persisted HUD flag, independent of hud_enabled (the
@@ -2541,10 +2672,14 @@ int main() {
                 {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
                  job_system.unfinished_job_count()});
         }
-        // After the debug overlay, not before - draw_menu_labels clears
-        // and re-owns the same bgfx debug-text buffer the overlay just
-        // wrote to (see its own doc comment), so this ordering is real,
-        // not incidental.
+        // Real hotbar item-count labels (Phase 47) - same options.
+        // hud_enabled gate as queue_hud_quads above.
+        if (options.hud_enabled) {
+            lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height);
+        }
+        // Menu row labels last - drawn on top of (after) the debug
+        // overlay/HUD text, since the pause menu is meant to be the one
+        // thing actually readable while it's open.
         if (!menu_stack.empty()) {
             lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
         }

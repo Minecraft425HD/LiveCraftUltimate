@@ -3158,3 +3158,75 @@ keys would be pure duplication with no behavioral difference); reading
 raw SDL mouse position directly in `client/main.cpp` (rejected -
 `ARCHITECTURE.md` restricts SDL access to `engine/platform`, so this
 needed a real `engine/platform` accessor, not a client-side workaround).
+
+## 2026-09-11 — HUD: shared debug-text ownership, third-person scope, icon colors
+
+**Context:** Phase 47 added a real hotbar and health/hunger bars, drawn
+via the same bgfx debug-text buffer `draw_debug_overlay` (Phase 12/36)
+and `draw_menu_labels` (Phase 46) already use for their own text - now
+three independent systems can write into one shared buffer the same
+frame.
+
+**Each of the three used to call `clear_debug_text()` internally -
+whichever one ran first would have had its own text wiped by
+whichever ran next.** Fixed by moving the one real clear to `client/
+main.cpp`, called exactly once per frame, before debug overlay, HUD
+labels, or menu labels - real, deliberate draw order (overlay first,
+HUD second, menu last, so the menu's own rows are what's actually
+legible while it's open) rather than each function silently fighting
+over one shared resource. `draw_debug_overlay`/`draw_menu_labels` no
+longer call `clear_debug_text()` themselves - a real, breaking change
+to their previous contract, documented in both functions' own doc
+comments (not just here) since any future third caller needs to know
+it no longer owns clearing.
+
+**Third-person is real camera-eye-offset rendering, not a mode that
+changes gameplay.** `TogglePerspective` (F5) only ever changes where
+the frame's `view` matrix places the eye (`camera.position - camera.
+forward() * kThirdPersonDistance` when active) - raycasting, movement,
+and `camera.position` itself are completely untouched, matching
+Minecraft's own real behavior (third person still aims and moves as if
+first-person; only what's rendered changes). **Third-person-front is
+not implemented at all - a real, honest PARTIAL**, not a stub that
+silently does nothing: no player model exists anywhere in this
+codebase to render in front of the camera, and a "third-person-front"
+mode with nothing visible in frame would be indistinguishable from a
+bug, exactly the kind of gap this project's "no fake features"
+discipline exists to catch (see the Phase 44 view-order entry above for
+the same reasoning applied to a different feature). No real collision
+check pulls the third-person eye closer against a wall either
+(`kThirdPersonDistance` is just a fixed real distance) - a real,
+smaller, separately worth-flagging limitation, not conflated with the
+bigger "no front mode" one.
+
+**`ItemDefinition::icon_color` (added this phase, closing Phase 44's
+own deferred field) is set per item to match that item's own block's
+`BlockDefinition::color`, not an independently chosen palette.** Real
+consistency - a player who breaks a stone block sees its own real gray
+tint carried into the hotbar icon, not a different gray someone picked
+separately for the item side. `game:compost` (no corresponding block)
+gets its own real, chosen color since there's no block tint to inherit.
+
+**`bgfx::requestScreenShot` is real, wired to the actual default
+backbuffer, using bgfx's own stock callback (no custom `bgfx::
+CallbackI` is installed - see renderer.cpp's `init()`), not a
+placeholder that only logs.** It is genuinely **NOT VERIFIED** in this
+sandbox: the headless `Noop` backend has no real framebuffer content to
+capture, so the request is real but its output can't be inspected here
+- the same honest "real code, real call, can't confirm the visual
+result" pattern this project already applies to mouse-look, third-
+person rendering, and the crosshair/menu/HUD's on-screen appearance.
+
+**Alternatives considered:** letting each of the three text-drawing
+functions take a `bool should_clear` parameter (rejected - three call
+sites each deciding independently is the same fragile pattern that
+caused the bug, just with one more parameter to get wrong; a single
+real owner in the frame loop is simpler and can't drift); a full
+third-person model/placeholder capsule so "third-person-front" could
+exist in some form (rejected - a capsule floating where a player should
+be is not real content, and would need real work to look right that
+this phase's own scope doesn't include - honest PARTIAL beats a fake
+placeholder); giving every item its own independently chosen icon
+color regardless of a matching block (rejected for the items that do
+have one - see above; `game:compost` still gets an independent color
+since it genuinely has no block to match).

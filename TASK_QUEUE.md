@@ -1876,6 +1876,70 @@ this phase's own directive).
 
 ---
 
+## Phase 47 — HUD overhaul: hotbar + health/hunger bars + F-toggles
+
+Real visible gameplay HUD - crosshair (Phase 44), now a real hotbar,
+health/hunger bars, and the F-key toggles Phase 43's own "verbindlich"
+table already reserved bindings for.
+
+- [x] **New `engine/ui::hud.{h,cpp}`**: pure layout math
+  (`hotbar_slot_layout`/`stat_bar_layout`), zero SDL/bgfx dependency -
+  tested in both the bgfx and non-bgfx configs.
+- [x] **Real Minecraft-position hotbar**: 9 bottom-center slots,
+  bordered/filled quads (brighter border on the selected slot), flat
+  colored icon quads for the 4 real `placeable_items`, real held-count
+  labels via debug text.
+- [x] **New `ItemDefinition::icon_color`** - closes the exact gap
+  Phase 44 deferred ("no inventory/hotbar widget exists yet to consume
+  it"); set per item to match its own block's tint where one exists.
+- [x] **Real health/hunger bars**: 10-icon Minecraft-style bars, real
+  half-icon fill math, positioned above the hotbar, left-aligned to its
+  own left edge. Hardcoded full this phase (Phase 51 wires real values
+  in) - the layout/rendering itself is real, not a placeholder.
+- [x] **5 new F-key `Action`s**: `ToggleHud`/`ToggleDebugOverlay`/
+  `Screenshot`/`TogglePerspective`/`Fullscreen`, bound to F1/F3/F2/F5/
+  F11. `ToggleHud`/`ToggleDebugOverlay` flip the same real persisted
+  `options.hud_enabled`/`debug_overlay_enabled` the options menu
+  already reads/writes.
+- [x] **New `Renderer::request_screenshot`** (`bgfx::requestScreenShot`
+  against the default backbuffer) and **`Window::set_fullscreen`**
+  (`SDL_SetWindowFullscreen`).
+- [x] **Real third-person-behind camera**: only the render eye shifts
+  back along the real look direction - raycast/movement/`camera.
+  position` are untouched.
+- [ ] **Third-person-front** - PARTIAL, deferred: no player model
+  exists anywhere in this codebase to render in front of the camera, so
+  this mode is honestly not implemented rather than shipped as an empty
+  no-op. See DECISIONS.md.
+- [x] **Real shared debug-text-buffer ownership fix**: `draw_debug_
+  overlay`/`draw_menu_labels` no longer clear the buffer themselves -
+  `client/main.cpp` now owns the one real `clear_debug_text()` call per
+  frame, in a real deliberate order (overlay -> HUD -> menu), fixing a
+  real bug where whichever of the three ran first would have had its
+  text wiped by the next.
+- [x] New `LCU_VERIFY_HUD` headless hook: each F-key pressed on its own
+  frame, real log output confirms each real resulting state.
+- [x] 21 new unit tests (`HotbarSlotLayout`/`StatBarLayout` real rect
+  math).
+- [x] Verified via the real `LCU_VERIFY_HUD` run, real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT`/
+  `LCU_VERIFY_MENU` runs (byte-identical to Phase 46), a real
+  `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader programs
+  all still `valid=true`), and a real two-process networked run (zero
+  warnings/errors/rejects, matching spawn columns).
+
+`ctest` 466/466 (bgfx, up from 455) / 458/458 (non-bgfx, up from 447).
+
+Honestly scoped: the HUD's real on-screen appearance is still **NOT
+VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+pipeline runs, not that it looks right); `bgfx::requestScreenShot`'s
+real output can't be inspected under the headless `Noop` backend (no
+real framebuffer content); third-person-front deferred (see above);
+hotbar slots 5-9 still show nothing (only 4 real placeable items exist,
+unchanged since Phase 43).
+
+---
+
 Phase 1 is functionally complete for what a headless sandbox can verify:
 window, event loop, bgfx rendering bootstrap, action-based input, minimal
 debug overlay. Mouse-look (camera control) is intentionally not built yet

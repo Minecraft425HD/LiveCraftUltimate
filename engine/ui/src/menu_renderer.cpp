@@ -42,8 +42,6 @@ void draw_menu_labels(rendering::Renderer& renderer, const MenuStack& stack, u32
     const MenuScreen& screen = stack.top();
     const std::vector<MenuItemRect> rects = menu_item_layout(screen, screen_width, screen_height);
 
-    renderer.clear_debug_text();
-
     if (!rects.empty()) {
         const auto title_cell_x = static_cast<u16>(rects[0].x / static_cast<f32>(kCharWidthPx));
         const auto title_cell_y = static_cast<u16>((rects[0].y - 2.0f * static_cast<f32>(kCharHeightPx)) /

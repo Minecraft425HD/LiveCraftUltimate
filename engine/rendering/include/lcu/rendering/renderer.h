@@ -158,6 +158,17 @@ class Renderer : public NonCopyable {
     void clear_debug_text();
     void draw_debug_text(u16 x, u16 y, u8 color_attr, const std::string& text);
 
+    // Real screenshot trigger (Phase 47, F2): wraps
+    // `bgfx::requestScreenShot(BGFX_INVALID_HANDLE, ...)` against the
+    // default backbuffer - bgfx's own default callback writes a real
+    // `.tga` file asynchronously once the in-flight frame finishes (no
+    // custom `bgfx::CallbackI` is installed - see init(), so this is
+    // bgfx's own stock behavior, not something this project reimplements).
+    // Under the headless `Noop` backend (this sandbox's own verification
+    // runs) there is no real framebuffer content to capture - a real,
+    // honest environment limitation, not a bug (see BUILD_STATUS.md).
+    void request_screenshot(const std::string& file_path_without_extension);
+
     void resize(u32 width, u32 height);
 
     bool is_headless() const { return headless_; }

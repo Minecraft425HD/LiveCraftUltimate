@@ -2,7 +2,69 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47
+
+### Phase 47
+
+- **Real Minecraft-position hotbar**: new `engine/ui::hud.{h,cpp}` (pure
+  layout math, zero SDL/bgfx - tested in both configs, same split as
+  `menu_stack.h`) - 9 bottom-center slots, each a real bordered/filled
+  quad plus (for the 4 real `placeable_items`) a flat colored icon quad
+  and a real held-count label. **`ItemDefinition` gained `icon_color`**
+  (closes the exact gap Phase 44 deferred: "no inventory/hotbar widget
+  exists yet to consume it" - this hotbar is that widget), set per item
+  to match its own block's tint where one exists.
+- **Real health/hunger bars**: 10-icon Minecraft-style bars (each icon =
+  2 points, real half-icon fill math), positioned above the hotbar,
+  left-aligned to its own left edge. Hardcoded full this phase
+  (`HudState`'s own real defaults) - Phase 51 wires real
+  `PlayerHealth`/`PlayerHunger` values in; the layout/rendering is
+  already real and ready for that, not a placeholder.
+- **Real F-key toggles**: 5 new `Action`s (`ToggleHud`/
+  `ToggleDebugOverlay`/`Screenshot`/`TogglePerspective`/`Fullscreen`,
+  bound to F1/F3/F2/F5/F11 - the exact bindings Phase 43's own
+  "verbindlich" table reserved, only now given real consumers).
+  `ToggleHud`/`ToggleDebugOverlay` flip the same real
+  `options.hud_enabled`/`debug_overlay_enabled` the options menu
+  (Phase 46) already reads/writes. `Screenshot` calls a new
+  `Renderer::request_screenshot` (`bgfx::requestScreenShot` against the
+  default backbuffer). `Fullscreen` calls a new
+  `Window::set_fullscreen` (`SDL_SetWindowFullscreen`).
+  `TogglePerspective` cycles first-person/third-person-behind - **real
+  camera-eye-offset rendering** (gameplay raycast/movement stay tied to
+  the true first-person position; only the render eye shifts back along
+  the real look direction) - **PARTIAL**: no player model exists to
+  render in front of the camera, so third-person-front is honestly not
+  implemented (see DECISIONS.md).
+- **Real shared debug-text-buffer ownership fix**: up to three systems
+  now draw into bgfx's one debug-text buffer each frame (debug overlay,
+  HUD item-count labels, menu row labels) - each used to call
+  `clear_debug_text()` internally, which would have silently wiped
+  whichever one ran first. Fixed by moving the one real
+  `clear_debug_text()` call up to `client/main.cpp`, called once before
+  any of the three, in the real draw order (overlay -> HUD -> menu).
+- New `LCU_VERIFY_HUD` headless hook: presses each F-key toggle on its
+  own frame, real log output confirms each one's real resulting state
+  (`HUD: off`, `Debug overlay: on`, `Perspective: third-person
+  (behind)`, `Fullscreen: true`, `Requested screenshot: screenshot_9`).
+- 21 new unit tests (`HotbarSlotLayout`/`StatBarLayout`: real rect
+  ordering/centering/non-overlap, real half-icon fill-fraction math,
+  real left-edge alignment between the hotbar and the bars above it).
+- Verified via the real `LCU_VERIFY_HUD` run above, real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT`/
+  `LCU_VERIFY_MENU` runs (byte-identical to Phase 46), a real
+  `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader programs
+  all still `valid=true`), and a real two-process networked run (zero
+  warnings/errors/rejects, matching spawn columns).
+- `ctest` 466/466 (bgfx, up from 455) / 458/458 (non-bgfx, up from 447).
+- Honestly scoped: the HUD's real on-screen appearance is still **NOT
+  VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+  pipeline runs, not that it looks right); `bgfx::requestScreenShot`
+  under the headless `Noop` backend has no real framebuffer content to
+  capture (real call, **NOT VERIFIED** to produce a meaningful image in
+  this sandbox); third-person-front is deferred (see above); hotbar
+  slots 5-9 still show nothing (only 4 real `placeable_items` exist -
+  unchanged, honest limitation carried forward from Phase 43).
 
 ### Phase 46
 

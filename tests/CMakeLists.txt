@@ -83,7 +83,7 @@ endif()
 # Lcu::Platform's own tests, in both the bgfx and non-bgfx configs (see
 # engine/ui/CMakeLists.txt).
 if(TARGET Lcu::Ui)
-    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp)
+    target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
 endif()
 

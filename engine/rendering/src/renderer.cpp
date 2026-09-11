@@ -369,6 +369,10 @@ void Renderer::draw_debug_text(u16 x, u16 y, u8 color_attr, const std::string& t
     bgfx::dbgTextPrintf(x, y, color_attr, "%s", text.c_str());
 }
 
+void Renderer::request_screenshot(const std::string& file_path_without_extension) {
+    bgfx::requestScreenShot(BGFX_INVALID_HANDLE, file_path_without_extension.c_str());
+}
+
 void Renderer::resize(u32 width, u32 height) {
     width_ = width;
     height_ = height;

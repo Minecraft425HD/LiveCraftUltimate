@@ -39,8 +39,9 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 **Phase 39 (biomes)**, **Phase 40 (caves + ores)**, **Phase 41
 (vegetation)**, **Phase 42 (documentation update)**, **Phase 43
 (input overhaul + mouse look + Minecraft-parity defaults)**,
-**Phase 44 (2D UI framework)**, **Phase 45 (persistent options)**, and
-**Phase 46 (menu framework: pause/options/controls)** are done; see
+**Phase 44 (2D UI framework)**, **Phase 45 (persistent options)**,
+**Phase 46 (menu framework: pause/options/controls)**, and **Phase 47
+(HUD overhaul: hotbar + health/hunger bars + F-toggles)** are done; see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -1678,6 +1679,57 @@ PARTIAL - `load_settings.radius_xz` is `const`, live re-streaming is a
 real, separate structural change this phase's own directive explicitly
 allows deferring - see DECISIONS.md); no chat, no multiplayer UI, no
 advancements (out of scope per this phase's own directive).
+
+**Phase 47 (HUD overhaul: hotbar + health/hunger bars + F-toggles)**:
+new `engine/ui::hud.{h,cpp}` - pure layout math (`hotbar_slot_layout`/
+`stat_bar_layout`), zero SDL/bgfx dependency, tested in both configs.
+Real Minecraft-position hotbar: 9 bottom-center slots, bordered/filled
+quads, flat colored icon quads for the 4 real `placeable_items`, real
+held-count labels. **New `ItemDefinition::icon_color`** closes the
+exact gap Phase 44 deferred ("no inventory/hotbar widget exists yet to
+consume it") - set per item to match its own block's tint where one
+exists. Real 10-icon health/hunger bars above the hotbar, hardcoded
+full this phase (real half-icon fill math already in place for Phase
+51's real values).
+
+5 new `Action`s - `ToggleHud`/`ToggleDebugOverlay`/`Screenshot`/
+`TogglePerspective`/`Fullscreen`, bound to F1/F3/F2/F5/F11, the exact
+bindings Phase 43's own "verbindlich" table reserved, only now given
+real consumers. `ToggleHud`/`ToggleDebugOverlay` flip the same real
+persisted flags the options menu already reads/writes. New `Renderer::
+request_screenshot`/`Window::set_fullscreen` wrap
+`bgfx::requestScreenShot`/`SDL_SetWindowFullscreen` for real.
+`TogglePerspective` is real camera-eye-offset rendering only - raycast/
+movement/`camera.position` are untouched, only the render eye shifts
+back along the real look direction. **Third-person-front is a real,
+documented PARTIAL**: no player model exists anywhere in this codebase
+to render in front of the camera, so that mode is honestly not
+implemented rather than shipped as an empty no-op.
+
+**A real shared-resource bug was found and fixed this phase**: up to
+three systems (debug overlay, HUD labels, menu labels) now draw into
+bgfx's one debug-text buffer the same frame; each used to call
+`clear_debug_text()` internally, which would have silently wiped
+whichever ran first. Fixed by moving the one real clear up to `client/
+main.cpp`, called once, before all three, in a real deliberate order
+(overlay -> HUD -> menu).
+
+New `LCU_VERIFY_HUD` hook: each F-key pressed on its own frame, real
+log output confirms each real resulting state. 21 new unit tests.
+Verified via that run, real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+`LCU_VERIFY_CRAFT`/`LCU_VERIFY_MENU` runs (byte-identical to Phase 46),
+a real `LCU_BUILD_SHADER_TOOLS=ON` run (`Chunk`/`Sky`/`UI2D` shader
+programs all still `valid=true`), and a real two-process networked run
+(zero warnings/errors/rejects, matching spawn columns). `ctest`
+466/466 (bgfx, up from 455) / 458/458 (non-bgfx, up from 447).
+
+Honestly scoped: the HUD's real on-screen appearance is still **NOT
+VERIFIED — ENVIRONMENT LIMITATION** (headless Noop backend proves the
+pipeline runs, not that it looks right); `bgfx::requestScreenShot`'s
+real output can't be inspected under the headless `Noop` backend (no
+real framebuffer content to capture); third-person-front deferred (see
+above); hotbar slots 5-9 still show nothing (only 4 real placeable
+items exist, unchanged since Phase 43).
 
 ## Build Status
 

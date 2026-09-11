@@ -107,6 +107,11 @@ constexpr ActionNameEntry kActionNames[] = {
     {Action::Craft, "craft"},
     {Action::Escape, "escape"},
     {Action::MenuConfirm, "menu_confirm"},
+    {Action::ToggleHud, "toggle_hud"},
+    {Action::ToggleDebugOverlay, "toggle_debug_overlay"},
+    {Action::Screenshot, "screenshot"},
+    {Action::TogglePerspective, "toggle_perspective"},
+    {Action::Fullscreen, "fullscreen"},
 };
 }  // namespace
 
@@ -197,6 +202,11 @@ void KeyBindings::reset_to_defaults() {
     bindings_[static_cast<usize>(Action::Escape)][0] = SDL_SCANCODE_ESCAPE;
     bindings_[static_cast<usize>(Action::Escape)][1] = SDL_SCANCODE_TAB;
     set(Action::MenuConfirm, SDL_SCANCODE_RETURN);
+    set(Action::ToggleHud, SDL_SCANCODE_F1);
+    set(Action::Screenshot, SDL_SCANCODE_F2);
+    set(Action::ToggleDebugOverlay, SDL_SCANCODE_F3);
+    set(Action::TogglePerspective, SDL_SCANCODE_F5);
+    set(Action::Fullscreen, SDL_SCANCODE_F11);
 
     // Arrow-key look fallback - unchanged (see Action::LookUp's own doc
     // comment in input.h for why this stays alongside real mouse-look).

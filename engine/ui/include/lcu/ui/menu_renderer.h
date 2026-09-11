@@ -19,14 +19,16 @@ void queue_menu_backdrop(rendering::Renderer& renderer, const MenuStack& stack, 
 // Draws the current top screen's title plus each row's label/value as
 // real bgfx debug text (the same mechanism draw_debug_overlay already
 // uses - see its own doc comment for why no font/atlas renderer exists
-// yet). Calls Renderer::clear_debug_text() itself, so call this AFTER
-// draw_debug_overlay() if both might run the same frame (client/
-// main.cpp) - otherwise the overlay's own clear would wipe these rows.
-// Deliberately separate from queue_menu_backdrop above: the quads need
-// to be queued before this frame's one flush_ui_quads() call, while the
-// text needs to be drawn after the debug overlay's own clear, and those
-// two points aren't the same place in the frame - see client/main.cpp.
-// No-op if `stack` is empty.
+// yet). Does NOT call Renderer::clear_debug_text() itself (Phase 47
+// change - see debug_overlay.h's own updated doc comment: client/
+// main.cpp now owns the one real clear per frame, since up to three
+// systems share this buffer). Call this LAST among them, after
+// draw_debug_overlay()/draw_hud_labels(), so the menu's own rows are
+// the ones actually left on screen while it's open. Deliberately
+// separate from queue_menu_backdrop above: the quads need to be queued
+// before this frame's one flush_ui_quads() call, while the text is
+// drawn later, after the debug-text buffer is cleared - see
+// client/main.cpp for the real ordering. No-op if `stack` is empty.
 void draw_menu_labels(rendering::Renderer& renderer, const MenuStack& stack, u32 screen_width, u32 screen_height);
 
 }  // namespace lcu::ui

@@ -55,7 +55,8 @@ Window::Window(Window&& other) noexcept
       should_close_(other.should_close_),
       relative_mouse_mode_(other.relative_mouse_mode_),
       wheel_delta_y_(other.wheel_delta_y_),
-      focus_lost_(other.focus_lost_) {
+      focus_lost_(other.focus_lost_),
+      fullscreen_(other.fullscreen_) {
     other.handle_ = nullptr;
 }
 
@@ -72,6 +73,7 @@ Window& Window::operator=(Window&& other) noexcept {
         relative_mouse_mode_ = other.relative_mouse_mode_;
         wheel_delta_y_ = other.wheel_delta_y_;
         focus_lost_ = other.focus_lost_;
+        fullscreen_ = other.fullscreen_;
         other.handle_ = nullptr;
     }
     return *this;
@@ -137,6 +139,20 @@ bool Window::consume_focus_lost() {
     const bool was_lost = focus_lost_;
     focus_lost_ = false;
     return was_lost;
+}
+
+void Window::set_fullscreen(bool enabled) {
+    if (handle_ != nullptr) {
+        // Same real, non-fatal tolerance set_relative_mouse_mode already
+        // has: a headless/dummy video driver has no real display to
+        // occupy fullscreen, so a genuine failure here is expected under
+        // this sandbox's own verification runs, not a bug to crash over.
+        if (!SDL_SetWindowFullscreen(handle_, enabled)) {
+            LCU_LOG_WARN("SDL_SetWindowFullscreen({}) failed: {} (expected under a headless/dummy video driver)",
+                         enabled, SDL_GetError());
+        }
+    }
+    fullscreen_ = enabled;
 }
 
 std::string Window::executable_base_path() {

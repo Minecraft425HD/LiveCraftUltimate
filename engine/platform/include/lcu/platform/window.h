@@ -89,6 +89,15 @@ class Window : public NonCopyable {
     };
     static MousePosition mouse_position();
 
+    // Real fullscreen toggle (Phase 47, F11) - wraps
+    // `SDL_SetWindowFullscreen`. Logs a warning (not fatal, same
+    // tolerance `set_relative_mouse_mode` already has) if SDL reports
+    // failure - a headless/dummy video driver has no real display to
+    // occupy fullscreen, so this is expected to be a real, harmless
+    // no-op there.
+    void set_fullscreen(bool enabled);
+    bool fullscreen() const { return fullscreen_; }
+
    private:
     SDL_Window* handle_ = nullptr;
     i32 width_ = 0;
@@ -97,6 +106,7 @@ class Window : public NonCopyable {
     bool relative_mouse_mode_ = false;
     f32 wheel_delta_y_ = 0.0f;
     bool focus_lost_ = false;
+    bool fullscreen_ = false;
 };
 
 }  // namespace lcu::platform
