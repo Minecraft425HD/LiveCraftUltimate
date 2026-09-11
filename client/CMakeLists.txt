@@ -61,7 +61,28 @@ if(LCU_ENABLE_BGFX AND LCU_BUILD_SHADER_TOOLS AND TARGET bgfx::shaderc)
         OUT_FILES_VAR LCU_CHUNK_FS_OUTPUTS
     )
 
-    add_custom_target(VoxelClientShaders DEPENDS ${LCU_CHUNK_VS_OUTPUTS} ${LCU_CHUNK_FS_OUTPUTS})
+    # Sky shaders (Phase 27, sun/moon) - a separate varying def (no
+    # normal/UV, see varying_sky.def.sc), same compile pattern otherwise.
+    set(LCU_SKY_SHADER_OUTPUT_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/sky)
+    set(LCU_SKY_VARYING_DEF ${CMAKE_CURRENT_SOURCE_DIR}/shaders/varying_sky.def.sc)
+
+    bgfx_compile_shaders(
+        TYPE VERTEX
+        SHADERS shaders/vs_sky.sc
+        VARYING_DEF ${LCU_SKY_VARYING_DEF}
+        OUTPUT_DIR ${LCU_SKY_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_SKY_VS_OUTPUTS
+    )
+    bgfx_compile_shaders(
+        TYPE FRAGMENT
+        SHADERS shaders/fs_sky.sc
+        VARYING_DEF ${LCU_SKY_VARYING_DEF}
+        OUTPUT_DIR ${LCU_SKY_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_SKY_FS_OUTPUTS
+    )
+
+    add_custom_target(VoxelClientShaders DEPENDS ${LCU_CHUNK_VS_OUTPUTS} ${LCU_CHUNK_FS_OUTPUTS}
+                                                  ${LCU_SKY_VS_OUTPUTS} ${LCU_SKY_FS_OUTPUTS})
     add_dependencies(VoxelClient VoxelClientShaders)
     target_compile_definitions(VoxelClient PRIVATE LCU_HAS_CHUNK_SHADERS)
 endif()

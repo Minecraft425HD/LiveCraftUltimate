@@ -1,7 +1,7 @@
 #include "lcu/serialization/chunk_serializer.h"
 
 #include <cstdio>
-#include <vector>
+#include <cstring>
 
 #include <zstd.h>
 
@@ -54,7 +54,7 @@ void unflatten_chunk(const std::vector<voxel::BlockId>& flat, voxel::Chunk& chun
 
 }  // namespace
 
-bool save_chunk_to_file(const voxel::Chunk& chunk, const std::string& path) {
+std::vector<u8> serialize_chunk_to_bytes(const voxel::Chunk& chunk) {
     const std::vector<voxel::BlockId> flat = flatten_chunk(chunk);
     const usize uncompressed_size = flat.size() * sizeof(voxel::BlockId);
 
@@ -66,14 +66,12 @@ bool save_chunk_to_file(const voxel::Chunk& chunk, const std::string& path) {
     ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
 
     std::vector<u8> compressed(ZSTD_compressBound(uncompressed_size));
-    const usize result =
-        ZSTD_compress2(cctx, compressed.data(), compressed.size(), flat.data(), uncompressed_size);
+    const usize result = ZSTD_compress2(cctx, compressed.data(), compressed.size(), flat.data(), uncompressed_size);
     ZSTD_freeCCtx(cctx);
 
     if (ZSTD_isError(result)) {
-        LCU_LOG_ERROR("save_chunk_to_file: zstd compression failed for \"{}\": {}", path,
-                      ZSTD_getErrorName(result));
-        return false;
+        LCU_LOG_ERROR("serialize_chunk_to_bytes: zstd compression failed: {}", ZSTD_getErrorName(result));
+        return {};
     }
 
     ChunkFileHeader header;
@@ -83,14 +81,56 @@ bool save_chunk_to_file(const voxel::Chunk& chunk, const std::string& path) {
     header.uncompressed_size = static_cast<u32>(uncompressed_size);
     header.compressed_size = static_cast<u32>(result);
 
+    std::vector<u8> bytes(sizeof(header) + result);
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    std::memcpy(bytes.data() + sizeof(header), compressed.data(), result);
+    return bytes;
+}
+
+ChunkLoadResult deserialize_chunk_from_bytes(const std::vector<u8>& bytes, voxel::Chunk& out_chunk) {
+    ChunkFileHeader header;
+    if (bytes.size() < sizeof(header)) {
+        return ChunkLoadResult::CorruptHeader;
+    }
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.magic != kMagic) {
+        return ChunkLoadResult::CorruptHeader;
+    }
+    if (header.format_version != kChunkFormatVersion || header.edge_length != voxel::Chunk::kEdgeLength) {
+        // A different chunk edge length is treated as an unsupported
+        // version too, not an attempted resize - this build can only
+        // produce/consume voxel::Chunk (16^3).
+        return ChunkLoadResult::UnsupportedVersion;
+    }
+    if (bytes.size() < sizeof(header) + header.compressed_size) {
+        return ChunkLoadResult::CorruptData;
+    }
+
+    std::vector<voxel::BlockId> flat(header.uncompressed_size / sizeof(voxel::BlockId));
+    const usize decompressed_size = ZSTD_decompress(flat.data(), header.uncompressed_size,
+                                                      bytes.data() + sizeof(header), header.compressed_size);
+
+    if (ZSTD_isError(decompressed_size) || decompressed_size != header.uncompressed_size) {
+        LCU_LOG_WARN("deserialize_chunk_from_bytes: corrupt data");
+        return ChunkLoadResult::CorruptData;
+    }
+
+    unflatten_chunk(flat, out_chunk);
+    return ChunkLoadResult::Ok;
+}
+
+bool save_chunk_to_file(const voxel::Chunk& chunk, const std::string& path) {
+    const std::vector<u8> bytes = serialize_chunk_to_bytes(chunk);
+    if (bytes.empty()) {
+        return false;  // serialize_chunk_to_bytes already logged the reason
+    }
+
     std::FILE* file = std::fopen(path.c_str(), "wb");
     if (!file) {
         LCU_LOG_ERROR("save_chunk_to_file: could not open \"{}\" for writing", path);
         return false;
     }
-
-    const bool ok = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
-                     std::fwrite(compressed.data(), 1, result, file) == result;
+    const bool ok = std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
     std::fclose(file);
 
     if (!ok) {
@@ -105,37 +145,22 @@ ChunkLoadResult load_chunk_from_file(const std::string& path, voxel::Chunk& out_
         return ChunkLoadResult::FileNotFound;
     }
 
-    ChunkFileHeader header;
-    if (std::fread(&header, sizeof(header), 1, file) != 1 || header.magic != kMagic) {
+    std::fseek(file, 0, SEEK_END);
+    const long size = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (size < 0) {
         std::fclose(file);
         return ChunkLoadResult::CorruptHeader;
     }
-    if (header.format_version != kChunkFormatVersion || header.edge_length != voxel::Chunk::kEdgeLength) {
-        // A different chunk edge length is treated as an unsupported
-        // version too, not an attempted resize - this build can only
-        // produce/consume voxel::Chunk (16^3).
-        std::fclose(file);
-        return ChunkLoadResult::UnsupportedVersion;
-    }
 
-    std::vector<u8> compressed(header.compressed_size);
-    const usize read = std::fread(compressed.data(), 1, compressed.size(), file);
+    std::vector<u8> bytes(static_cast<usize>(size));
+    const usize read = std::fread(bytes.data(), 1, bytes.size(), file);
     std::fclose(file);
-    if (read != compressed.size()) {
-        return ChunkLoadResult::CorruptData;
+    if (read != bytes.size()) {
+        return ChunkLoadResult::CorruptHeader;
     }
 
-    std::vector<voxel::BlockId> flat(header.uncompressed_size / sizeof(voxel::BlockId));
-    const usize decompressed_size =
-        ZSTD_decompress(flat.data(), header.uncompressed_size, compressed.data(), compressed.size());
-
-    if (ZSTD_isError(decompressed_size) || decompressed_size != header.uncompressed_size) {
-        LCU_LOG_WARN("load_chunk_from_file: corrupt data in \"{}\"", path);
-        return ChunkLoadResult::CorruptData;
-    }
-
-    unflatten_chunk(flat, out_chunk);
-    return ChunkLoadResult::Ok;
+    return deserialize_chunk_from_bytes(bytes, out_chunk);
 }
 
 }  // namespace lcu::serialization

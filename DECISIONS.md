@@ -1007,3 +1007,1839 @@ string as the format argument directly - text can come from data this
 codebase doesn't fully control (e.g. a future mod-registered label), and
 printf-family functions treat their format argument as executable-ish
 (a stray `%s`/`%n` embedded in it would misbehave or crash).
+
+## 2026-09-10 — Block edits are not client-predicted
+
+**Context:** Phase 13 needed to decide how `VoxelClient` should behave
+the instant a player breaks/places a block while networked: mutate the
+local `World` immediately (client-side prediction, the same pattern
+already used for player movement via `PredictionBuffer`) and reconcile
+later if the server disagrees, or wait for the server's authoritative
+`BlockChange` before touching the `World` at all.
+
+**Decision:** Wait for `BlockChange`. Player movement predicts because
+it happens continuously, every frame, and a visible correction
+mid-stride reads as normal (real games do this); a block edit is a
+single discrete event that either happened or didn't - predicting it
+locally then *reverting* a block back to solid because the server
+rejected the request would be a jarring, confusing "the block came
+back" moment, and reverting also has to undo everything downstream of
+the edit (lighting, remeshing, any fired mod event) that already ran.
+Waiting for the round trip means every one of those side effects
+(lighting update, remesh, `emit_block_broken`, sound) only ever runs
+once, for the outcome that actually happened - simpler and more
+correct, and on loopback (this sandbox's only tested case) the
+round-trip delay is imperceptible anyway. Revisit only if real-network
+latency testing shows the wait is actually felt by a player, which
+needs hardware/network conditions this sandbox can't produce.
+
+## 2026-09-10 — Item pickup/consumption stays client-authoritative (Phase 13)
+
+**Context:** With block edits now server-authoritative, item pickup
+(breaking gives an item) and item cost (placing consumes one) needed a
+home too. The natural-seeming choice - give/consume the item inside the
+`BlockChange` handler, the same place the `World` mutation happens - is
+actually wrong: `BlockChange` is a broadcast every connected client
+receives for *every* player's edits, not just its own, and the message
+carries no "who did this" field. Applying inventory changes there would
+hand every player an item for every break anyone made, anywhere.
+
+**Decision:** Item pickup/consumption fires at the moment a client
+*sends* its own `BlockAction` request - optimistic and client-local, no
+server-side inventory involved at all (none exists yet). This is a
+real, deliberate simplification, not an oversight: it was chosen over
+adding a "this edit was mine" flag to `BlockChange` (which would need a
+per-client player-id concept that doesn't exist anywhere else in the
+protocol yet) or a full server-side inventory (a much larger feature -
+authoritative stacks, slots, persistence - with no other consumer to
+justify it yet). The real cost, honestly documented rather than hidden:
+a `BlockAction` the server rejects (rare - only a genuine race or a
+malicious client normally triggers one) currently isn't refunded. See
+NETWORKING.md "What's deferred".
+
+## 2026-09-10 — Server keeps an unbounded block-change history for late joiners
+
+**Context:** The first real multiplayer verification of block edit
+replication (a three-process run) surfaced a second gap beyond the
+original one: a client connecting *after* an edit already happened
+never learned about it - `BlockChange` was a one-shot broadcast to
+whoever happened to be connected at the moment a request was validated.
+Confirmed by an actual test run, not assumed.
+
+**Decision:** `VoxelServer` now keeps every applied edit, in order, in
+`block_change_history` (a plain `std::vector`, unbounded for the
+process's lifetime) and replays the entire thing to a newly connecting
+client right after its `Welcome`. This is the smallest real fix that
+actually closes the gap - re-verified via a real run where a second
+client connecting only after two edits had already happened still
+caught up on both. The unboundedness is a known, accepted simplification
+for this vertical slice's session lengths (a dev/test server run
+measured in minutes, not days): a real production server would need to
+compact this history against actually-persisted chunk state once chunk
+save/load has a real server-side trigger (still missing - see
+PROJECT_STATE.md "Known Limitations"), replaying only what a given
+client hasn't already received via a loaded save, not the entire
+session's edit log forever.
+
+## 2026-09-10 — Fragmentation is a caller-side layer, not built into Connection
+
+**Context:** A compressed chunk (a few KB) doesn't fit in one
+`kMaxDatagramSize` (1200-byte) UDP datagram, so sending real chunk data
+over the network needed some way to split one logical message across
+several datagrams and reassemble them. The natural place to put this
+might seem to be inside `engine/network::Connection`/`PacketHeader`
+itself, transparently fragmenting anything over the datagram limit.
+
+**Decision:** `lcu::network::fragment_payload`/`FragmentReassembler`
+live as a separate, generic layer *above* `Connection`, not inside it.
+A caller that has an oversized payload fragments it explicitly and
+sends each fragment through `Connection::send()` like any other
+payload; every other message in this codebase (`Heartbeat`,
+`PlayerInput`, `BlockChange`, ...) is completely unaffected and pays
+nothing for this existing - no extra header bytes, no extra branching
+in the hot per-packet path. This follows brief section 37 ("no
+unnecessary rearchitecture"): `Connection` is already deeply tested,
+real production code (25+ unit tests, real loopback integration tests,
+multiple real multiplayer runs) - baking fragmentation into it would
+have meant touching that stable core for the benefit of exactly one
+current caller (chunk streaming), with real risk of a subtle regression
+in the channel/ack/retransmit logic every other message depends on.
+Keeping it separate also made it independently, thoroughly unit-testable
+(11 tests: in-order, out-of-order, duplicate, interleaved-concurrent,
+malformed-too-short) before it was ever wired into anything real - see
+PROJECT_STATE.md "Reality Audit" discipline of building/testing each
+piece standalone first.
+
+## 2026-09-10 — Chunk streaming is a one-shot connect-time sync, not per-movement
+
+**Context:** With `ChunkData`/`ChunkDataFragment` and the fragmentation
+layer working, the question was how much of "chunk network streaming"
+(brief section 19) to build in one pass: just an initial full-world
+sync on connect, or a fully dynamic system that re-streams chunks as a
+player's (or the server's) loaded-chunk set changes over time via
+`World::update_streaming` (which neither `VoxelClient` nor
+`VoxelServer` calls yet - both still load a static area once at
+startup, a pre-existing, separately documented simplification).
+
+**Decision:** Built the connect-time sync only. `VoxelServer` sends
+every chunk it currently has loaded to a client exactly once, right
+after `Welcome` and the `block_change_history` replay - a real,
+complete feature for what it covers (verified at both 1-chunk and
+36-chunk scale), not a stub. Extending it to re-stream chunks as either
+side's loaded set changes is deliberately left for when
+`update_streaming` actually has a real caller driving it from player
+movement - building the dynamic re-streaming machinery now, with
+nothing yet moving through the world to exercise it, would be
+speculative (brief section 76/98: don't build for a future need before
+something real needs it). The static-loaded-area simplification this
+depends on is pre-existing and separately tracked (see
+PROJECT_STATE.md "Known Limitations"), not something this phase
+introduced.
+
+## 2026-09-10 — Server-side inventory (Phase 15): only game:stone is item-gated
+
+**Context:** Phase 13 honestly documented that item pickup/placement-
+cost was entirely client-local and optimistic - a `BlockAction` the
+server rejected was never refunded, since the server had no concept of
+"what does this client actually hold" at all. Building that meant
+deciding how much of a real item-economy system to add in one pass: a
+full block-id-to-item-id mapping table (so *any* registered block's
+placement could be gated by holding the corresponding item), or just
+enough to close the concrete gap that exists today (this vertical
+slice has exactly one item, `game:stone`, and exactly one 1:1 block-
+to-item relationship, already hardcoded identically on both
+`VoxelClient` and `VoxelServer`).
+
+**Decision:** Gate only `game:stone` placement on server-side inventory,
+via one hardcoded check (`action.block_id == stone_id`) rather than a
+general mapping table. A generic block->item mapping would be
+speculative infrastructure for content that doesn't exist yet - there
+is exactly one placeable, item-backed block in this codebase today, and
+mod-registered blocks (the only other source of block content) have no
+item-backing infrastructure or expectation of one yet either. This
+mirrors the same reasoning already applied to item drops themselves
+(DECISIONS.md/TASK_QUEUE.md's "item drops are a direct 1:1 block->item
+mapping, not a loot-table system") - extend that exact mapping to
+placement validation now, build a real table if/when a second
+item-backed block actually exists to justify one (brief section 76/98).
+
+**Why `InventoryUpdate` corrects rather than replaces the client's
+optimistic guess:** The natural alternative - stop predicting
+client-side at all, wait for the server's `InventoryUpdate` before ever
+changing the displayed count - would reintroduce exactly the
+round-trip-delay UX problem `DECISIONS.md`'s "block edits are not
+client-predicted" entry already accepted for block edits specifically
+(there, reverting a placed/broken block is visually jarring; here,
+predicting an item count that turns out wrong is a much smaller,
+easily-corrected discrepancy, not a full undo). Keeping the client's
+existing optimistic prediction and reconciling it against the server's
+authoritative count - exactly `PredictionBuffer`'s pattern for player
+movement, applied to a scalar instead of a physics state - gets both:
+instant local feedback, and eventual correctness the moment a rejection
+or race actually happens.
+
+## 2026-09-10 — Server-side chunk streaming never unloads (Phase 16)
+
+**Context:** Closing Phase 14's "connect-time-only" chunk sync gap
+meant deciding how to grow the server's loaded-chunk set as a player
+moves. `World::update_streaming(center, load_radius, unload_radius)`
+already exists (Phase 3) and does exactly this for a single-player
+`World` - loads what's newly in range, unloads what's now too far. The
+obvious-looking choice was to just call it from `VoxelServer` with each
+connected client's position as `center`.
+
+**Decision:** Call only the load half - a hand-rolled radius scan
+directly in `server/main.cpp` reusing `World::load_chunk` and
+`World::state_of`, never `World::unload_chunk`/`update_streaming`
+itself. The reason `update_streaming` itself is wrong here, not just
+inconvenient: `VoxelServer` has exactly **one** `World` instance shared
+across every connected client (see NETWORKING.md's server connection
+model) - there is no per-client copy. If client A's position drove an
+`update_streaming` call that unloaded a chunk now outside *A's* range,
+and client B happens to still be standing in that exact chunk, B's
+`World` (the same shared instance) would lose ground out from under
+them mid-session - a correctness bug, not a performance tradeoff.
+Fixing that properly needs either a per-client "what's actually still
+needed by *someone*" reference count, or per-client `World` instances
+(a much bigger structural change, and one with real memory-duplication
+cost for a shared read-mostly world) - both real future work, not
+built speculatively now with only two simultaneous connections ever
+tested (brief section 76/98). Growing forever is the honestly-simplest
+version that's still correct for every scale this project has actually
+run at; a real long-running public server would need one of those two
+real fixes before its memory footprint became a problem, not before
+then.
+
+**Why the client's own local trigger doesn't have the same problem:**
+each `VoxelClient` process owns its own `World` outright - nothing else
+reads or writes it - so there was never a reason to avoid a full
+load/unload `update_streaming`-style implementation there. It still
+doesn't call `update_streaming` itself either, for the more mundane
+reason that this phase's scope was "stream new chunks in," not "also
+start unloading old ones" - the client keeping everything it's ever
+loaded is a separate, smaller simplification (bounded memory growth
+over a very long session, not a correctness issue) that a future phase
+can address independently, once an actual long-session memory
+measurement gives a reason to.
+
+## 2026-09-10 — Surface/subsurface terrain content is a fixed 3-layer scheme, not biome-driven (Phase 17)
+
+**Context:** Worldgen only ever placed one block type below the
+terrain height, honestly flagged as a gap since Phase 3 - a real voxel
+game needs at least a surface/subsurface distinction (grass over dirt
+over stone) to look and feel like actual terrain rather than a solid
+block of one material. The bigger question this raised: how much of
+brief section 21's full pipeline (climate -> biome -> terrain ->
+caves -> ores -> structures -> vegetation -> decoration) to build in
+one pass.
+
+**Decision:** Build exactly the "terrain" stage's surface/subsurface
+layering - a fixed `kSubsurfaceDepth` (3) of `game:dirt` beneath a
+single `game:grass` cap, `game:stone` beneath that, identical for every
+column regardless of position. Not climate/biome-driven (no desert
+sand, no snow, no per-region variation) - there is still nothing
+downstream that consumes a biome concept (no biome registry, no biome-
+aware block selection, no climate noise layer), so building biome
+infrastructure now would be exactly the kind of speculative work brief
+section 76/98 rules out. The three-block scheme is deliberately the
+smallest real step that turns "one uniform material" into "recognizable
+terrain," each layer chosen to match what players of this genre already
+expect by convention rather than tuned against any in-project reference
+(there isn't one yet - no textures, no screenshots, no visual reference
+this sandbox can produce). A real biome system is real future work, not
+avoided out of difficulty - it's ordered behind whatever else the brief
+section 10 priority list surfaces as more valuable first.
+
+**Why item mapping for the two new blocks isn't part of this phase:**
+Phase 5's break->item logic is a hardcoded `if (broken_block ==
+stone_id)` check in both `VoxelClient` and `VoxelServer`, not a general
+block-to-item lookup table. Extending it to grass/dirt is a small,
+well-understood follow-up (two more items, two more hardcoded checks,
+mirroring the existing pattern exactly) deliberately left to its own
+pass rather than folded into this one, so each commit stays reviewable
+against a single, clearly-stated change (brief section 96's own
+practice, followed throughout this project's phase history) - not
+because it's hard, just because it's a distinct piece of work with its
+own honest "done" definition.
+
+## 2026-09-10 — Interest-scoped unloading supersedes "server-side chunk streaming never unloads" (Phase 20)
+
+**Context:** Phase 16's decision above ("Server-side chunk streaming
+never unloads") deliberately deferred unloading because unloading by a
+single client's range, against the server's one shared `World`, was a
+correctness bug waiting to happen - client B could lose ground out from
+under them if client A's departure drove the unload. That entry named
+two real fixes: a per-client "still needed by *someone*" reference
+count, or per-client `World` instances. This phase builds the first of
+those two, once real disconnect detection existed to make it safe to
+evict a chunk `A` needed after `A` actually leaves rather than just
+going quiet.
+
+**Decision:** Each `ClientState` now computes and stores its own real
+`interest_set` (every chunk coord within load radius of where it last
+streamed from). The server's unload sweep unions every *currently
+connected* client's interest set and only evicts a chunk absent from
+that union - the reference-count design from the Phase 16 entry,
+implemented directly rather than via a separate counter structure
+(the union recomputation is O(clients x chunks-per-client) per
+triggering tick, cheap at this project's tested scale, and avoids a
+second data structure that could drift out of sync with the interest
+sets themselves). Per-client `World` instances (the other option named
+in Phase 16) remain unbuilt - still the bigger structural change with
+real memory-duplication cost for a shared, read-mostly world, and the
+reference-count approach is sufficient for every scale this project has
+actually tested.
+
+**Why disconnect detection had to come first:** without it, a client
+that quietly stopped responding (crashed, lost connectivity, force-
+quit) would keep its stale `ClientState`, and therefore its stale
+`interest_set`, in the union forever - the exact same "chunk never
+frees" problem this phase exists to fix, just relocated from "no one
+ever prunes clients" instead of "no one ever unloads chunks." A
+`last_packet_time` timeout sweep (`kClientTimeoutSeconds = 5.0f`,
+deliberately untuned - see PROJECT_STATE.md Known Limitations) closes
+that gap first, in the same phase, since the second feature is
+meaningless without it.
+
+**Why persistence had to come with it too:** unloading a chunk that has
+an unsaved edit and later regenerating it via the deterministic
+worldgen generator would silently *revert* that edit the moment a
+client's interest returned - not a missed optimization, a genuine
+correctness bug indistinguishable from data loss to a player. The fix
+was to call the already-existing, already-unit-tested (Phase 3)
+`lcu::serialization::save_chunk_to_file`/`load_chunk_from_file`
+functions as unloading's real trigger, closing a separate, long-
+standing Known Limitation ("chunk save/load never wired to a real
+trigger") as a necessary side effect rather than because this phase set
+out to close it independently.
+
+**Scope explicitly not taken further:** persistence here is scoped to
+the current server process's own session directory (`<world>/chunks/`)
+- a fresh server process pointed at the same world directory would
+genuinely pick up those files, but full cross-restart persistence as a
+verified *product feature* (e.g. surviving a deliberate server restart
+mid-deployment) was not separately exercised, so it isn't claimed as
+done. `kClientTimeoutSeconds` is a placeholder chosen for fast, reliable
+test iteration on loopback, not tuned against real-world latency/
+jitter/packet-loss data.
+
+## 2026-09-10 — `std::optional<ChunkCoord>` sentinel for a client's last-streamed center, not a pre-set value (Phase 20)
+
+**Context:** While implementing Phase 20's interest-scoped unloading, a
+design-time bug was caught before ever building or running anything:
+`ClientState::last_streamed_center` had, since Phase 16, been pre-set
+to the client's own spawn chunk coordinate at connect time. The
+per-movement streaming loop's trigger condition is "has this client's
+current chunk center changed since last checked" - and a freshly-
+connected client's current center *is* its spawn center, so the very
+first pass of the loop would see "no change" and skip entirely. This
+was harmless under Phase 16 (nothing was ever unloaded, so a freshly-
+connecting client's own spawn-adjacent chunks were always already
+loaded from the initial full-world load). It stops being harmless the
+moment unloading is real: a second client connecting near a first
+client's now-vacated, now-unloaded territory would skip the real
+load-or-reload-from-disk path for its own spawn chunks on its first
+tick.
+
+**Decision:** Change the field's type to `std::optional<lcu::voxel::
+ChunkCoord>` (default `std::nullopt`), and stop pre-setting it at
+client-insertion time - leave it unset so the movement loop's first
+pass this same tick is guaranteed to see "changed" (an `optional`
+compares unequal to any real `ChunkCoord` when empty) and do the real
+work. This is a minimal, targeted fix to the exact bug (a sentinel
+value that cannot alias a real coordinate) rather than a broader
+refactor of the streaming trigger's shape.
+
+## 2026-09-10 — Hotbar item selection is a plain cycled index, not a graphical hotbar (Phase 21)
+
+**Context:** Phase 18/19 gave `game:grass`/`game:dirt` real item
+mappings on both break and (server-side) place validation, but
+`PlaceBlock` itself still only ever requested `game:stone` - honestly
+flagged since Phase 18 as blocked on "there's no hotbar/item-selection
+UI yet." The obvious full fix is a real Minecraft-style hotbar: nine
+visible slots, a texture-atlas icon per item, a highlighted selection
+box, number-key/scroll-wheel selection. None of that exists yet -
+`engine/ui::draw_debug_overlay` is still VGA-style debug text, and
+there's no texture atlas anywhere in the tree (brief section 12's
+content pipeline, a separate, larger piece of work).
+
+**Decision:** Build the smallest real selection mechanism that makes
+placing grass/dirt actually possible, and nothing more: a new
+`Action::CycleHotbar` (bound to `R`/a new touch button, following the
+exact same `engine/platform::Action` pattern every other action
+already uses) advances a plain `usize` index through a fixed 3-entry
+`placeable_items` list in `VoxelClient`; `PlaceBlock` places whichever
+entry is currently selected. The only player-visible feedback is a log
+line (`"Selected placeable item: game:grass"`) - the same "real logic,
+text-first-pass" pattern already used for lighting (Phase 6),
+day/night (Phase 6), and the debug overlay itself (Phase 12) before
+their eventual visual consumers existed. Building the graphical hotbar
+now, before a texture atlas exists to draw item icons with, would be
+speculative work with no way to actually render it meaningfully (brief
+section 76/98) - the same reasoning Phase 12's debug overlay followed.
+
+**Why a fixed list, not inventory-driven:** cycling through "whatever
+the player's `Inventory` currently holds" would be the more complete
+design, but it couples this phase to inventory *querying* logic
+(skip empty stacks? show only in-stock items? what happens when the
+last unit of the selected item is placed?) that a real hotbar UI will
+need to solve properly anyway once it exists. The fixed list is
+simpler, is honestly documented as not inventory-aware (see
+PROJECT_STATE.md Known Limitations), and doesn't block placing an item
+the player doesn't hold - `PlaceBlock`'s existing `remove_item(...) ==
+1` gate already silently no-ops in that case, same behavior as before
+this phase for `game:stone`.
+
+**Why no protocol change was needed:** `protocol::BlockAction::
+block_id` was already a plain field carrying whatever the client
+requests, and the server's Phase 19 `item_for_block`/place-validity
+gate already generalized to any item-backed block id, not just
+`game:stone`'s. This phase is therefore purely client-side - the
+server-authoritative path for a client-selected non-stone block was
+already correct, just never previously exercised by a real client
+request, which the real two-process verification run for this phase
+now confirms directly.
+
+## 2026-09-10 — BlockItemMapping lives in game/items, not engine/items or engine/voxel (Phase 22)
+
+**Context:** Phase 19 left `item_for_block` (server) and
+`grant_item_for_broken_block` (client) as three explicit
+`if (block_id == X)` checks each, honestly flagged as "won't scale
+past a handful more blocks." The fix is a real lookup table associating
+a `lcu::voxel::BlockId` with a `lcu::items::ItemId` - but `engine/voxel`
+and `engine/items` are deliberately independent modules (neither
+depends on the other, confirmed by their CMakeLists: both link only
+`Lcu::Core`), so a type that references both block and item ids can't
+live inside either without creating a new cross-engine-module
+dependency neither currently has or needs for anything else.
+
+**Decision:** Add `game::items::BlockItemMapping` under a new
+`game/items/` directory instead - gameplay-layer content wiring a
+block registry to an item registry, the same GAME -> ENGINE layering
+`game/systems` (AI wander, day/night) already follows per
+ARCHITECTURE.md, and one of the exact placeholder directories
+`game/CMakeLists.txt` already named as "populated once their
+respective phases give them real content." No new engine-level link
+dependency was needed either: `Lcu::EngineCore` (which `LcuGame` already
+links) already aggregates `Lcu::Voxel` and `Lcu::Items` transitively,
+so `game/items/block_item_mapping.h` can include both `lcu/voxel/
+block_id.h` and `lcu/items/item_id.h` for free.
+
+**Why client and server each keep their own table instead of sharing
+one instance or syncing it over the network:** they're separate
+processes with separate `ItemRegistry`/`BlockRegistry` instances
+already (each independently registers "game:stone" etc. and gets
+whatever numeric ids its own registration order produces) - the
+mapping table is just one more piece of content each side already
+builds independently and must agree on by construction, the same
+simplification every other piece of shared game content in this
+project carries (see NETWORKING.md "mod-registered block/item ids
+aren't synced"). Building real cross-process sync for just this one
+table, while everything else it depends on (the registries themselves)
+still isn't synced, would be solving a smaller problem than the one
+that actually exists.
+
+**Why "data-driven" here doesn't mean loaded from a file:** the brief
+task was named "data-driven," and this delivers a real runtime
+association table (data) built and queried through a small API
+(`register_pair`/`item_for_block`), not a compile-time `if` chain -
+matching how `BlockDefinition`/`ItemDefinition` themselves are already
+called "datadriven" throughout this project despite being populated by
+C++ struct literals, not JSON. An external config-file pipeline is
+real, larger future work (relevant once modding needs to declare
+block/item associations without recompiling), not something this
+phase's actual gap required.
+
+## 2026-09-10 — Quick-craft auto-builds its query grid from one of each distinct held item, not a real grid UI (Phase 23)
+
+**Context:** `RecipeRegistry` (Phase 5) was implemented and unit tested
+but had zero real callers - `find_match(grid, width, height)` expects
+a caller to hand it a grid representing what a player physically
+arranged into crafting-table cells, and no such grid (or the UI to
+fill one) exists anywhere in the project. Building a full crafting-grid
+UI (drag-drop item placement into specific cells) was out of scope -
+`engine/ui` has no texture atlas yet and no drag-drop input handling
+exists, the same blocker every other UI-shaped gap in this project
+(the hotbar, the inventory screen) already cites.
+
+**Decision:** Give the player one action, `Craft`, that auto-builds a
+query grid from the inventory itself: scan every slot, collect each
+*distinct* item id once (dedup), and call `find_match` with that as a
+1-row grid. This is a real integration, not a bypass - `find_match` is
+called with a real, correctly-shaped grid, and both its outcomes
+(match and no-match) are exercised by real gameplay states, not
+contrived inputs. The tradeoff, stated plainly: this only correctly
+represents a recipe that needs exactly one of each distinct ingredient
+type. A recipe needing e.g. two sticks would need two entries in the
+grid, and "collect each distinct item once" can never produce that -
+it would need real grid cells a player filled individually. This is
+narrower than `RecipeRegistry`'s actual generality (which already
+supports repeated ingredients and shaped recipes, both proven by
+Phase 5's own unit tests) - the one recipe this phase registers (1
+grass + 1 dirt) happens to fit the auto-grid's shape exactly, so the
+limitation isn't yet visible in practice, but it's real and documented
+(PROJECT_STATE.md Known Limitations) rather than papered over.
+
+**Why not skip `RecipeRegistry` entirely and hardcode the one recipe's
+check instead:** that would be strictly worse for the same amount of
+code - `find_match`'s shapeless matching (exact multiset comparison,
+already unit tested) is exactly the check a hardcoded version would
+have to reimplement, and routing through the real registry means a
+second recipe (even a same-shape one) is one `add_shapeless` call, not
+new branching logic.
+
+**Why `game:compost` has no corresponding block:** this phase's actual
+gap was "no crafting caller," not "need more terrain content" - adding
+a placeable block would need collision/meshing/replication/hotbar
+wiring, all real work unrelated to proving crafting itself works. A
+crafted-only item (obtainable no other way) is a real, common pattern
+in this genre and the smallest honest way to give the recipe something
+worth crafting.
+
+## 2026-09-10 — LCU_VERIFY_CRAFT is wall-clock-gated, not frame-count-gated (a real bug caught mid-phase, Phase 23)
+
+**Context:** The first version of this phase's verification hook
+mirrored `LCU_VERIFY_BREAK_PLACE`'s style exactly: fixed frame numbers
+(`frame == N`) triggering each input. It passed cleanly single-player.
+Run against a real two-process networked server, it produced a
+double-grant: the client logged `"Picked up 1 game:grass (inventory:
+2)"` (should be 1) and the server logged a `Rejected BlockAction`
+warning for a redundant second break request at the *same* world
+position as the first.
+
+**Root cause, confirmed by reading the actual sequence, not guessed:**
+in networked mode a break never mutates the client's own `World`
+directly - it sends a `BlockAction` and waits for the server's
+`BlockChange` broadcast to round-trip back before the client's local
+raycast will ever see the block as gone (see "Block edits are not
+client-predicted"). The hook's second `Interact` press was scheduled a
+fixed number of frames after the first (initially a few, later 200) -
+but this project's main loop is deliberately unthrottled, so even 200
+iterations complete in far less real time than one UDP round trip plus
+the server's own tick processing takes. The second press's raycast
+therefore still hit the *original*, not-yet-removed grass block,
+re-requesting the same break - client-side optimistic pickup (item
+pickup is client-authoritative, see the Phase 13 decision above)
+granted a second grass item before the server's rejection and
+`InventoryUpdate` correction had a chance to arrive.
+
+**Decision:** Replace the frame-count gate with a wall-clock-gated
+state machine - the same pattern `LCU_VERIFY_MOVE_SECONDS` (Phase 16)
+already established for this identical class of problem (that
+decision's own text already explains why frame-count timing doesn't
+work under an unthrottled loop with real network latency; this phase
+independently rediscovered the same failure mode from a different
+angle and applied the same fix). Each verification step now advances
+only once real elapsed time since the hook started crosses its
+threshold (1.0s before the second break, 1.2s before the first craft
+attempt, 1.5s before the second), each firing for exactly one frame
+(clean edge) via a small `verify_craft_step` counter that advances
+immediately on firing, preventing re-trigger. Confirmed fixed via a
+second real networked run showing both breaks land at their correct,
+distinct positions with zero rejections.
+
+**Why this is recorded as a decision, not just a bugfix:** it's the
+second time in this project a frame-count-indexed synthetic-input hook
+has silently assumed single-player-speed world mutation and broken
+under real network latency (Phase 16's `LCU_VERIFY_MOVE_SECONDS`
+decision was the first). Any *future* verification hook that presses
+Interact/PlaceBlock/Craft more than once in networked mode should
+default to wall-clock gating from the start, not frame counting -
+frame counting is only safe for a hook's *first* action, or for
+single-player-only verification.
+
+## 2026-09-10 — item_crafted fires only on VoxelClient, never VoxelServer (Phase 24)
+
+**Context:** `EventBus` (Phase 9) had exactly one real event,
+`block_broken`, fired from both hosts (client for single-player,
+server for networked - Phase 13 made block edits server-authoritative,
+so the server's own `handle_block_action` is where a real break
+happens in that mode). Adding `item_crafted` as the second event
+raised the question of whether it needed the same dual-host treatment.
+
+**Decision:** `emit_item_crafted` is called from exactly one place -
+`VoxelClient`'s quick-craft handler - and never from `VoxelServer`.
+This mirrors crafting's own architecture, not a modding-specific
+choice: crafting (Phase 23) is deliberately pure client-side local
+inventory bookkeeping with no server involvement at all (same
+precedent as item pickup itself), so there is no server-side "a craft
+happened" moment to fire an event from - unlike a block break, which
+genuinely happens on the server in networked mode. `EventBus` is still
+constructed and `expose_to_lua()`'d on `VoxelServer` regardless (same
+reason it already was before this phase: a mod script is shared
+between both hosts, so `lcu.subscribe("item_crafted", ...)` must not
+fail to load there even though it will never actually fire on that
+host) - confirmed via a real server run that the updated
+`example_mod/init.lua` (now subscribing to both events) still loads
+cleanly.
+
+**Why this doesn't make `item_crafted` a "lesser" event:** both real
+events today happen to be client-triggered content moments seen from a
+single player's perspective - `block_broken` merely *also* has a
+server-side firing point because block edits happen to be
+server-authoritative, not because being real requires it. A mod
+subscribing to `item_crafted` gets a real, correct signal in every
+mode this project supports (single-player and networked alike, since
+crafting behaves identically in both) - it simply won't see other
+players' remote crafts in networked mode, an honest scope note
+consistent with crafting itself never having had multiplayer
+visibility to begin with.
+
+## 2026-09-10 — macOS build audit: real code review, not a build attempt (Phase 25)
+
+**Context:** The user wants to run `VoxelClient` on a real Mac and
+actually see it for the first time - all verification so far has been
+headless in this Linux sandbox (bgfx's `Noop` backend, no GPU/display).
+This sandbox genuinely cannot run `cmake --build` against a macOS
+toolchain - there is no way to make that claim TESTED here, and
+claiming it would violate this project's core "never trust without
+verifying" rule.
+
+**Decision:** Do the next best real thing: read every CMake/
+FetchContent path this repo actually uses and every macOS-specific
+branch bgfx.cmake and this repo's own code already contain, rather than
+assuming either "it'll just work" or "it's probably broken." This is
+the same discipline already applied to Android in Phase 10 (`cmake
+--preset android-arm64` was actually *run*, confirmed to fail only at
+NDK detection as expected) - macOS has no equivalent "run it and see"
+option here, so a structural code audit is the honest substitute, with
+its result marked **NOT VERIFIED — ENVIRONMENT LIMITATION**, not
+TESTED.
+
+**What the audit actually found, concretely:**
+- `third_party/CMakeLists.txt`: every dependency (SDL3, bgfx.cmake,
+  zstd, Lua 5.4, GoogleTest, Google Benchmark, fmt) is a plain
+  `FetchContent_Declare`/`FetchContent_MakeAvailable` pair with no
+  Linux-only `if()` branch gating it - all six build via their own
+  standard CMake on macOS with no special-casing needed here.
+- `engine/network/src/udp_socket.cpp` already branches
+  `#if defined(_WIN32)` for Winsock vs. the POSIX BSD-socket path
+  (`sys/socket.h`/`netinet/in.h`/`arpa/inet.h`/`unistd.h`) - macOS
+  takes the POSIX branch, identical headers/APIs to the Linux path
+  already tested here.
+- `engine/platform/src/native_handle.cpp` already has a correct macOS
+  Cocoa branch (`SDL_PROP_WINDOW_COCOA_WINDOW_POINTER`) - written
+  before this audit, confirmed still correct, not something this phase
+  needed to add.
+- bgfx.cmake's own `cmake/bgfx/bgfx.cmake` links `-framework Cocoa
+  -framework Metal -framework QuartzCore -framework IOKit` on
+  `APPLE` (not `find_library` against a Homebrew path) - these ship
+  with Xcode Command Line Tools, so unlike the Linux build (which
+  needs `libgl1-mesa-dev`/`libwayland-dev` from `apt`, see
+  `BUILDING.md`), macOS needs zero Homebrew packages beyond
+  `cmake`/`ninja` themselves.
+- `cmake/bgfxToolUtils.cmake`'s `bgfx_compile_shaders()` already
+  auto-appends the `metal` profile when `PROFILES` isn't explicitly
+  overridden and the host is `APPLE` (and not `IOS`) - `client/
+  CMakeLists.txt`'s two `bgfx_compile_shaders()` calls don't pass
+  `PROFILES`, so this already happens with zero code change.
+
+**The one real bug this audit found and fixed, not merely
+documented:** `engine/rendering::active_shader_profile_dir()`
+(`shader_program.cpp`) mapped `bgfx::RendererType` to a shader-profile
+subdirectory name for Vulkan/OpenGL/OpenGL ES only, falling through to
+`default: return "glsl"` for everything else - including Metal, which
+bgfx auto-selects as its preferred backend on macOS (over the
+deprecated OpenGL path). Since `bgfx_compile_shaders()` already
+produces a real `metal`-profile shader binary (confirmed above), the
+gap wasn't a missing shader - it was the client asking for the *wrong*
+directory (`glsl` instead of `metal`) and getting a shader binary in
+the wrong format, which `bgfx::createShader` would reject. The
+existing code already tolerates an invalid shader handle gracefully
+(logs a warning, skips the draw call, doesn't crash - `load_shader_
+from_file`'s existing behavior), so this wouldn't have crashed
+`VoxelClient` on a real Mac - it would have opened a window with the
+correct clear color but no visible terrain, a confusing "half-working"
+state exactly of the kind this project's "no fake features, no silent
+gaps" discipline exists to catch. Fixed with one added `case
+bgfx::RendererType::Metal: return "metal";` branch.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether the window actually opens, whether Metal initializes without
+error, whether the compiled shader binaries actually produce correct
+visible output, and real Apple Silicon performance - none of that is
+knowable from a code read. See `BUILDING.md` "macOS" for the exact
+commands someone with a real Mac needs to run, and what they should
+see if everything above is correct.
+
+## 2026-09-10 — Per-face color is selected at mesh time, not in the shader (Phase 26)
+
+**Context:** The user wants visible, differently-colored terrain
+(stone gray, grass green-top/brown-sides, dirt brown) with no texture
+atlas built yet. The classic grass-block look needs a block to show a
+*different* color on its top face than its sides - naively, a shader
+would need to know "this is specifically a grass block" to do that,
+which means either a hardcoded block-id check in the fragment shader
+(brief section 84's "modding-first" - a mod's block could never get
+this treatment) or a texture atlas (real content-pipeline work, not
+this phase's scope).
+
+**Decision:** `BlockDefinition` gained three fields - `color` (top/
+default), `side_color`, `bottom_color` (both `std::optional`, falling
+back to `color`/`side_color` respectively when unset) - and
+`mesh_chunk_greedy` picks the right one per quad at mesh-build time,
+using information it already computes (the sweep axis `d` and
+`positive_facing`) to know whether it's building a top, bottom, or
+side face. The shader receives a plain per-vertex color with no face
+concept at all. This means: (1) any block, mod-registered or not, can
+declare face-varying colors purely through data, no shader change
+needed; (2) the face-selection logic is fully unit-testable headlessly
+(`GreedyMesher.PerFaceColorUsesTopSideBottomFallbackChain`) since it's
+ordinary C++ over already-known quad geometry, unlike anything that
+would live in the shader; (3) it generalizes cleanly to a real texture
+atlas later (Phase 12) - swapping `color` for a per-face texture
+index at the same call site is a small, contained change, not a
+rewrite.
+
+**Why the fragment shader's noise is generic, not per-block-typed
+either:** the same reasoning applies - a hardcoded "if this is stone,
+add noise; if dirt, add different noise" would need the shader to know
+block identity, which it deliberately doesn't. Instead, `fs_chunk.sc`
+applies one generic hash-noise formula to whatever color it receives;
+since that color already varies correctly per block/face (per the
+decision above), the same generic noise reads as "subtle gray noise"
+on stone and "brown noise" on dirt for free, with zero block-specific
+shader code.
+
+**A real bug this phase's own change exposed, not introduced:**
+`engine/voxel/CMakeLists.txt` only ever declared `LcuVoxel PUBLIC
+Lcu::Core`, never `Lcu::Math` - yet `greedy_mesher.h` had already used
+`math::Vec3` since Phase 2. This silently worked only because every
+real consumer of `LcuVoxel` also linked `Lcu::Math` transitively via
+some other aggregating target (`Lcu::EngineCore`), so the missing
+include-directory dependency never actually failed to resolve. Adding
+a `Vec3` field to `BlockDefinition` meant `block_registry.cpp` itself
+(part of `LcuVoxel`, with no other path to `Lcu::Math`) needed to
+compile against it directly, and promptly failed - a real, if minor,
+CMake hygiene gap this phase's change happened to surface and fix
+(`target_link_libraries(LcuVoxel PUBLIC Lcu::Core Lcu::Math)`), not
+something deliberately introduced by this phase's own design.
+
+## 2026-09-10 — Sky occludes via bgfx view ordering, not a depth trick on the sky quad (Phase 27)
+
+**Context:** The brief asks for the sun/moon billboard to have its own
+bgfx view with depth test off ("Eigener bgfx-View, Tiefentest aus"),
+but it still needs to be correctly hidden behind terrain (a mountain
+between the camera and a low sun must actually block it). Depth test
+off on the sky quad itself means it can't use its own depth test to
+achieve that.
+
+**Decision:** Give the sky/sun/moon a second bgfx view
+(`kSkyViewId = 1`) and use `bgfx::setViewOrder(0, 2, {kSkyViewId, 0})`
+to force it to execute *before* the terrain view (view 0), rather than
+renumbering the existing terrain view or giving the sky quad its own
+depth test. The sky view clears both color and depth; terrain then
+draws into that same shared depth buffer with its normal
+`BGFX_STATE_DEFAULT` depth test and naturally overwrites the sky quad
+wherever a block is actually in front of it. This achieves real
+occlusion (a mountain genuinely hides a low sun) while still honoring
+"Tiefentest aus" for the sky quad's own draw call
+(`BGFX_STATE_WRITE_RGB` only, no depth read/write). Renumbering
+terrain to view 0→1 and sky to 0 was the more "obviously ascending
+order" alternative but a larger, riskier diff (every other `submit_*`
+call and view-rect/clear setup already assumes view 0 is terrain) for
+no behavioral difference - `setViewOrder` gets the same result with a
+two-line change.
+
+**Sun/moon direction extracted into a pure, testable function:** the
+first implementation computed `cos(angle)`/`sin(angle)` directly
+inline in `client/main.cpp`'s frame loop - correct, but untestable
+without a GPU/display (nothing in `client/` is unit-tested). Moved to
+`game::systems::sun_direction(time_of_day)`, a pure function next to
+the existing `DayNightCycle` (same module, same "reuse the one real
+time signal" principle as `sky_light_scale()`), so the actual math
+(angle=0 at dawn/horizon, pi/2 at noon/straight up, pi at dusk/
+opposite horizon, 3pi/2 at midnight/straight down; moon always exactly
+`-sun_direction`) is verified by 6 real headless unit tests instead of
+only being checkable by eye on a real GPU. This is the same
+"extract what's genuinely testable, honestly label the rest NOT
+VERIFIED" pattern used for Phase 26's per-face color selection.
+
+**A second real bug, avoided rather than hit this time:** giving
+`game::systems` (in `LcuGame`) a direct `math::Vec3` return type
+meant `LcuGame` needed an explicit `Lcu::Math` link - added proactively
+(`target_link_libraries(LcuGame PUBLIC Lcu::EngineCore Lcu::Math)`)
+specifically because Phase 26 had just hit the identical
+transitive-include trap for `LcuVoxel`/`Lcu::Math` days earlier.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether the sky actually looks correct on a real display (color
+interpolation, sun/moon visibility, the occlusion behavior described
+above) - none of that is knowable from a code read or a headless Noop-
+backend run. Stars at night were explicitly optional in the brief
+("Sterne bei Nacht optional") and are deliberately deferred, not a
+missing/fake feature.
+
+## 2026-09-10 — mesh_chunk_greedy takes light via a duck-typed template parameter, not a concrete include (Phase 28)
+
+**Context:** Phase 28 needs `mesh_chunk_greedy` (in `engine/voxel`) to
+read real per-voxel light from `lcu::lighting::LightStorage` while
+meshing. The obvious approach - `#include "lcu/lighting/light_storage.h"`
+in `greedy_mesher.h` - is impossible without creating a circular CMake
+target dependency: `engine/lighting`'s own `CMakeLists.txt` already
+declares `target_link_libraries(LcuLighting INTERFACE Lcu::Core
+Lcu::Voxel)` (lighting needs voxel's `ChunkStorage`/`BlockRegistry` to
+compute light against), so `engine/voxel` depending back on
+`engine/lighting` would be a genuine cycle, not just an unusual
+direction.
+
+**Decision:** `mesh_chunk_greedy` gained a second template parameter,
+`LightStorageT`, duck-typed against exactly `LightStorage`'s public
+interface (`u8 sky_light(u32,u32,u32) const` / `u8
+block_light(u32,u32,u32) const`) rather than a concrete type. Since
+C++ templates aren't type-checked until instantiation, `greedy_mesher.h`
+itself needs no lighting `#include` at all - only each real call site
+does (and `client/main.cpp` already includes both headers). This is the
+same pattern `mesh_chunk_greedy` already used for `EdgeLength` (works
+with any `ChunkStorage<N>` the caller supplies) and for
+`ChunkStorage`/`BlockRegistry` themselves (concrete types, but from the
+same module, so no cycle risk there) - extending an established pattern
+rather than introducing a new one, and a smaller diff than moving
+meshing into a new `engine/meshing` module that depends on both.
+
+**A light-less two-argument overload was kept, backed by an
+always-full-bright stand-in (`detail::FullBrightLight`):** 12 existing
+call sites (unit tests focused on geometry/color, `tools/benchmark`)
+had no real per-chunk light to pass and no reason to construct one just
+to satisfy a new required parameter - they're testing meshing, not
+lighting. Only `client/main.cpp`'s real remesh path (which already
+computes and maintains a per-chunk `lcu::lighting::Light` from Phase 6)
+was updated to pass its actual light data. This mirrors the same
+reasoning `add_quad`'s `color` parameter already used in Phase 26 (a
+defaulted parameter, not a mandatory breaking change, for callers that
+legitimately don't care).
+
+**Merging now also requires equal light, a real trade-off, not free:**
+`MaskCell::merges_with` gained a light comparison alongside its
+existing block-id/facing comparison. Without this, greedy meshing would
+silently flatten a real per-voxel lighting gradient (e.g. a partially
+torch-lit stone wall) into one arbitrary quad-wide brightness, picked
+from whichever cell happened to start the merge - visually wrong in a
+way nothing would catch without a real GPU/display. The cost: chunks
+with real lighting variation now generate more, smaller quads than
+Phase 26's purely-geometric merging did, in trade for correctness. This
+is the same trade every engine separating "greedy mesh geometry" from
+"per-voxel light" makes; Phase 33's smooth (interpolated, not flat-per-
+quad) lighting is a separate, later concern that doesn't remove this
+trade-off, just softens its visual seams once per-vertex interpolation
+exists.
+
+**A real, previously-nonexistent bug risk found and fixed while wiring
+the vertex layout:** `MeshVertex` had never before ended in a
+byte-sized field - Phase 28's trailing `u8 light` right after several
+4-byte-aligned members means the compiler now pads `sizeof(MeshVertex)`
+up to the next 4-byte multiple (extra bytes the struct's own fields
+never see), but `bgfx::VertexLayout`'s stride is just the tight sum of
+its `.add()`-declared attribute sizes, with no automatic alignment.
+Left alone, this would have silently made bgfx's per-vertex stride 3
+bytes shorter than the real C++ struct stride the raw vertex buffer
+actually uses, corrupting every vertex after the first (a `memcpy`'d
+GPU buffer read with the wrong stride, not a crash - the kind of bug
+that would only show up as "the mesh looks wrong" on a real GPU with no
+diagnostic). Fixed by computing the needed padding directly
+(`layout.skip(sizeof(MeshVertex) - layout.getStride())` before
+`.end()`) instead of hand-coding a magic padding number, plus an
+`LCU_ASSERT(layout.getStride() == sizeof(voxel::MeshVertex))` so any
+future field reordering that breaks this invariant fails loudly instead
+of silently corrupting geometry - and this assert did execute against
+real 36-chunk production data in this phase's verification run without
+firing.
+
+**The Phase 26 fake directional light was removed, not layered
+alongside real light:** `fs_chunk.sc` previously lit every face with a
+fixed `light_dir` constant unrelated to anything else in the engine.
+Now that real per-voxel sky/block light exists and is combined with the
+real `DayNightCycle::sky_light_scale()` (the same value Phase 27's
+skybox already uses), keeping the old fake light active too would have
+double-counted "daylight" and made the world never actually darken at
+night despite the sky and torches correctly doing so - keeping it would
+have been strictly worse than removing it, not a safety margin.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real per-voxel lighting actually looks correct on a real GPU/
+display (dark caves, lit torches, day/night brightness change) - none
+of that is knowable from a code read or a headless Noop-backend run.
+Cross-chunk light (a block-boundary face reading a neighboring chunk's
+actual light instead of defaulting full-bright) is explicitly Phase
+29-31's job, not this phase's; smooth (interpolated) lighting is Phase
+33's.
+
+## 2026-09-10 — WorldLight is a query surface, not a propagation algorithm (Phase 29)
+
+**Context:** Phase 30 (sky) and Phase 31 (block) need to propagate
+light *across* chunk boundaries - a BFS that, at a chunk's edge, has to
+read and write light in the *neighboring* chunk's own `LightStorage`.
+Building that BFS directly against `client/main.cpp`'s existing ad hoc
+`std::unordered_map<ChunkCoord, Light>` would mean reimplementing
+"resolve an out-of-range local coordinate into its owning chunk" (and
+its floor-division edge cases - see `world_to_chunk_and_local`'s own
+doc comment on negative coordinates) inline inside that BFS, with no
+separate place to unit-test the resolution logic on its own.
+
+**Decision:** Phase 29 adds `lcu::lighting::WorldLight<EdgeLength>`
+now, purely as a data structure and query surface, before Phase 30/31
+write any actual cross-chunk propagation code against it. It owns the
+`ChunkCoord -> LightStorage` map (replacing `client/main.cpp`'s bare
+one) and exposes `sky_light_at`/`block_light_at` that accept a local
+coordinate outside `[0, EdgeLength)` and internally convert it to a
+`BlockWorldCoord` to reuse `voxel::world_to_chunk_and_local` - the
+exact same floor-division helper `engine/world` already uses for block
+edits, rather than a second, independently-written version of the same
+arithmetic living inside lighting code. Both return `std::optional<u8>`:
+`std::nullopt` means "that chunk's light isn't computed" (unloaded, or
+loaded but the caller hasn't lit it yet), never a guessed brightness -
+the same "report real data or honestly don't know" discipline
+`mesh_chunk_greedy`'s own boundary-face fallback (Phase 28) already
+established for chunk-edge light.
+
+**This phase deliberately does not propagate anything across a chunk
+boundary.** `sky_light_at`/`block_light_at` can *read* a neighbor
+chunk's already-computed light; nothing yet *writes* light that
+originated in one chunk into another chunk's `LightStorage`. A torch
+near a chunk edge still stops exactly at that edge today, identically
+to before this phase - Phase 30/31's BFS is what will actually walk
+across the boundary and write into the neighbor. Splitting "the query
+surface" from "the algorithm that uses it" into separate phases (with
+this phase's own real tests covering only the query surface: in-bounds
+lookups, positive- and negative-direction cross-chunk resolution, and
+the not-loaded-neighbor case) keeps each phase's own verification
+honest about what it actually changed, rather than one large phase
+where a real bug in either half would be hard to isolate.
+
+**`chunk_light`/`chunk_at` naming split, matching an existing
+convention:** `WorldLight::find_chunk_light` (const) and
+`find_chunk_light_mutable` (non-const) mirror `engine/world::World`'s
+own `chunk_at`/`chunk_at_mutable` split, rather than classic C++
+`const`/non-`const` overloading of the same name - consistency with an
+established pattern already in this codebase, not a new convention.
+
+## 2026-09-10 — Sky light cross-chunk propagation is a seeded column scan, not a BFS, and needs top-down load ordering (Phase 30)
+
+**Context:** `compute_sky_light_column`'s existing algorithm (Phase 6)
+already scans a column top-to-bottom in O(EdgeLength); the only thing
+missing for cross-chunk correctness is knowing whether sky is still
+open by the time the scan reaches this chunk's own top layer, i.e.
+whether the chunk directly above it already blocked sky for that same
+(x,z) column. Unlike block light (a true multi-directional flood that
+needs a real BFS to cross a boundary - Phase 31), sky light in this
+engine only ever travels straight down, so "propagating across a
+vertical chunk boundary" is exactly "seed the next column scan with
+one boolean from the chunk above", not a queue-based algorithm at all.
+
+**Decision:** `compute_sky_light_column` gained a `sky_open_above`
+parameter (default `true`) instead of writing a parallel cross-chunk-
+only implementation - the single-chunk and cross-chunk cases share the
+same scan, differing only in their starting `blocked` state.
+`compute_sky_light_column_cross_chunk` supplies the real value by
+querying `WorldLight::sky_light_at` at the neighbor's bottom cell
+(`y=0`) - checking just that one cell is sufficient because
+`compute_sky_light_column` itself guarantees a blocked column is
+uniformly 0 top-to-bottom, so the bottom cell alone tells the whole
+column's story.
+
+**A real ordering requirement this phase's own correctness depends
+on, made explicit rather than assumed:** for the cascade to actually
+work, every (x,z) column's chunks must have their sky light computed
+top-down (highest `chunk_y` first) - a chunk queries the one *above*
+it, so that neighbor must already have valid light. `client/main.cpp`'s
+existing load loops iterated `chunk_y` ascending (bottom-up, matching
+how a player typically stands on the ground and looks up); this phase
+restructures them into three explicit passes per column (block light
+any order, sky light strictly top-down, then meshing) rather than
+interleaving light computation with `world.load_chunk` in a single
+ascending pass as before. The one remaining honestly-scoped gap is the
+networked `ChunkData` receipt path: a single chunk arriving over the
+network in arbitrary order relative to its own vertical neighbors
+can't guarantee this ordering by itself - closing that gap needs a
+chunk, once lit, to be able to trigger its neighbors to re-light too,
+which is exactly what Phase 35 ("chunk unload marks neighbors dirty")
+is chartered to add. Until then, a chunk streamed in *below* an
+already-lit neighbor above it self-corrects (the common case, matching
+normal top-to-bottom terrain generation and streaming order); the
+reverse order doesn't retroactively relighten what was already
+computed - a real, narrow, documented limitation, not a silent one.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real cross-chunk sky light actually looks correct on a real
+GPU/display (a shadow correctly extending from one chunk into the one
+below it) - none of that is knowable from a code read or a headless
+Noop-backend run. Block light still doesn't cross a chunk boundary at
+all (Phase 31, a genuine BFS, unlike this phase's column scan).
+
+## 2026-09-10 — Block-light cross-chunk BFS is duck-typed on a ChunkProvider, mirroring Phase 28's LightStorageT (Phase 31)
+
+**Context:** Unlike Phase 30's sky light (a straight-down column scan,
+needing only one boolean seeded from the chunk above), block light
+genuinely floods in all 6 directions - crossing a chunk boundary means
+the BFS frontier itself has to continue into the neighbor chunk's own
+`LightStorage`, which also means checking block opacity in that
+neighbor chunk's own `ChunkStorage` (not just its light). The existing
+single-chunk `flood_block_light` only ever receives one `ChunkStorage`;
+a cross-chunk version needs a way to fetch *any* chunk's storage by
+coordinate as the frontier moves.
+
+**Decision:** The cross-chunk BFS functions
+(`flood_block_light_cross_chunk`/`propagate_added_block_light_cross_
+chunk`/`unpropagate_block_light_cross_chunk`) are templated on a
+`ChunkProviderT` type parameter, duck-typed against exactly
+`lcu::world::World`'s own `const ChunkStorage<EdgeLength>*
+chunk_at(ChunkCoord) const` - the same reasoning Phase 28's DECISIONS.md
+entry already established for `mesh_chunk_greedy`'s `LightStorageT`.
+`engine/world` doesn't depend on `engine/lighting` (checked: `LcuWorld`
+links only `Lcu::Core`/`Lcu::Voxel`), so `engine/lighting` depending on
+`engine/world` directly would in fact be dependency-cycle-safe here,
+unlike Phase 28's `engine/voxel`<->`engine/lighting` situation - but
+the duck-typed template is still preferred for a second reason beyond
+cycle-avoidance: it keeps `propagation_test.cpp` able to construct a
+minimal `TestChunkProvider` (a bare `ChunkCoord -> ChunkStorage` map)
+without needing a full `lcu::world::World` and its own chunk lifecycle
+machinery just to unit-test the propagation algorithm itself.
+`client/main.cpp`'s real call sites pass the actual `World` instance
+directly - no adapter needed, since its `chunk_at` already matches the
+required shape exactly.
+
+**An unloaded neighbor is never touched, by design, not by oversight:**
+if `chunks.chunk_at(next.chunk)` returns `nullptr` mid-BFS, that
+direction is simply not explored - the frontier doesn't wait, doesn't
+buffer, and doesn't guess. This means a torch placed near a chunk edge
+today only lights the neighbor chunk if that neighbor happens to
+already be loaded at the moment of placement; a chunk that loads
+afterward doesn't retroactively receive that light. Closing this gap
+for real needs either the optional "boundary buffer" (Phase 32 -
+explicitly optional in the brief) or the neighbor-dirtying Phase 35 is
+chartered to add (a freshly-loaded chunk re-requesting light from
+whichever already-loaded neighbors could plausibly have lit it) -
+correctly out of this phase's scope, and honestly documented rather
+than silently left broken.
+
+**The termination bound ("max 15 voxels around the trigger") falls out
+of the existing algorithm for free:** block light values are capped at
+`LightStorage::kMaxLightLevel` (15), and `flood_block_light`/
+`flood_block_light_cross_chunk` both already stop spreading once a
+cell's level would decrement to 0 - so no BFS from any single-emission
+source can ever visit a cell more than 15 steps away in any direction,
+cross-chunk or not. No separate radius cap was added, since one already
+exists as an emergent property of the level-decrement termination
+condition, and adding a redundant second check would just be dead code
+duplicating an invariant the algorithm already guarantees.
+
+**Real correctness fixes riding along with the wiring, not left half-
+done:** `client/main.cpp`'s "let light flow back in from the brightest
+neighbor" logic (for a newly-opened air cell) previously only checked
+neighbors inside the same chunk via a hand-rolled bounds check;
+switched to `WorldLight::block_light_at`, it now correctly considers a
+neighbor across a chunk boundary too - a real bug this phase's own
+wiring pass surfaced and fixed along the way, not a separate,
+independently-motivated change.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether real cross-chunk torchlight actually looks correct on a real
+GPU/display - none of that is knowable from a code read or a headless
+Noop-backend run. A chunk that loads after a nearby source's BFS
+already finished still doesn't retroactively receive that light (Phase
+32/35's job, not this phase's).
+
+## 2026-09-10 — Phase 32 (boundary buffer) skipped: no blocking exists yet to buffer against
+
+**Context:** the brief marks Phase 32 explicitly optional
+("Grenzpuffer (optional)") and describes its purpose as ensuring
+"cross-chunk BFS never blocks (boundary condition buffered)" - i.e.
+deferring a cross-chunk light write into a buffer instead of writing
+directly into a neighbor chunk's `LightStorage` mid-BFS, so two
+lighting computations running concurrently on different threads don't
+contend for the same chunk's data.
+
+**Decision:** skipped. Every lighting call in this codebase - Phase 6's
+single-chunk compute, Phase 30's sky cascade, Phase 31's cross-chunk
+BFS - runs synchronously on the main thread against one shared
+`WorldLight` instance; nothing dispatches lighting work onto
+`engine/jobs::JobSystem` or any other thread yet (unlike meshing, which
+already does - see `remesh_and_upload`'s `job_system.submit` call).
+With no concurrent access to `WorldLight` anywhere in this codebase
+today, there is no actual lock contention or blocking for a boundary
+buffer to prevent - building one now would be optimizing against a
+problem that doesn't exist, contradicting the brief's own "no
+overengineering ahead of need" principle (already invoked once this
+session, Phase 1's mouse-look deferral, for the identical reason).
+
+**Revisit when:** lighting computation is ever dispatched across
+multiple `JobSystem` worker threads running concurrently on adjacent
+chunks - at that point a real race becomes possible (two threads each
+trying to write into the same shared boundary chunk's `LightStorage`),
+and a boundary buffer (or an equivalent synchronization mechanism)
+would have a real problem to solve. Nothing in Phases 33-42's own scope
+as given currently requires that.
+
+## 2026-09-10 — Smooth lighting supersedes Phase 28's light-based merge restriction; no shader changes needed (Phase 33)
+
+**Context:** Phase 28 made `MaskCell::merges_with` also compare packed
+light, specifically so a merged quad never needed more than one
+uniform light value - two adjacent same-block faces with different
+light stayed as separate quads rather than flattening into one
+arbitrary brightness. That was the correct trade *given flat-per-quad
+shading*, but it fights directly against greedy meshing's whole
+purpose (fewer, larger quads) whenever lighting varies smoothly across
+a surface, which real per-voxel/cross-chunk light (Phases 28-31) makes
+common, not rare.
+
+**Decision:** Phase 33 samples light *per vertex* instead of per quad:
+each of a merged quad's 4 geometric corners independently averages the
+packed light of its up to 4 diagonally-adjacent mask cells
+(`detail::smooth_corner_light`), reusing exactly the per-cell `light`
+values `mesh_chunk_greedy` already computed for Phase 28 (no new light
+sampling was needed, only a new way to consume the existing samples).
+With shading now genuinely per-corner, `MaskCell::merges_with` no
+longer needs to compare light at all - reverted to comparing only
+`block_id`/`positive_facing`, Phase 26's original rule. Net effect: the
+same or more merging than Phase 26 ever achieved (strictly a superset
+of Phase 28's more-restrictive merge set), *and* smoothly-shaded
+output, rather than trading one for the other.
+
+**A real, satisfying payoff found while wiring this up: no shader
+change was needed at all.** `client/shaders/varying.def.sc` already
+declared `float v_color1 : COLOR1;` as an ordinary (non-`flat`)
+varying back in Phase 28 - bgfx/GLSL linearly interpolates ordinary
+varyings across a triangle by default, so as soon as `mesh_chunk_
+greedy` started writing *different* light values to a quad's 4
+vertices instead of the same value four times, the existing fragment
+shader's `mod(v_color1, 16.0)`/`floor(v_color1 / 16.0)` unpacking
+started receiving genuinely smoothly-interpolated (fractional, not
+just integer) values per pixel, automatically - GPU rasterizer-level
+smooth lighting, for free, from a meshing-only change. This is worth
+recording because it easily could have gone the other way (if Phase 28
+had marked that varying `flat` for some now-obsolete reason, this
+phase would have needed a shader edit too) - the absence of shader
+changes here is a direct consequence of Phase 28's specific choice, not
+an accident.
+
+**Deliberately not full ambient occlusion:** classic "smooth lighting"
+in Minecraft-likes is often paired with AO (darkening a corner based on
+how many of its 4 diagonal neighbor cells are solid, independent of
+their light level). This phase implements only the light-averaging
+half - AO is a related but separate effect with its own visual
+trade-offs (it needs opacity, not light, at each diagonal neighbor,
+and a different blending formula) that the brief's "smooth lighting"
+line item doesn't explicitly demand. Not built speculatively; a
+natural, well-scoped future addition if wanted.
+
+**What remains genuinely unverified after this phase, honestly:**
+whether smooth lighting actually looks smooth (not blocky, not broken)
+on a real GPU/display - none of that is knowable from a code read or a
+headless Noop-backend run.
+
+## 2026-09-10 — game:torch is a solid opaque cube, not a transparent one (Phase 34)
+
+**Context:** Phase 34 adds the first real light-emitting placeable
+block. A torch's real-world shape (a thin cross/billboard) is not
+implemented anywhere in this codebase - `mesh_chunk_greedy` only ever
+meshes the **opaque** layer into real geometry; `ChunkMesh::transparent`
+and `::water` exist structurally (Phase 2) but are always empty, since
+no transparent-layer meshing pass has ever been written.
+
+**Decision:** register `game:torch` with `is_transparent = false` - a
+solid glowing cube occupying the full voxel, not a cross/billboard
+shape. Documented at length in-code at the registration site.
+
+**Rationale:** the alternative, `is_transparent = true`, would have
+been a real, dangerous trap: an `is_transparent` block is correctly
+excluded from the opaque mesh layer (that's what the flag is *for* -
+letting light and raycasts pass through), but since the transparent
+layer is never meshed, the block would render as **nothing at all** -
+invisible, despite having correct light-propagation and collision
+behavior. That would be exactly the kind of fake/incomplete feature
+this project's discipline forbids (brief section 96: no
+stubs/placeholders presented as working) - a torch you can place, that
+correctly lights the world, that you can walk into, but can never see.
+Caught and corrected before any verification run, not after.
+
+**Alternatives considered:** building a real transparent-layer mesher
+and a cross/billboard shape for the torch (rejected for this phase -
+real, substantial new meshing work, not what Phase 34's brief item
+asks for; a natural candidate for a dedicated future phase once more
+transparent/non-cube content exists to justify it, e.g. glass, foliage,
+water surfaces which already have an empty `ChunkMesh::water` layer
+waiting).
+
+**Consequence, honestly noted:** the placed torch in this build is
+a plain glowing cube, not the classic thin torch shape - visually
+wrong by Minecraft convention, but a real, correctly-lit, correctly-
+collidable, actually-visible block, which is the honest trade given
+what this phase's scope covers.
+
+## 2026-09-10 — Lighting benchmarks needed a dedicated Release build directory; a real BFS hot-path optimization followed (Phase 34)
+
+**Context:** Phase 34's brief item is explicit perf budgets for the
+cross-chunk lighting primitives: chunk-with-neighbors compute under
+2ms, single-torch place/unplace under 0.5ms each. The existing
+`tools/benchmark` binary is built inside `build/dev-bgfx`, whose only
+configured `CMAKE_BUILD_TYPE` is the project's own custom string
+`"Development"` (used elsewhere to gate debug-only behavior) - CMake
+does not recognize that string as one of its built-in types
+(`Debug`/`Release`/`RelWithDebInfo`/`MinSizeRel`), so none of the
+`CMAKE_CXX_FLAGS_<TYPE>` optimization flags for any built-in type ever
+apply. The first benchmark run confirmed this isn't theoretical: Google
+Benchmark itself printed `***WARNING*** Library was built as DEBUG.
+Timings may be affected` and reported numbers 20-40x slower than what a
+real optimized build later showed for the same code.
+
+**Decision:** create a separate, purpose-built benchmark build
+directory (`build/bench-release`,
+`-DCMAKE_BUILD_TYPE=Release -DLCU_BUILD_TOOLS=ON -DLCU_ENABLE_BGFX=OFF
+-DLCU_BUILD_CLIENT=OFF -DLCU_BUILD_SERVER=OFF -DLCU_BUILD_TESTS=OFF`)
+purely to get trustworthy timing numbers (confirmed `CMAKE_CXX_FLAGS_
+RELEASE:STRING=-O3 -DNDEBUG` in its cache), rather than either trusting
+the misleading debug numbers or trying to retrofit optimization flags
+onto the existing dev build type (which other phases' debug-assertion-
+gated behavior may depend on - out of scope to touch here).
+
+**Then a real optimization, not just a build-flag fix:** even under
+genuine `-O3`, `BM_Lighting_PlaceTorchAtChunkEdge`/`BM_Lighting_
+UnplaceTorchAtChunkEdge` still exceeded the 0.5ms budget (639us/767us).
+Root cause, found by reading the hot path: `flood_block_light_cross_
+chunk`/`unpropagate_block_light_cross_chunk` looked up **two** separate
+`unordered_map`s (the `ChunkProviderT`'s chunk-storage map and
+`WorldLight`'s per-chunk-light map) for every one of a popped cell's 6
+neighbor steps, plus ran `step_cross_chunk`'s floor-division arithmetic
+unconditionally - even though the overwhelming majority of BFS steps
+never leave the current chunk. Added an in-bounds fast path: a plain
+integer range check (`[0, EdgeLength)`) lets an in-chunk step reuse the
+already-held `LightStorage*`/`ChunkStorage*` pointers with zero hash
+lookups and zero floor-division, falling back to the original
+(`step_cross_chunk`-based) logic only for a genuine chunk-boundary
+crossing. This is a pure performance change with no intended behavior
+difference, verified as such: the full `ctest` suite (385/385 bgfx,
+382/382 non-bgfx, unchanged counts) passed unmodified before and after,
+including every cross-chunk-specific test individually re-run.
+Re-measured in `build/bench-release` after the fix: place 115,649 ns,
+unplace 99,158 ns - both now comfortably under the 500us budget (down
+from 639us/767us), and the compute-chunk-with-neighbors case (16,616
+ns) remained comfortably under its 2ms budget throughout.
+
+**Alternatives considered:** a lock-free/work-stealing scheduler change
+(rejected - the bottleneck was memory-access pattern, not scheduling,
+confirmed by reading the actual hot loop rather than guessing);
+reducing the light-emission radius or chunk edge length to hit the
+budget artificially (rejected - changes observable game behavior/
+content for a performance number, exactly the kind of trade this
+project's discipline avoids without being asked).
+
+**Known gap, left open on purpose:** the `CMAKE_BUILD_TYPE=
+"Development"` no-real-optimization issue is project-wide, not
+specific to lighting or to this benchmark - every other target
+(`VoxelClient`, `VoxelServer`, `VoxelTests`, and any other `tools/`
+binary) still builds unoptimized in `build/dev-bgfx`/`build/dev-nobgfx`
+today. Fixing that properly (deciding what `"Development"` *should*
+map to, and whether/how to add a real opt-in `Release` preset) is a
+build-system-wide decision outside this phase's torch/benchmark scope
+- flagged here for a dedicated future pass, not silently left
+undocumented.
+
+## 2026-09-11 — Cross-chunk light reseeding walks both boundary faces and re-floods, rather than a new BFS variant (Phase 35)
+
+**Context:** Phase 30/31's cross-chunk BFS functions honestly document
+two related "arrived too late" gaps: an already-loaded neighbor's
+existing light never reaches a chunk that loads afterward, and
+(symmetrically) a newly-loaded chunk's own near-boundary light source
+never reaches an already-loaded neighbor either, because each chunk's
+own initial light computation only ever floods within its own extent
+at the moment it runs. `WorldLight::remove_chunk_light`'s doc comment
+has named "Phase 35" as the real fix for this since Phase 29.
+
+**Decision:** `reseed_light_for_newly_loaded_chunk` doesn't add a new
+BFS algorithm - it re-uses `detail::flood_block_light_cross_chunk`
+exactly as-is, just seeded differently. For every already-loaded
+neighbor face, it walks the shared `EdgeLength x EdgeLength` boundary
+once, collecting every currently-lit (`> 1`) cell on *both* sides of
+that boundary into one queue, then floods. This is safe specifically
+because the flood function only ever *raises* a light value, never
+lowers one (`if (next_level > current) { set; push; }`) - re-seeding
+with cells that are already at their correct value costs a queue pop
+and an immediate no-op, not a wrong answer. The real cost is
+proportional to how much light genuinely still needs to cross, not to
+the boundary's full 256-cell size, since a fully-settled boundary
+contributes nothing.
+
+**A deliberate difference from Phase 33's `touched_chunks` contract,
+documented rather than silently different:** Phase 33's single-source
+propagate/unpropagate functions always seed their BFS from a point
+inside `coord`, so `coord` structurally can't reappear in their own
+`touched_chunks` result. This function seeds from *both* sides of a
+boundary, so `coord` legitimately CAN appear in its result (an
+already-loaded neighbor's light flowing back into the chunk that just
+loaded). Not special-cased away, since every real call site already
+unconditionally remeshes `coord` right after calling this regardless
+of what it reports - a possible duplicate entry costs one harmless
+redundant remesh, never a missed one.
+
+**Sky light's cascade is unconditional, not change-detected:** rather
+than comparing before/after values to decide whether to keep
+cascading downward or to report a chunk touched, the function just
+recomputes and reports every already-loaded chunk in the vertical run
+below `coord`. The currently-loaded vertical extent is small (a
+handful of chunks at most, `load_settings.min_chunk_y`..`max_chunk_y`),
+so the wasted work from an unconditional recompute is negligible, and
+it avoids a whole extra class of "did anything actually change" bugs
+for a real gain that doesn't matter at this scale.
+
+**Alternatives considered:** a dedicated "boundary diff" structure
+that only reseeds what's provably different since last time (rejected
+- meaningfully more state and complexity for a gain the reseed's own
+natural early-termination already captures for free, since an
+unchanged boundary cell is a no-op in the flood anyway); reusing
+Phase 32's "boundary buffer" idea from the (skipped) optional
+concurrency phase (rejected - that phase was about deferring writes
+across threads, a different problem; this one is single-threaded,
+synchronous, and about *when* a reseed happens, not *how* concurrent
+writers coordinate).
+
+## 2026-09-11 — Client-side chunk unloading persists to disk first, mirroring VoxelServer exactly (Phase 35)
+
+**Context:** Before this phase, `VoxelClient`'s own `World` only ever
+grew for the process's entire lifetime (a deliberate simplification
+recorded in Phase 16's DECISIONS.md entry) - even as the player walked
+far from the spawn area, every chunk's mesh, GPU buffers, and light
+data stayed resident forever. `VoxelServer` closed the equivalent gap
+back in Phase 20 with interest-scoped unloading; the client never got
+its own counterpart.
+
+**Decision:** add real distance-gated client-side unloading
+(`unload_far_chunks`, triggered on every streaming-center change,
+Chebyshev XZ distance beyond `load_settings.radius_xz + 1`), but
+critically: save the chunk to disk (`client_world/chunks/`, a
+`lcu::serialization::save_chunk_to_file` call identical to
+`VoxelServer`'s own `chunk_file_path`/save pattern) *before* unloading
+it, and check that same directory before regenerating on a later load.
+Without this, a single-player edit (the only case where the client's
+own chunk data is ever the sole copy of the truth) would silently
+revert to pristine regenerated terrain the instant the player wandered
+back into range - a real regression `VoxelServer`'s own Phase 20 entry
+already flagged as the reason unloading needs persistence, not just
+memory reclaim.
+
+**Deliberately a separate directory from any `VoxelServer` instance's
+own `<world>/chunks`:** a networked client's local chunk copy is never
+authoritative anyway (server `ChunkData` always wins on arrival, see
+the Phase 13 "no client-side speculative block edits" decision), so
+there's no reason for it to share - or need to avoid colliding with -
+a server's actual save directory, even when both processes happen to
+run from the same working directory in a local test. `client_world` is
+a plain, obviously-client-owned name next to the executable, the same
+relative-to-cwd convention `shaders/chunk` and mods already use.
+
+**Alternatives considered:** no persistence at all, memory-reclaim-only
+unloading (rejected - a real, silent edit-loss regression the moment
+someone actually plays single-player and walks around); a shared save
+directory with `VoxelServer` via a new CLI flag (rejected - adds
+argument parsing plumbing this client has never needed, for a benefit
+that doesn't actually apply given the server is always authoritative
+in networked mode anyway).
+
+## 2026-09-11 — `LCU_VERIFY_MOVE_SECONDS` can get legitimately blocked by terrain (found, not fixed, during Phase 35 verification)
+
+**Context:** Verifying this phase's chunk-unload/reseed logic needed
+real movement across a longer distance than any previous phase's
+`LCU_VERIFY_MOVE_SECONDS` run had exercised (previous documented runs
+used 6s; this phase needed enough distance to clear `load_radius +
+margin` chunks). A 20-second run consistently stalled at the exact
+same world position (`(0.00, 28.90, -15.70)`) regardless of whether
+`LCU_VERIFY_MOVE_SECONDS` was set to 6 or 20 - suspicious enough to
+investigate rather than assume a Phase 35 bug.
+
+**Finding:** reproduced byte-identical (same final position, same
+total frame count) against a `git stash`-isolated pre-Phase-35 build
+under the same test - proving this is pre-existing, unrelated to any
+change in this phase. Confirmed the real cause by temporarily also
+holding `Jump` for the same test duration: movement immediately
+continued past the stall point and crossed six more chunk boundaries
+cleanly. This means the player hit a real terrain feature taller than
+`integrate_player`'s auto-step height, straight-line into it with no
+jump input - `LCU_VERIFY_MOVE_SECONDS` was never designed to jump (see
+its own doc comment, brief section 16's straight-line verification
+need), so getting stopped by a real obstacle is that hook's own
+honestly-scoped limitation, not a physics bug.
+
+**Decision: not fixed here.** `LCU_VERIFY_MOVE_SECONDS`'s existing
+documented behavior (Phase 16 - a plain, predictable straight-line
+hold, matching real runs already recorded in BUILD_STATUS.md) stays
+exactly as it is; permanently adding Jump to it would be an undocumented
+behavior change to an existing, relied-upon verification hook for a
+problem specific to this one longer-distance test. This phase's own
+real verification run used a *temporary* local modification (reverted
+before commit) to clear the obstacle and prove the real unload/reseed
+code path executes correctly - see CHANGELOG.md's Phase 35 entry for
+the actual real output that produced (repeated stream/unload cycles,
+60 real chunk save files written).
+
+**Left for whoever picks it up:** a dedicated jump-capable movement
+verification hook (or a spawn/route guaranteed obstacle-free) would be
+the honest way to make long-distance streaming/unloading verification
+reproducible without a manual workaround - not built here, since it's
+tooling, not a product feature, and out of this phase's own scope.
+
+## 2026-09-11 — Entity boxes reuse the sky shader; overlay only shows numbers this codebase can actually produce (Phase 36)
+
+**Context:** Phase 36's brief item is entity debug boxes plus
+extending the debug overlay toward brief section 60's full line:
+"CPU/GPU/RAM/chunks/entities/ping/bandwidth/draw-calls/jobs".
+
+**Decision on boxes:** `Renderer::submit_wireframe_box` deliberately
+reuses `submit_billboard`'s exact vertex format (position + flat
+color) and the already-loaded `sky_program`, rather than adding a
+third minimal shader pair. A debug box has the same rendering need the
+sun/moon quad already established in Phase 27 - no lighting, no
+texture, just a flat color - so a second shader pair would be
+duplicated code solving an already-solved problem. Drawn with real
+depth *testing* (so a box behind a wall is correctly hidden - a debug
+aid that always painted through geometry would be confusing, not
+useful) but no depth *write* (so the thin line geometry doesn't leave
+a lasting mark other draws' depth tests would see).
+
+**Decision on the overlay - only real numbers, nothing invented:**
+`DebugOverlayStats` adds exactly four fields: chunks loaded (`World::
+loaded_chunk_count()`), entity count (a real per-frame tally of boxes
+actually drawn), draw calls (incremented only when a `submit_*` call
+genuinely reached `bgfx::submit()` - mirroring each call's own no-op-
+on-invalid-program condition, not merely "was attempted"), and
+unfinished jobs (`JobSystem::unfinished_job_count()`, a new accessor
+added specifically for this). CPU/GPU/RAM and ping/bandwidth are
+deliberately left out of this phase, not stubbed with a fake `0` or a
+misleading "N/A": this codebase has no real per-platform CPU/RAM
+reader (a Linux-only `/proc` reader would work here but leave every
+other target platform - Windows/macOS/mobile - silently unequal, and
+this project's brief targets all of them equally) and no per-
+connection RTT/byte-counter in `engine/network::Connection` yet.
+Adding a placeholder number for either would be exactly the kind of
+"claims more than what's verified" this project's own discipline
+(brief section 96) forbids - a debug overlay lying about performance
+is worse than one honestly missing a line.
+
+**`JobSystem::unfinished_job_count()`:** a thin, lock-guarded read of
+the existing internal `unfinished_count_` field - no new bookkeeping,
+just exposing a number the system already tracked for its own
+`wait_idle()` logic. Given this codebase's current usage pattern
+(every call site submits a job and immediately waits on it - see
+`remesh_and_upload`), this number is usually 0 or 1 in practice, not a
+deep queue - an honest reflection of how synchronously this vertical
+slice actually uses the job system today, not a claim of heavy
+parallelism that isn't there.
+
+**Alternatives considered:** a `/proc/self/statm`-based RAM reader
+gated to Linux only (rejected - see above, an unequal-across-platforms
+stat is worse than no stat, and the brief's own target platform list
+is explicit); tracking bandwidth via a byte counter added to
+`UdpSocket` (a real, buildable feature - deliberately deferred rather
+than rushed into this phase alongside boxes/overlay wiring, since it
+touches `engine/network` more than `engine/ui`/`engine/rendering` and
+deserves its own focused pass if ever prioritized).
+
+## 2026-09-11 — Water is solid-not-transparent and non-colliding, same torch-precedent reasoning applied differently (Phase 37)
+
+**Context:** Phase 37's brief item is real sea level (world Y=0) plus
+a water block. Two `BlockDefinition` fields decide most of what "real"
+means here: `is_transparent` (meshing/light) and `has_collision`
+(physics) - Phase 34's torch already established the reasoning for the
+first field on a light-emitting block; water needs the same field
+reasoned through again for a very different block.
+
+**`is_transparent = false`, exactly like the torch:** `mesh_chunk_
+greedy` only ever meshes the opaque layer into real geometry -
+`ChunkMesh::transparent`/`::water` exist structurally (Phase 2) but no
+transparent-layer meshing pass has ever been written. `is_transparent
+= true` would make water correctly generated by worldgen and
+completely invisible - the identical trap Phase 34 caught for the
+torch, caught the same way before any verification run rather than
+after. The real, honest trade-off this forces: water renders as a
+solid-looking blue block, not a translucent surface you can see
+through or see the bottom beneath - visually wrong by every voxel
+game's own convention, but real, visible, and not lying about being
+more than it is.
+
+**`has_collision = false`, unlike every other block registered so
+far:** this is the one field where water is genuinely different from
+the torch (and from stone/grass/dirt) - a player should be able to
+walk/swim through it, not be blocked by it like a wall. `has_
+collision` already drives every existing `is_solid` predicate
+(`block_registry.definition_of(id).has_collision`, used identically
+by `move_and_collide`'s collision resolution and by `raycast`'s hit
+test) - setting it `false` for water is a real, if partial, feature
+(no buoyancy/drag/swim mechanics exist to go with it - the player
+currently just falls/walks through water exactly like they would
+through air, physically) with a genuine, honest consequence: a
+raycast passes straight through water to whatever's behind/beneath
+it, so a player can never target water itself for break/place - a
+natural, unforced side effect of the collision choice, not special-
+cased away.
+
+**A load-bearing side effect worth naming:** because `is_transparent`
+stays `false`, `detail::is_opaque` (both greedy meshing and the
+lighting propagation code already share this one predicate) treats
+water exactly like stone - it blocks sky light entirely rather than
+letting some through. Real underwater columns are therefore
+permanently dark (sky light 0) below the waterline in this build - not
+realistic (real water lets some light through, attenuating with
+depth), but an honest consequence of this codebase's existing binary
+open/blocked sky-light model (documented since Phase 6/30), not a new
+simplification invented for water specifically.
+
+**Alternatives considered:** building real transparent-layer meshing
+so water could actually look like water (rejected for this phase -
+substantial new rendering work: sorting, blending, dual-layer
+submission - clearly out of scope for "add sea level + a water block",
+and the torch precedent already established that a real, visible,
+honestly-labeled placeholder beats either skipping the feature or
+faking transparency that doesn't actually composite correctly);
+partial-height water blocks or a wave/current system (rejected -
+neither exists anywhere in this codebase's rendering/physics yet, and
+brief section 21's own pipeline ordering puts "climate/biome" and
+"caves/ores" stages before anything like that would be worth building).
+
+## 2026-09-11 — Client and server independently search for the same dry spawn column (Phase 37)
+
+**Context:** Before this phase, both `VoxelClient` and `VoxelServer`
+hardcoded the spawn column at world (0,0) - safe when `terrain_
+height()` was always positive (pre-Phase-37), but with real sea level
+now centered at Y=0, a fixed (0,0) column can genuinely land
+underwater by pure chance (confirmed with seed 1337: `terrain_
+height(1337, 0, 0) = -3`, i.e. an underwater column) - and no swim
+mechanics exist to make that survivable/fun, so the player would just
+be stuck.
+
+**Decision:** both processes gained an identical `find_dry_spawn_
+column(seed)` - a small, deterministic square-ring search outward from
+the origin (radius 1, 2, 3, ... up to a bounded `kMaxRadius`) for the
+first column whose `terrain_height >= kSeaLevel`. Same seed, same
+algorithm, same result on both sides, computed independently rather
+than one side sending the other a coordinate - consistent with this
+project's existing "both sides register the same content in the same
+order so ids coincide by construction" pattern (block/item ids), now
+applied to spawn placement too. Confirmed via a real two-process run:
+both processes logged the identical column (-19,18) for seed 1337,
+and the server-reconciled player position landed on dry land.
+
+**Why a square ring, not a growing box scan:** a full `for x in
+[-r,r], for z in [-r,r]` re-scan at every radius would redundantly
+re-check the same interior cells checked at smaller radii already
+(silently correct, just wasteful); this walks only the new
+`max(|x|,|z|) == radius` boundary cells at each step - still a plain
+nested loop, not meaningfully more complex, but doesn't redo work
+that's already been done.
+
+**Known, accepted limitation:** if every column within `kMaxRadius`
+(64 blocks) of the origin happened to be underwater (statistically
+implausible given `terrain_height`'s roughly symmetric distribution
+around sea level, but not provably impossible for an adversarial
+seed), this falls back to (0,0) anyway - honestly documented as a
+fallback rather than an infinite/unbounded search or a crash. Not
+fixed further; a real problem only for a seed nobody has actually hit
+in practice.
+
+## 2026-09-11 — Continental noise decides base elevation AND local-detail amplitude, not just elevation (Phase 38)
+
+**Context:** Phase 3's original worldgen (and Phase 37's sea-level
+recentering of it) used exactly one noise sample per column - a single
+4-octave fractal sum, directly mapped to height. That produces
+uniformly bumpy terrain everywhere: a coastal column and a far-inland
+column have the exact same *amount* of local height variation, just
+centered at a different average. Real mountainous terrain doesn't work
+that way - flat coastal plains and jagged inland peaks coexist in the
+same world, at genuinely different local roughness, not just different
+elevation.
+
+**Decision:** add a second, much-lower-frequency noise stage
+("continental", brief section 21's own name for it) that modulates
+*both* the existing detail noise's average value (base elevation) and
+its amplitude (how much local relief it's allowed to produce) per
+column. A coastal/oceanic column (`continental` near 0) gets a low
+`kMinMountainAmplitude` ceiling regardless of what the detail noise
+itself samples there - genuinely flat, not just low; a highland column
+(`continental` near 1) gets `kMaxMountainAmplitude`, letting the same
+detail noise swing into real mountain-sized peaks and valleys.
+
+**Why modulate the existing detail layer instead of adding a third
+independent "ruggedness" noise:** simpler and cheaper (one fewer noise
+evaluation per column), and it keeps the *shape* of local terrain
+(which ridges and valleys go where) fully determined by the original
+detail noise's own smoothness/continuity properties (already verified
+by `AdjacentColumnsAreSmoothNotRandom`) - only its scale changes
+region to region, not its underlying pattern. A genuinely separate
+ruggedness field would be a reasonable alternative for a later,
+dedicated terrain-quality pass, not obviously wrong, just more moving
+parts than this phase's scope needs.
+
+**Why a real dedicated `kContinentalSeedOffset`, not the same seed as
+the detail layer:** without it, "how mountainous is this region" and
+"what does the terrain actually look like here" would sample the
+exact same lattice at different frequencies - octave-summed fractal
+noise already avoids this within itself (each octave gets its own
+seed offset, see `fractal_noise`'s own comment), and the same
+reasoning applies across stages: two noise fields built from the same
+lattice would show visible correlation (e.g., ridge lines always
+running parallel to coastlines) that isn't geologically meaningful,
+just an artifact of reusing the same randomness source.
+
+**Deliberately not a full ridged-multifractal or erosion-simulated
+mountain algorithm:** those are real, well-known techniques for more
+convincing mountain shapes (sharp ridges via `1 - |noise|`,
+hydraulic/thermal erosion passes, etc.), but are a materially larger
+scope than "continental noise decides how much relief a region gets" -
+this phase's brief item. A straightforward amplitude-modulated
+two-stage composition is the honest, scoped version of "continental/
+mountain terrain," not a shortcut hiding a gap; a more sophisticated
+shaping pass is real, well-scoped future work if ever prioritized, not
+silently deferred without a plan.
+
+## 2026-09-11 — Spawn search radius rewritten for continental noise's much larger wavelength (found and fixed in the same phase, Phase 38)
+
+**Context:** Phase 37 added `find_dry_spawn_column` with `kMaxRadius =
+64`, sized against the single-frequency noise that existed at the
+time (dry/wet transitions roughly every ~100 blocks, so a 64-block
+search radius reliably found land). Phase 38's continental noise
+(`kContinentalNoiseScale = 0.0015`, ~666-block wavelength) varies far
+more slowly - land/ocean boundaries can now be many hundreds of blocks
+apart, so a 64-block search can legitimately never leave the ocean
+basin it started in.
+
+**Found for real, not hypothetically:** running the client after
+implementing the continental noise stage showed spawn column (0,0)
+being selected despite `terrain_height(1337, 0, 0) = -10` (underwater)
+- the search was silently falling back to (0,0) itself, exactly the
+scenario `find_dry_spawn_column`'s own fallback comment already
+anticipated as "statistically implausible... but honestly handled." A
+direct standalone check confirmed seed 1337 genuinely needs radius 84
+to find any dry land at all - not implausible, just larger than the
+old radius allowed.
+
+**Decision:** raise `kMaxRadius` to 1024 (over one full continental
+wavelength in every direction) on both `VoxelClient` and
+`VoxelServer`, and rewrite the ring search itself from an O(ring-area)
+re-scanned square (the original iterated the full `(2r+1)^2` cell
+grid at every radius, skipping all but the ~`8r` boundary cells via a
+`continue`) to an O(ring-perimeter) walk that only ever visits the new
+ring's actual boundary cells. Without that rewrite, a 1024-radius
+worst case would mean summing `(2r+1)^2` for r=1..1024 - tens of
+millions of wasted iterations; the perimeter-only version keeps even
+that worst case proportional to `1024^2`, confirmed fast in a real
+run (full search + chunk load + spawn completed in 0.23s wall-clock
+for seed 1337's actual radius-84 case).
+
+**Lesson worth naming:** a search radius tuned against one noise
+model's characteristic scale silently stops being valid when that
+scale changes - not a coding bug, a coupling this phase's own change
+introduced without immediately re-deriving the dependent constant.
+Caught here by actually running the client after the worldgen change,
+not by code review alone; a reminder for any future phase that touches
+`kContinentalNoiseScale` again to re-check this radius against it.
+
+## 2026-09-11 — Biomes: a temperature-only climate model, three real categories, not a full Whittaker table (Phase 39)
+
+**Context:** Phase 39's brief item is "climate/biome" - the pipeline
+stage brief section 21 lists right after continental/terrain. Real
+biome systems (Minecraft's own included) typically use at least two
+climate axes (temperature and humidity/precipitation) mapped through a
+Whittaker-diagram-style table into a dozen-plus distinct biomes, each
+with its own terrain-height modifier, block palette, mob spawns, and
+decoration rules.
+
+**Decision:** implement a deliberately smaller, honest version: one
+climate axis (temperature-like, `biome_at`'s single noise sample), three
+categories (`Snowy`/`Plains`/`Desert`), each mapping to a real,
+distinct surface/subsurface block pair - not a stub, not a single
+biome pretending to be several, but genuinely three different, chosen,
+tested outcomes. Chosen over the full multi-axis system because this
+phase's honest scope is "close the climate/biome gap that exists
+today" (zero biome variation, every column identical), not "build the
+final biome system a shipped game would ship with" - a real three-way
+split is a substantial, verifiable step from that zero baseline,
+while a full Whittaker table is enough additional surface area (a
+second noise axis, a lookup table, many more block registrations,
+biome-specific terrain-height modifiers) to deserve its own dedicated
+phase if ever prioritized, not squeezed into this one alongside
+everything else Phase 39 already touches (BiomeBlocks, two new
+blocks, spawn-log wiring, test rewrites).
+
+**Plains is deliberately the widest band (50%), not an equal three-way
+split (33% each):** every column was Plains-equivalent (grass/dirt)
+before this phase - keeping it the majority outcome after biomes exist
+means the common case players actually experience (temperate,
+grass-covered terrain) doesn't regress into a minority one just
+because two new categories were added. A first attempt at unequal-but-
+not-deliberately-so thresholds (0.35/0.65, an editing mistake caught
+before verification) would have made Plains the *narrowest* band (30%)
+instead - fixed to 0.25/0.75 (50% Plains) before any test run, not
+after a wrong number shipped.
+
+**Deliberately no elevation-climate coupling:** real mountains are
+colder at altitude than the valley floor beside them; this phase's
+`biome_at` is a function of `(x, z)` alone, completely independent of
+`terrain_height`'s own elevation at that column (itself a real, tested
+independence - see the "two genuinely separate noise stages" Phase 38
+entry, which this phase's climate stage extends the same reasoning to
+as a *third* independent field). A snow-capped highland peak sitting
+directly beside a sandy desert basin is a real, current possibility in
+this build - visually odd, not physically motivated, but an honest
+consequence of keeping the pipeline stages independent as scoped,
+not a hidden coupling assumed to already exist.
+
+**Water stays biome-independent on purpose:** a below-sea-level column
+fills with the same `game:water` regardless of its biome - no frozen/
+ice-cap variant for Snowy coastlines, no distinction for Desert oases.
+Real, further scope (a `Biome`-parameterized water/ice choice would be
+a small, natural extension of `BiomeBlocks`) deliberately deferred
+rather than added speculatively without this phase's brief item asking
+for it.
+
+**Alternatives considered:** an equal three-way split (33/33/33
+- rejected, see the "Plains stays the majority" reasoning above);
+biome affecting terrain height directly (e.g. deserts flatter, snowy
+peaks taller - rejected for this phase, conflates the climate stage
+with the continental/terrain stage Phase 38 just finished separating
+out, and needs real tuning against the existing amplitude model to
+avoid fighting it); a data-driven biome registry mods could extend
+(rejected - `engine/modding`'s Lua bindings don't expose worldgen at
+all yet, and building that binding surface is real, separate work
+outside this phase's scope).
+
+## 2026-09-11 — Caves: "noise crevice" difference technique, not single-threshold "cheese caves"
+
+**Context:** brief section 21's worldgen pipeline lists "caves/ores" as
+the stage after climate/biome (Phase 39). The straightforward approach -
+one 3D noise field, carve wherever it crosses a single threshold - is
+well known to produce "cheese caves": isolated, round, disconnected
+blobs, because a single field's high (or low) region is naturally
+blob-shaped, not tunnel-shaped.
+
+**Decision:** sample two independent 3D noise fields (own seed offsets)
+at the same point and carve where their values land within a small
+threshold of each other (`|field_a - field_b| < kCaveThreshold`). Two
+continuous fields crossing near-equal values traces a winding, connected
+surface (a "crevice") through 3D space, not a blob - a real, structurally
+different result from single-threshold carving, not a cosmetic tuning
+difference.
+
+**`kCaveMinDepthBelowSurface`:** `is_cave` takes `surface_height` (that
+column's own `terrain_height()`, which the caller - `generate_terrain_
+chunk` - already has, no reason to recompute it) and refuses to carve
+within a fixed minimum depth of it. Without this, a cave that happens to
+reach close to the surface would punch a visible hole at ground level -
+not "cave entrance", just a floating pit with no relationship to the
+terrain above it. A real minimum depth keeps every carved opening
+genuinely underground.
+
+**No depth ceiling:** unlike a hypothetical "caves only exist between Y=
+-40 and Y=10" rule, `is_cave` has no upper/lower Y bound of its own
+beyond the surface-relative minimum depth - the noise fields are sampled
+at whatever `(x, y, z)` is asked, arbitrarily far down. This is an
+honest consequence of not inventing an artificial cutoff with no
+gameplay reason behind it yet (there's no "bedrock" concept, no chunk-
+loading depth limit, nothing this project currently does that would
+make a hard floor meaningful) - documented in CHANGELOG.md and directly
+exercised by the rewritten `ChunkFarBelowTerrainIsStoneCaveOrOre` test
+(which used to assert "always stone" at extreme depth and now computes
+the real expected value instead, precisely because that assumption
+stopped being true).
+
+**Ore thresholds tuned from real measured data, not guessed:** the first
+attempt picked round-looking numbers (0.90 for Coal, 0.95 for Iron)
+against an assumed roughly-uniform [0,1) noise output. A dedicated
+`OreAtProducesBothOreTypesOverARealVolume` test failed - both ores
+came back completely absent from a real, wide scan. Investigation (a
+standalone probe program replicating `fractal_noise3d`'s exact math to
+measure its true output distribution, the same "measure the real system,
+don't assume" approach Phase 38's spawn-radius bug and Phase 39's biome-
+threshold bug were both caught with) showed the actual range: a 4-octave
+weighted average naturally clusters well inside [0,1) - empirically
+~[0.05, 0.95] over a 1.8M-cell sample, not the full range a single
+uncombined lattice sample would span. 0.95 was nearly unreachable;
+0.90 gave a real but too-sparse hit rate for the test's own scan volume.
+Re-derived both thresholds directly from the measured distribution
+(0.70 for Coal, ~3.7% of eligible cells; 0.80 for Iron, ~0.1% - roughly
+30x rarer than Coal, plus its own narrower/deeper Y band) - both still
+small next to `OreType::None`'s overwhelming share, preserving the
+"ore is rare" design intent the first (wrong) numbers were also aiming
+for, just via numbers the real noise actually produces.
+
+**Two ores, not a full mineral progression:** `OreType` is `None`/
+`Coal`/`Iron` - the same "honestly small, not the final variety" scoping
+Phase 39's three biomes and Phase 34's single torch block already
+established for this project. No item drops for either ore yet (breaking
+one currently just removes it, the same gap sand/snow had after Phase 39
+until Phase 18/22-style item wiring is added) - deliberately deferred,
+not a hidden omission.
+
+**Alternatives considered:** single-threshold "cheese caves" (rejected -
+see the crevice-vs-blob reasoning above, this was the primary reason for
+choosing the two-field difference technique); 3D Perlin-worms/path-based
+tunnel carving (rejected - meaningfully more implementation complexity
+for a first cave pass, and the noise-crevice technique already produces
+genuinely connected tunnels without needing an explicit path/graph
+structure); an artificial cave depth ceiling (rejected - no real
+gameplay concept in this project yet that would make one meaningful,
+would just be an unmotivated magic number); guessing ore thresholds from
+an assumed uniform distribution again after the first failure (rejected
+- exactly the mistake that caused the first numbers to fail; measuring
+the real distribution is barely more work and gets a verifiably correct
+answer instead of another guess).
+
+## 2026-09-11 — Vegetation: single-column trees/cacti, no cross-chunk canopy spread
+
+**Context:** brief section 21's worldgen pipeline lists "vegetation" as
+the stage after caves/ores (Phase 40). A real tree in most voxel games
+has a canopy wider than the trunk's own column - typically a 3x3 (or
+larger) spread of leaves overlapping several neighboring columns. This
+project's chunks are generated independently, one at a time, via a
+per-column callback (`generate_terrain_chunk`) with no visibility into
+what a neighboring chunk will contain or whether it has been generated
+yet.
+
+**Decision:** confine each column's own tree/cactus entirely to that one
+column - a tree is a trunk directly above the surface block, capped by a
+leaf "pillar" directly above the trunk (not a spreading canopy); a
+cactus is just a stack, no canopy at all. Neither ever reads or writes a
+different (world_x, world_z) column than the one that spawned it.
+
+**This was a real, deliberate scope choice, not a limitation stumbled
+into by accident.** A wider canopy IS achievable without needing actual
+neighbor `Chunk` objects to exist yet - `terrain_height`/`biome_at`/
+`vegetation_at` are all pure functions of world coordinates, callable
+for any column regardless of which chunk is currently being generated,
+so a real implementation could scan a small radius of neighboring
+columns during generation and ask "would that neighbor's own tree reach
+into this cell" using nothing but extra pure-function calls (no
+cross-chunk chunk-data dependency at all). This was considered and
+rejected for this phase specifically because of scope, not feasibility:
+it adds real complexity (a radius scan per cell, care around which
+column's decision "wins" if two candidate trees are close enough that
+their hypothetical canopies would overlap) for a phase whose honest
+goal was "close the vegetation gap that exists today" (zero vegetation
+anywhere), not "build the final tree-canopy system a shipped game would
+ship with" - the same "small honest step from zero, not the final
+system" reasoning every biome/cave/ore phase before it already used.
+Real further work, deliberately deferred, not a hidden gap.
+
+**A real, useful side effect of the single-column choice:** it also
+means vegetation placement is correct across *vertically* stacked chunk
+boundaries with zero special-casing, for the same reason the Phase 37
+sea-level water fill already is - both are expressed purely as a
+function of `world_y` and a column's own `terrain_height()`, so
+`generate_terrain_chunk` computes the right answer independently no
+matter which chunk_y it's currently filling.
+
+**Vegetation thresholds measured empirically, applied from the start,**
+not guessed and fixed after a failure the way Phase 40's ore thresholds
+were - having just been caught by that exact mistake, the same
+standalone-probe-program technique was applied to `fractal_noise`'s own
+real output range before picking `kTreeThreshold`/`kCactusThreshold`,
+rather than repeating the "assume roughly [0,1)" guess a second time.
+
+**Alternatives considered:** a real 3x3 (or radius-based) spreading
+canopy using neighbor-column pure-function lookups (rejected for this
+phase's scope - see above; a genuinely promising real technique for a
+future phase, not dismissed as infeasible); storing partially-generated
+"pending" vegetation edits for a chunk to apply once its neighbor
+generates (rejected - meaningfully more implementation complexity and
+new persistent state, when the pure-function-lookup approach above
+would get the same result without needing to persist anything);
+skipping vegetation for Snowy by giving it its own always-None branch
+explicitly written out at every call site (rejected - `vegetation_at`
+already handles this correctly and uniformly by only ever checking
+`Biome::Plains`/`Biome::Desert`, no separate carve-out needed).

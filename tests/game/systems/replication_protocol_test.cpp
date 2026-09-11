@@ -97,3 +97,146 @@ TEST(ReplicationProtocol, NegativeFloatValuesRoundTripExactly) {
     EXPECT_FLOAT_EQ(decoded->horizontal_delta.z, -0.001f);
     EXPECT_FLOAT_EQ(decoded->dt, -1.0f);
 }
+
+TEST(ReplicationProtocol, BlockActionBreakRoundTrips) {
+    const BlockAction sent{BlockActionType::Break, 10, -5, 200, 0};
+    const auto bytes = encode_block_action(sent);
+    const auto decoded = decode_block_action(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->action, BlockActionType::Break);
+    EXPECT_EQ(decoded->x, 10);
+    EXPECT_EQ(decoded->y, -5);
+    EXPECT_EQ(decoded->z, 200);
+}
+
+TEST(ReplicationProtocol, BlockActionPlaceRoundTripsWithBlockId) {
+    const BlockAction sent{BlockActionType::Place, -1000000, 64, 1000000, 42};
+    const auto bytes = encode_block_action(sent);
+    const auto decoded = decode_block_action(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->action, BlockActionType::Place);
+    EXPECT_EQ(decoded->x, -1000000);
+    EXPECT_EQ(decoded->y, 64);
+    EXPECT_EQ(decoded->z, 1000000);
+    EXPECT_EQ(decoded->block_id, 42u);
+}
+
+TEST(ReplicationProtocol, BlockActionRejectsInvalidActionByte) {
+    auto bytes = encode_block_action({BlockActionType::Break, 1, 2, 3, 0});
+    bytes[1] = 0xFF;  // neither Break(0) nor Place(1)
+    EXPECT_EQ(decode_block_action(bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, BlockChangeRoundTrips) {
+    const BlockChange sent{-42, 0, 999999999, 7};
+    const auto bytes = encode_block_change(sent);
+    const auto decoded = decode_block_change(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->x, -42);
+    EXPECT_EQ(decoded->y, 0);
+    EXPECT_EQ(decoded->z, 999999999);
+    EXPECT_EQ(decoded->block_id, 7u);
+}
+
+TEST(ReplicationProtocol, BlockChangeToAirRoundTrips) {
+    // block_id 0 == kAirBlockId - the "this was a break" case.
+    const BlockChange sent{5, 5, 5, 0};
+    const auto decoded = decode_block_change(encode_block_change(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->block_id, 0u);
+}
+
+TEST(ReplicationProtocol, BlockActionAndBlockChangeRejectTruncatedPayload) {
+    auto action_bytes = encode_block_action({BlockActionType::Place, 1, 2, 3, 4});
+    action_bytes.resize(action_bytes.size() - 1);
+    EXPECT_EQ(decode_block_action(action_bytes), std::nullopt);
+
+    auto change_bytes = encode_block_change({1, 2, 3, 4});
+    change_bytes.resize(change_bytes.size() - 1);
+    EXPECT_EQ(decode_block_change(change_bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, BlockActionAndBlockChangeRejectWrongMessageType) {
+    const auto welcome_bytes = encode_welcome({1, 1});
+    EXPECT_EQ(decode_block_action(welcome_bytes), std::nullopt);
+    EXPECT_EQ(decode_block_change(welcome_bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, PeekTypeDistinguishesBlockActionAndBlockChange) {
+    EXPECT_EQ(peek_type(encode_block_action({BlockActionType::Break, 0, 0, 0, 0})), MessageType::BlockAction);
+    EXPECT_EQ(peek_type(encode_block_change({0, 0, 0, 0})), MessageType::BlockChange);
+}
+
+TEST(ReplicationProtocol, ChunkDataRoundTrips) {
+    const ChunkData sent{-3, 0, 7, {1, 2, 3, 4, 5, 250, 251, 252}};
+    const auto bytes = encode_chunk_data(sent);
+    const auto decoded = decode_chunk_data(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->chunk_x, -3);
+    EXPECT_EQ(decoded->chunk_y, 0);
+    EXPECT_EQ(decoded->chunk_z, 7);
+    EXPECT_EQ(decoded->compressed_bytes, sent.compressed_bytes);
+}
+
+TEST(ReplicationProtocol, ChunkDataRoundTripsWithEmptyCompressedBytes) {
+    const ChunkData sent{1, -2, 3, {}};
+    const auto decoded = decode_chunk_data(encode_chunk_data(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->chunk_x, 1);
+    EXPECT_EQ(decoded->chunk_y, -2);
+    EXPECT_EQ(decoded->chunk_z, 3);
+    EXPECT_TRUE(decoded->compressed_bytes.empty());
+}
+
+TEST(ReplicationProtocol, ChunkDataRejectsTruncatedPayload) {
+    auto bytes = encode_chunk_data({1, 2, 3, {9, 9}});
+    bytes.resize(12);  // shorter than the 13-byte type+coords header
+    EXPECT_EQ(decode_chunk_data(bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, ChunkDataRejectsWrongMessageType) {
+    EXPECT_EQ(decode_chunk_data(encode_welcome({1, 1})), std::nullopt);
+}
+
+TEST(ReplicationProtocol, ChunkDataFragmentRoundTrips) {
+    const std::vector<lcu::u8> fragment_bytes = {0, 1, 0, 0, 0, 2, 10, 20};
+    const auto wire_bytes = encode_chunk_data_fragment(fragment_bytes);
+    EXPECT_EQ(peek_type(wire_bytes), MessageType::ChunkDataFragment);
+    const auto decoded = decode_chunk_data_fragment(wire_bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded, fragment_bytes);
+}
+
+TEST(ReplicationProtocol, ChunkDataFragmentRejectsWrongMessageType) {
+    EXPECT_EQ(decode_chunk_data_fragment(encode_welcome({1, 1})), std::nullopt);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRoundTrips) {
+    const InventoryUpdate sent{1, 42};
+    const auto decoded = decode_inventory_update(encode_inventory_update(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->item_id, 1u);
+    EXPECT_EQ(decoded->count, 42u);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRoundTripsWithZeroCount) {
+    const InventoryUpdate sent{7, 0};
+    const auto decoded = decode_inventory_update(encode_inventory_update(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->item_id, 7u);
+    EXPECT_EQ(decoded->count, 0u);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRejectsTruncatedPayload) {
+    auto bytes = encode_inventory_update({1, 42});
+    bytes.resize(bytes.size() - 1);
+    EXPECT_EQ(decode_inventory_update(bytes), std::nullopt);
+}
+
+TEST(ReplicationProtocol, InventoryUpdateRejectsWrongMessageType) {
+    EXPECT_EQ(decode_inventory_update(encode_welcome({1, 1})), std::nullopt);
+}
+
+TEST(ReplicationProtocol, PeekTypeIdentifiesInventoryUpdate) {
+    EXPECT_EQ(peek_type(encode_inventory_update({1, 1})), MessageType::InventoryUpdate);
+}

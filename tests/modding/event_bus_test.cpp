@@ -104,5 +104,52 @@ TEST(EventBus, ErroringHandlerDoesNotStopRemainingSubscribers) {
     ASSERT_TRUE(lua.run_string("assert(second_ran == true)"));
 }
 
+// item_crafted (Phase 23) - the second real event, added to prove the
+// register->load->subscribe->emit loop generalizes beyond
+// "block_broken" alone, not just that a second typed emit method
+// compiles.
+
+TEST(EventBus, EmitItemCraftedCallsSubscribedHandlerWithCorrectArguments) {
+    scripting::LuaState lua;
+    EventBus bus(lua);
+    bus.expose_to_lua();
+
+    ASSERT_TRUE(lua.run_string(R"(
+        last_item_id, last_count = nil, nil
+        lcu.subscribe("item_crafted", function(item_id, count)
+            last_item_id, last_count = item_id, count
+        end)
+    )"));
+
+    bus.emit_item_crafted(7, 3);
+
+    ASSERT_TRUE(lua.run_string(R"(
+        assert(last_item_id == 7)
+        assert(last_count == 3)
+    )"));
+}
+
+TEST(EventBus, EmitItemCraftedWithNoSubscribersDoesNotCrash) {
+    scripting::LuaState lua;
+    EventBus bus(lua);
+    bus.expose_to_lua();
+    bus.emit_item_crafted(1, 1);
+}
+
+TEST(EventBus, BlockBrokenAndItemCraftedSubscribersAreTrackedIndependently) {
+    scripting::LuaState lua;
+    EventBus bus(lua);
+    bus.expose_to_lua();
+
+    ASSERT_TRUE(lua.run_string(R"(
+        lcu.subscribe("block_broken", function(x, y, z, id) end)
+        lcu.subscribe("item_crafted", function(item_id, count) end)
+        lcu.subscribe("item_crafted", function(item_id, count) end)
+    )"));
+
+    EXPECT_EQ(bus.subscriber_count("block_broken"), 1u);
+    EXPECT_EQ(bus.subscriber_count("item_crafted"), 2u);
+}
+
 }  // namespace
 }  // namespace lcu::modding

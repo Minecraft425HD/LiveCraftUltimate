@@ -11,10 +11,14 @@ namespace lcu::rendering {
 // Maps the currently active bgfx renderer (bgfx::getRendererType(),
 // valid only after Renderer::init()) to the profile subdirectory
 // bgfx_compile_shaders() (see client/CMakeLists.txt) writes shaders to:
-// "spirv" for Vulkan, "glsl" for desktop OpenGL, "essl" for OpenGL ES.
-// Falls back to "glsl" for any renderer this build doesn't compile a
-// shader profile for (including Noop - it never actually samples the
-// shader bytecode, so the choice is arbitrary there).
+// "spirv" for Vulkan, "glsl" for desktop OpenGL, "essl" for OpenGL ES,
+// "metal" for Metal (bgfx's default/preferred backend on macOS/iOS -
+// bgfx_compile_shaders() already compiles this profile automatically
+// on an APPLE host with no PROFILES override, see bgfxToolUtils.cmake
+// and DECISIONS.md "Phase 25"). Falls back to "glsl" for any renderer
+// this build doesn't compile a shader profile for (including Noop - it
+// never actually samples the shader bytecode, so the choice is
+// arbitrary there).
 std::string active_shader_profile_dir();
 
 // Reads a compiled .bin shader (shaderc output) from `path` and creates

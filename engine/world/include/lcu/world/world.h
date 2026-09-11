@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <vector>
 
 #include "lcu/core/types.h"
 #include "lcu/voxel/chunk.h"
@@ -77,6 +78,13 @@ class World : public NonCopyable {
     void update_streaming(voxel::ChunkCoord center, u32 load_radius, u32 unload_radius);
 
     usize loaded_chunk_count() const { return chunks_.size(); }
+
+    // Every currently-loaded (state >= Generated) chunk's coordinate, in
+    // unspecified order. Real consumer: VoxelServer enumerates this to
+    // send a newly-connecting client a full chunk snapshot (see
+    // NETWORKING.md "Chunk network streaming") - not needed before that,
+    // since nothing else needs to walk every loaded chunk at once.
+    std::vector<voxel::ChunkCoord> loaded_chunk_coords() const;
 
    private:
     struct ChunkEntry {

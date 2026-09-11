@@ -32,4 +32,9 @@ lcu::f32 DayNightCycle::sky_light_scale() const {
     return kNightSkyLightFraction + raw * (1.0f - kNightSkyLightFraction);
 }
 
+lcu::math::Vec3 sun_direction(lcu::f32 time_of_day) {
+    const lcu::f32 angle = time_of_day * 2.0f * kPi;
+    return lcu::math::Vec3{std::cos(angle), std::sin(angle), 0.0f};
+}
+
 }  // namespace game::systems

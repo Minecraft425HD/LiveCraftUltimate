@@ -17,9 +17,15 @@ constexpr u8 kColorWhiteOnBlack = 0x0f;
 constexpr u8 kColorYellowOnBlack = 0x0e;
 }  // namespace
 
-void draw_debug_overlay(rendering::Renderer& renderer, u32 screen_width, u32 screen_height, f32 fps) {
+void draw_debug_overlay(rendering::Renderer& renderer, u32 screen_width, u32 screen_height, f32 fps,
+                         const DebugOverlayStats& stats) {
     renderer.clear_debug_text();
     renderer.draw_debug_text(0, 0, kColorWhiteOnBlack, "fps=" + std::to_string(static_cast<int>(fps)));
+    renderer.draw_debug_text(0, 1, kColorWhiteOnBlack,
+                              "chunks=" + std::to_string(stats.chunks_loaded) +
+                                  " entities=" + std::to_string(stats.entity_count) +
+                                  " draws=" + std::to_string(stats.draw_calls) +
+                                  " jobs=" + std::to_string(stats.unfinished_jobs));
 
     for (const platform::TouchButtonRect& button : platform::kTouchButtonLayout) {
         const auto center_x = static_cast<u32>((button.x0 + button.x1) * 0.5f * static_cast<f32>(screen_width));

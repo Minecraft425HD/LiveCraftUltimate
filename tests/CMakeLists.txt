@@ -21,14 +21,17 @@ add_executable(VoxelTests
     items/recipe_registry_test.cpp
     ecs/registry_test.cpp
     lighting/propagation_test.cpp
+    lighting/world_light_test.cpp
     game/systems/ai_wander_system_test.cpp
     game/systems/day_night_cycle_test.cpp
     game/systems/replication_protocol_test.cpp
+    game/items/block_item_mapping_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp
     network/connection_test.cpp
     network/udp_socket_test.cpp
     network/loopback_integration_test.cpp
+    network/fragmentation_test.cpp
     replication/position_interpolator_test.cpp
     replication/prediction_buffer_test.cpp
 )

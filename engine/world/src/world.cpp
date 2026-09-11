@@ -82,6 +82,17 @@ voxel::Chunk* World::chunk_at_mutable(voxel::ChunkCoord coord) {
 
 void World::unload_chunk(voxel::ChunkCoord coord) { chunks_.erase(coord); }
 
+std::vector<voxel::ChunkCoord> World::loaded_chunk_coords() const {
+    std::vector<voxel::ChunkCoord> coords;
+    coords.reserve(chunks_.size());
+    for (const auto& [coord, entry] : chunks_) {
+        if (entry.state >= ChunkLifecycleState::Generated) {
+            coords.push_back(coord);
+        }
+    }
+    return coords;
+}
+
 void World::update_streaming(voxel::ChunkCoord center, u32 load_radius, u32 unload_radius) {
     LCU_ASSERT(unload_radius >= load_radius);
 

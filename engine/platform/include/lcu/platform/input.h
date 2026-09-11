@@ -30,6 +30,17 @@ enum class Action : u8 {
     LookLeft,
     LookRight,
     PlaceBlock,
+    // Advances which item-backed block PlaceBlock places next (Phase 21) -
+    // a plain index cycle through a fixed list, not a real hotbar UI (no
+    // on-screen slot rendering/selection highlight exists yet - see
+    // DECISIONS.md). A real, usable interim control scheme, same spirit as
+    // LookUp/Down/Left/Right standing in for mouse-look above.
+    CycleHotbar,
+    // Attempts a quick-craft against RecipeRegistry using one of each
+    // distinct item type currently held (Phase 23) - a real, minimal
+    // crafting trigger, not a graphical crafting-grid UI (no way to
+    // arrange items into specific cells exists yet - see DECISIONS.md).
+    Craft,
     Count,
 };
 

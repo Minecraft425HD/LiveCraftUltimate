@@ -91,7 +91,7 @@ control yet".
 `engine/network` itself has no opinion on what a payload *means* - that
 framing lives in `game::systems::protocol` (`replication_protocol.h`/
 `.cpp`), shared by `VoxelClient` and `VoxelServer` so they can't
-independently drift out of sync. All five messages are a one-byte type
+independently drift out of sync. All ten messages are a one-byte type
 tag followed by fixed big-endian fields (hand-rolled, not a generic
 serialization framework - see DECISIONS.md):
 
@@ -114,6 +114,388 @@ serialization framework - see DECISIONS.md):
   The server's authoritative position for that client's player as of the
   last `PlayerInput` it actually applied - sent every
   `kCorrectionIntervalTicks` (4) ticks, not every tick.
+- **BlockAction** (`type=5`, client->server, sent ReliableOrdered):
+  `[action: u8][x, y, z: 3×i64][block_id: u16]`. A requested break
+  (`action=0`) or place (`action=1`) - a request, not a fact; see "Block
+  edit replication" below for how the server validates it. `block_id` is
+  only meaningful for a place request.
+- **BlockChange** (`type=6`, server->client, broadcast to every
+  connected client, sent ReliableOrdered): `[x, y, z: 3×i64][block_id:
+  u16]`. The server's authoritative result of an *applied* edit -
+  `block_id` is `kAirBlockId` (0) for a break, the placed id for a
+  place. Never sent for a rejected request.
+- **ChunkData** (`type=7`, server->client): `[chunk_x, chunk_y, chunk_z:
+  3×i32][compressed_bytes...]` - a full chunk snapshot, `compressed_bytes`
+  being exactly what `lcu::serialization::serialize_chunk_to_bytes`
+  produces. Logical only: never sent directly (a compressed chunk is
+  typically bigger than one UDP datagram) - always fragmented first, see
+  the next entry and "Chunk network streaming" below.
+- **ChunkDataFragment** (`type=8`, server->client, sent ReliableOrdered):
+  `[fragment: message_id: u16, fragment_index: u16, fragment_count: u16,
+  data...]` - one piece of a `lcu::network::fragment_payload`-split
+  `ChunkData` message. The receiver's `FragmentReassembler` accumulates
+  fragments by `message_id` and hands the reassembled bytes to
+  `decode_chunk_data` once every piece has arrived.
+- **InventoryUpdate** (`type=9`, server->one client, sent
+  ReliableOrdered): `[item_id: u16][count: u32]`. That client's
+  authoritative count for one item, sent after every `BlockAction` that
+  could have affected it - see "Server-side inventory" below.
+
+## Block edit replication (Phase 13)
+
+Server-authoritative, following the same principle as player movement
+(brief section 8): a client's break/place is a *request*
+(`BlockAction`), not an immediate local mutation. The server validates
+it against its own `World` and `BlockRegistry`:
+
+- the target's chunk must be loaded on the server;
+- a break must target a non-air block; a place must target an air block
+  and name a `block_id` that's actually registered (`< BlockRegistry::
+  count()`);
+- the target must be within `kMaxBlockActionRange` (10 blocks) of that
+  client's own server-known player position (`ClientState::player`) -
+  brief section 20's "never blindly trust client data": without this, a
+  malicious client could edit any loaded coordinate regardless of where
+  its player actually is.
+
+A rejected request is logged (`LCU_LOG_WARN`) and otherwise silently
+dropped - no rejection message is sent back, so the requester's own
+`World` simply never changes for that request (see "What's deferred"
+below for what this doesn't cover). A validated request is applied to
+the server's `World` immediately and broadcast as `BlockChange` to
+*every* connected client, including the requester itself - unlike
+`PlayerInput`/`PlayerCorrection`, a client never mutates its own `World`
+for a block edit speculatively; it waits for its own `BlockChange` to
+come back over the wire, same as any other client would (see
+DECISIONS.md "block edits are not client-predicted").
+
+Item pickup/consumption still fires client-side, optimistically, the
+moment `VoxelClient` *sends* a break/place `BlockAction` (not when the
+`BlockChange` confirming it arrives, since every client receives every
+`BlockChange`, including edits other players made, and has no way to
+tell "was this my own edit" from the message alone) - unchanged from
+when this was written. What changed in Phase 15: that optimistic guess
+is no longer the only bookkeeping - `VoxelServer` now keeps its own
+authoritative count per client and corrects the client's guess via
+`InventoryUpdate` whenever they disagree, including on a rejected
+request. See "Server-side inventory" below.
+
+Verified via a real three-process run (one `VoxelServer`, two
+`VoxelClient`s - one performing a synthetic break-then-place via
+`LCU_VERIFY_BREAK_PLACE`, the other purely observing): the server logs
+`Applied BlockAction from <addr>: (0,28,-1) 1 -> 0` then `... (0,29,-1)
+0 -> 1`; the acting client logs the item pickup/consumption and `Applied
+server BlockChange` for both edits; the *observing* client - which
+never touched either block itself - independently logs the identical
+`Applied server BlockChange` lines, confirming its `World` actually
+converged to match the other two processes', not just that a message
+arrived (see BUILD_STATUS.md for the exact reproduce steps).
+
+## Chunk network streaming (Phase 14)
+
+Right after `Welcome` and the `block_change_history` replay, `VoxelServer`
+sends a newly-connecting client every chunk it currently has loaded
+(`World::loaded_chunk_coords()`), as `ChunkData` - not because the client
+can't generate matching terrain on its own (it independently regenerates
+the same deterministic terrain from the same compile-time `kWorldSeed`,
+and usually does end up identical), but because the server is the
+*authoritative* source of world state (brief section 19) and the client
+should receive that state, not merely happen to agree with it. Each
+chunk's already-tested compression path
+(`lcu::serialization::serialize_chunk_to_bytes` - the same in-memory
+primitive `save_chunk_to_file` now wraps) produces the compressed bytes;
+`lcu::network::fragment_payload` splits the encoded `ChunkData` message
+into `kMaxFragmentDataSize` (1024-byte) pieces, each wrapped as a
+`ChunkDataFragment` and sent `ReliableOrdered`; the client's single
+`lcu::network::FragmentReassembler` reassembles them (tolerating
+out-of-order/duplicate delivery, though `ReliableOrdered` already
+guarantees in-order arrival here) and, once complete, decodes the
+`ChunkData` and applies it: `lcu::serialization::deserialize_chunk_from_bytes`
+into a scratch `Chunk`, a full overwrite of the client's local chunk at
+that coordinate (`*target = server_chunk`), then a full relight
+(`compute_block_light`+`compute_sky_light`, the same pass used for a
+freshly-generated chunk) and a remesh of that chunk plus all six of its
+axis-adjacent neighbors (any boundary block could have changed).
+
+Verified via real two-process runs: a `mobile_low`-profile run (one
+1-chunk world) logs `Sent 1 chunk(s) (1 fragment(s))` server-side and
+`Applied server ChunkData for chunk (0, 1, 0)` client-side; a
+`desktop`-profile run (36 loaded chunks) logs `Sent 36 chunk(s) (36
+fragment(s))` and exactly 36 matching `Applied server ChunkData` lines
+client-side with zero warnings/errors - confirming both the common
+single-fragment-per-chunk case and that the full loaded world, not just
+one chunk, streams and applies correctly.
+
+**Known simplifications** (see DECISIONS.md): this is a one-shot full
+sync sent once on connect, not interest-managed by distance (unlike
+`kInterestRadius` for entities - every currently-loaded server chunk is
+sent regardless of where the connecting client's player actually is) and
+not re-sent as the client (or server) streams new chunks in after that
+point. Both loaded worlds are small enough in this vertical slice
+(`radius_xz` ≤ 1) for the gap not to matter yet; a real persistent-world
+server would need per-chunk streaming keyed to the client's own
+`update_streaming` calls, not a single dump at connect time.
+
+## Per-movement chunk streaming (Phase 16)
+
+Phase 14's `ChunkData` sync only ever ran once, right after connect -
+honestly documented there as a known gap ("not re-streamed as either
+side's loaded-chunk set changes afterward"). This phase closes it.
+`VoxelServer` now re-checks
+every connected client's loaded-chunk range on every tick: converts
+that client's current, server-known player position
+(`ClientState::player.aabb.center()`) to a chunk coordinate
+(`chunk_coord_of_position`), and - only when that differs from
+`ClientState::last_streamed_center` (a per-client "last checked at"
+cache, so a stationary or vertically-only-moving client costs nothing
+extra) - loads any not-yet-loaded chunk in `load_settings.radius_xz`/
+`min_chunk_y`/`max_chunk_y` around it, exactly like the startup load
+loop. Any chunk that transitions from Unloaded this tick is broadcast
+as `ChunkData` (fragmented, same as the connect-time sync) to *every*
+connected client, not just the one whose movement triggered it - anyone
+already connected is equally missing a chunk that didn't exist a moment
+ago.
+
+**The server's shared `World` only ever grows, never shrinks** - a
+deliberate simplification (see DECISIONS.md "server-side chunk
+streaming never unloads"): `World` is one instance shared across every
+connected client, so unloading a chunk because *one* client moved away
+from it could break a *different* client that's still standing in it.
+Real per-client interest-scoped unloading would need either a
+per-client "what have I actually sent this client" set or per-client
+`World` instances - both real architecture changes deferred until
+something (a long-running server's memory footprint, say) actually
+needs them, not built speculatively now.
+
+`VoxelClient` runs the mirror-image local half unconditionally
+(single-player and networked alike): the same generate-then-light-then-
+mesh sequence the initial spawn-area load already runs, triggered only
+when the player's own chunk coordinate changes since it was last
+checked - so a locally-generated placeholder chunk exists to fill in
+before any server `ChunkData` for that new coordinate could possibly
+arrive. The `ChunkDataFragment` handler (Phase 14) also gained a small
+but real fix for this phase: a `ChunkData` for a coordinate the client
+hasn't locally streamed to yet (a different client's movement grew the
+server's world past this client's own bounds, or this client's local
+trigger simply hasn't fired yet this frame) now calls `world.load_chunk`
+to create a real slot before overwriting it, instead of the old
+"isn't loaded locally, ignoring" silent drop - a genuine gap Phase 14's
+scope (a fixed, initial-sync-only region) never actually exercised.
+
+Verified via two real multi-process runs. Two-process: a `mobile_low`
+client held `MoveForward` for 6 real seconds (`LCU_VERIFY_MOVE_SECONDS`,
+a new headless verification hook - frame-count-indexed hooks don't work
+here since the main loop is unthrottled and how far a fixed frame count
+travels depends on real elapsed time, not frame count) - enough to
+cross the 16-block chunk boundary at `kMoveSpeed`; the server logs
+`Streamed 1 newly-loaded chunk(s) into range (total 2 loaded)` and the
+client logs `Applied server ChunkData for chunk (0, 1, -1)`, zero
+warnings/errors. Three-process: the same moving client alongside a
+second, entirely stationary client that never sent a single
+`PlayerInput` with nonzero movement - that stationary client's own log
+shows the identical `Applied server ChunkData for chunk (0, 1, -1)`
+line, proving the broadcast-to-every-connected-client path (not just
+the triggering client) actually works, not just that a message decoded.
+
+**Known simplification:** still no interest-managed unloading (see
+above); a client's own local streaming and the server's are two
+independent triggers that usually agree (same radius, same movement)
+but aren't literally synchronized - a client could in principle stream
+a coordinate locally a frame or two before or after the server's own
+broadcast for it arrives, resolved by whichever happens second simply
+overwriting (idempotent, not a race that corrupts anything, just
+occasionally-redundant work).
+
+## Interest-scoped chunk unloading, real chunk persistence, and disconnect detection (Phase 20)
+
+Three real gaps closed together, because the first genuinely required
+the second, and both benefited from the third being real too.
+
+**Real disconnect detection.** UDP has no notion of a connection, so
+until now `VoxelServer` never removed a `ClientState` once created - a
+peer that vanished (process killed, network dropped) stayed in
+`clients` forever, along with everything keyed off it, for the rest of
+the server's life. `ClientState::last_packet_time` is now updated on
+every packet received from that address; each tick, before anything
+else reasons about who's connected, any client idle longer than
+`kClientTimeoutSeconds` (5.0s - aggressive for this vertical slice's
+own test turnaround, not tuned against real jitter/loss data; a real
+client sends `PlayerInput` every single unthrottled frame while
+networked, so a genuinely-connected client's last packet is always a
+tiny fraction of a second old) is pruned and logged. Verified via a
+real run: a client that disconnects quickly (its own `LCU_MAX_FRAMES`
+budget exhausted) while the server keeps running logs `Client
+127.0.0.1:<port> timed out after 5.0s of silence, disconnecting` at
+almost exactly the 5-second mark.
+
+**Interest-scoped chunk unloading.** Phase 16's per-movement streaming
+only ever grew the server's shared `World` (see DECISIONS.md
+"server-side chunk streaming never unloads (Phase 16)") - a real
+long-running server's loaded-chunk set (and memory) would grow without
+bound. Each `ClientState` now tracks its own `interest_set` - every
+chunk coordinate within `load_settings`' radius of wherever it last
+streamed from, recomputed in full whenever that center changes. On any
+tick where a client's interest changed (moved, connected, or was just
+pruned above), the server computes the *union* of every remaining
+client's `interest_set` and unloads any currently-loaded chunk absent
+from it - safe now that disconnect detection means a departed client's
+interest genuinely stops counting, not just conceptually. Verified via
+a real run: a client breaks a block then moves far enough to leave its
+own spawn column's far side behind - the server logs `Unloaded 12
+chunk(s) no connected client still needs (total 36 loaded)`.
+
+**Real chunk persistence.** Unloading a chunk with an edit on it and
+later regenerating it from the deterministic worldgen function would
+silently *revert* that edit the moment anyone needed the coordinate
+again - a real correctness bug, not just a missed optimization, and
+exactly the trigger `engine/serialization::chunk_serializer` had been
+missing since Phase 3 (see PROJECT_STATE.md "Known Limitations": "still
+not wired to any actual trigger in a live session"). Before unloading,
+`VoxelServer` now calls `save_chunk_to_file` to `<world>/chunks/
+<x>_<y>_<z>.chunk`; when a chunk is needed again and found `Unloaded`,
+it calls `load_chunk_from_file` first and only falls back to
+regenerating via the worldgen function if no save exists (or one exists
+but fails to load - logged, not silently swallowed). Both reuse the
+exact same, already-tested (Phase 3, 7 unit tests including a full
+4096-cell round-trip) compression/versioning/corruption-detection
+primitives `save_chunk_to_file`/`load_chunk_from_file` always provided
+- no new serialization code, only a real caller for existing code.
+
+A real newly-inserted-client bug this closed as a side effect: before
+this phase, `ClientState::last_streamed_center` was pre-set to the
+client's own spawn column at connect time, which meant the per-movement
+streaming loop's "has anything changed" check silently skipped a
+freshly-connected client's very first pass - harmless before unloading
+existed (the static startup area guaranteed everything was already
+loaded), but wrong once a client's own spawn-adjacent chunks could
+genuinely have been unloaded by someone else's departure before they
+connected. `last_streamed_center` is now `std::optional` and left unset
+at connect time specifically so the very first movement-loop pass for
+that client always runs the real load-or-reload-from-disk logic, not
+"no change, skip."
+
+Verified via a real chained two-client run in one continuous server
+session (session-scoped only - see "Known simplification" below): a
+first client breaks a block then moves far enough to trigger the
+`Unloaded 12 chunk(s)...` eviction above (writing 12 real files to
+`<world>/chunks/`); a second, freshly-connecting client - needing that
+same column as part of its own default connect-time area - receives
+`Applied server ChunkData` for exactly those same 12 coordinates with
+zero warnings or errors, proving the evicted-and-saved chunks were
+found and reloaded rather than silently absent or regenerated from
+scratch (a `Reloaded chunk (x,y,z) from disk` server-side log line
+fires on this same path, confirmed in isolation - not captured
+alongside the above in the same run because this test's own script
+killed the server rather than letting `LCU_MAX_TICKS` end it naturally,
+losing its buffered stdout, the exact "unflushed stdio lost on kill"
+methodology pitfall BUILD_STATUS.md already documents for Phase 13 -
+worth repeating here since it bit this verification too).
+
+**Known simplification:** persistence is scoped to *this server
+process's own session* only - the initial static startup area never
+consults `<world>/chunks/` (regenerates unconditionally every time), so
+restarting the server process does not resume a previous session's
+edits. Real cross-restart persistence (loading the startup area from
+disk too, when a save exists) is separate future work, not attempted
+here (see DECISIONS.md). `kClientTimeoutSeconds` (5.0s) is also
+untuned against real network conditions - see its own doc comment.
+
+**A real, if narrow, networking behavior surfaced while stress-testing
+this feature, not fixed here:** sustaining a single client's `MoveForward`
+for tens of real seconds (`LCU_VERIFY_MOVE_SECONDS`) sometimes stops
+producing further server-side displacement after the first one or two
+chunk-boundary crossings, well before the intended distance, even
+though the client process keeps running and sending input. The
+suspected cause is `PlayerInput`'s `UnreliableSequenced` channel: this
+test client sends it every single *unthrottled* frame (hundreds of
+thousands per second sustained - see BUILD_STATUS.md), and
+`sequence_greater_than`'s wraparound-safe `u16` comparison is only
+correct when compared sequences differ by less than half the range
+(32768); at this packet rate the counter can wrap multiple times
+between whichever packets the OS receive buffer/server tick actually
+manages to process, which could make the "is this newer" comparison
+land on the wrong side and start discarding every subsequent update as
+stale. Not confirmed by reading the code (a real fix needs that
+confirmation first, brief section 30's "root cause before fix" - this
+is a real product code path, not literally unbounded and out of scope,
+but not the goal of this phase), and not something a real player's
+actual (frame-rate-capped, human-timed) input could ever trigger - see
+PROJECT_STATE.md "Known Limitations".
+
+## Server-side inventory (Phase 15, extended Phase 19)
+
+`VoxelServer` now holds a real, authoritative `lcu::items::Inventory`
+(9 slots, matching `VoxelClient`'s own) per connected client
+(`ClientState::inventory`), populated only by validated `BlockAction`s -
+never by anything the client sends directly. Registers the same three
+items `VoxelClient` does - `game:stone`, `game:grass`, `game:dirt`
+(namespaced id, display name, max stack size all identical, same
+registration order on both sides) - so their `ItemId`s coincide by
+construction, the same simplification block/item ids already carry for
+mod content. `item_for_block` is the direct 1:1 block->item lookup both
+`handle_block_action` and the validity check below share (returns
+`kNoItemId` for anything else, mod content included).
+
+`handle_block_action` does two things with it:
+
+- **Placing an item-backed block requires the client to actually hold
+  one, server-side** - a new validity condition alongside the existing
+  chunk-loaded/target-state checks: `item_for_block(action.block_id)`
+  resolving to a real item the client's inventory count is zero for is
+  rejected exactly like any other invalid request. A block with no item
+  mapping (mod content, say) isn't gated - there's still no general
+  block->item mapping infrastructure, just this one direct lookup (see
+  DECISIONS.md). In practice only `game:stone` is ever placed today (no
+  hotbar/item-selection UI exists to place anything else), but the
+  check itself is general.
+- **A successful break of an item-backed block adds one to the
+  requester's server-side inventory; a successful place of one removes
+  one** - the server's own bookkeeping, driven by what it actually just
+  applied to its `World`, not by anything the client claimed. Covers
+  all three tracked items identically (stone/grass/dirt), not a
+  stone-only special case anymore (Phase 19).
+
+After *every* `BlockAction` - accepted or rejected, at any of the four
+possible rejection points or after a successful apply - `VoxelServer`
+sends that one client an `InventoryUpdate` for **every** tracked item
+(`tracked_items = {stone_item_id, grass_item_id, dirt_item_id}`), not
+just whichever one the request happened to touch - so a stale
+optimistic guess for an unrelated tracked item (e.g. from an
+out-of-order earlier request) also eventually gets corrected.
+`VoxelClient` still fires its own optimistic pickup/consumption at
+request-send time (unchanged since Phase 13/18 - see DECISIONS.md), but
+reconciles it against every `InventoryUpdate` it receives (already a
+generic `item_id`-keyed handler, needed no changes for this extension),
+the same pattern `PlayerCorrection` already uses for movement: compute
+the delta between the optimistic local count and the server's
+authoritative one, `add_item`/`remove_item` to close it, and log only
+when they actually disagreed. This closes the Phase 13 "no rejection
+feedback, no refund" gap for all three tracked items now, not just
+`game:stone`.
+
+Verified via a real two-process run (one `VoxelServer`, one
+`VoxelClient` via `LCU_VERIFY_BREAK_PLACE`): the client spawns standing
+on a grass surface block (Phase 17's layering), and the full round trip
+converges correctly - server logs `Applied BlockAction ...: (0,28,-1) 2
+-> 0` (block id 2 = `game:grass`), client logs `Requesting break`,
+`Picked up 1 game:grass (inventory: 1)`, then `Applied server
+BlockChange ... block_id=0`, zero warnings/errors - confirming
+`item_for_block`'s grass mapping, the server's `add_item` call, and the
+3-item `send_inventory_updates` broadcast all execute correctly end to
+end (no visible `Reconciled` line here specifically means the
+optimistic guess and the server's outcome already agreed - the earlier
+Phase 15 run already proved the disagree-then-correct path fires
+correctly for the identical, now-generalized mechanism).
+
+**Known simplification:** only stone/grass/dirt are inventory-backed;
+there's still no general, data-driven block-id-to-item-id mapping (three
+explicit `if` checks in `item_for_block`, not configuration), so any
+other registered block (mod content) can still be placed without an
+item check. A malicious client also can't fabricate items it doesn't
+hold (the server never trusts a client-reported count for anything),
+but there's still no persistence - a server-side inventory is entirely
+in-memory for the connection's lifetime, lost on disconnect, same as
+every other per-client server state today.
 
 ## Client-side prediction + reconciliation (Phase 8)
 
@@ -195,27 +577,58 @@ and a real two-process run connects an actual `VoxelClient` to an actual
 `VoxelServer` over real loopback UDP and confirms the full loop - Welcome
 received, `EntityState` positions rendered through real interpolation,
 `PlayerInput` sent and a `PlayerCorrection` received and reconciled
-against - not simulated, not mocked (see BUILD_STATUS.md for the exact
-reproduce steps).
+against - not simulated, not mocked. A real *three*-process run (Phase
+13) additionally confirms block edit replication actually converges two
+independent clients' worlds, not just that a message decodes correctly -
+see "Block edit replication" above. Real two-process runs (Phase 14)
+confirm chunk network streaming end-to-end at both a 1-chunk and a
+36-chunk scale - see "Chunk network streaming" above. A real two-process
+run (Phase 15) confirms server-side inventory reconciliation - the
+client's optimistic guess and the server's authoritative count actually
+converge after each round trip, not just that a message decoded - see
+"Server-side inventory" above. Real two-process and three-process runs
+(Phase 16) confirm per-movement chunk streaming: a client whose real,
+server-simulated position crosses a chunk boundary triggers a genuinely
+new chunk being streamed to it, and a second, entirely stationary
+client independently receives the same broadcast - see "Per-movement
+chunk streaming" above. A real two-process run (Phase 19) confirms the
+same server-side inventory mechanism now covers `game:grass`/
+`game:dirt`, not just `game:stone` - see "Server-side inventory" above.
+Real runs (Phase 20) confirm disconnect detection (a client that goes
+silent is pruned at almost exactly `kClientTimeoutSeconds`), interest-
+scoped unloading (`Unloaded 12 chunk(s)...` after a client moves away),
+and real chunk persistence (a second, freshly-connecting client
+receives the exact same 12 previously-evicted chunk coordinates,
+proving they were found and reloaded, not silently lost) - see
+"Interest-scoped chunk unloading, real chunk persistence, and
+disconnect detection" above (see BUILD_STATUS.md for the exact
+reproduce steps for all of the above).
 
 **Not verified**: behavior over a real (non-loopback) network with real
-latency/jitter/loss patterns, NAT traversal, IPv6, more than one
-simultaneous client, or any load beyond a handful of connections and
-messages.
+latency/jitter/loss patterns, NAT traversal, IPv6, or any load beyond a
+handful of connections and messages. Two simultaneous clients *are* now
+verified (the block-replication three-process run above), a step up
+from earlier phases' single-client-only verification.
 
 ## What's deferred
 
-- **Chunk network streaming + compression.** `engine/serialization::
-  chunk_serializer` already produces zstd-compressed chunk bytes (Phase
-  3), but a compressed chunk (a few KB) doesn't fit in one
-  `kMaxDatagramSize` (1200-byte) UDP datagram - sending it over
-  `engine/network` as-is would need message fragmentation (splitting one
-  logical message across multiple datagrams and reassembling them
-  in order), which doesn't exist in `Connection` yet. Both clients
-  currently generate their own local copy of the world from the same
-  hardcoded seed instead of receiving it from the server - see the next
-  entry, and DECISIONS.md "chunk streaming deferred: fragmentation
-  prerequisite".
+- ~~Chunk network streaming + compression~~ **Fixed** (Phase 14):
+  `lcu::network::fragment_payload`/`FragmentReassembler` now split a
+  compressed chunk (produced by `lcu::serialization::
+  serialize_chunk_to_bytes`) across multiple `ChunkDataFragment`
+  datagrams and reassemble them - see "Chunk network streaming" above.
+- ~~Chunk streaming is a one-shot full sync on connect only, not
+  per-movement~~ **Fixed** (Phase 16): `VoxelServer` now re-checks every
+  connected client's loaded-chunk range every tick and streams/
+  broadcasts anything newly in range - see "Per-movement chunk
+  streaming" above. ~~Still not interest-managed by distance in the
+  sense of ever *unloading* anything - the shared `World` only grows~~
+  **Fixed** (Phase 20): the server now tracks each client's real
+  interest set, unloads (and saves to disk first) any chunk no
+  connected client still needs, and reloads from disk instead of
+  regenerating if a client's interest returns to that chunk later - see
+  "Interest-scoped chunk unloading, real chunk persistence, and
+  disconnect detection" above.
 - **The client doesn't actually use the server's Welcome `world_seed`**
   to generate its world - it logs the received value (confirming the
   message round-trips correctly) but still calls its own compile-time
@@ -224,11 +637,47 @@ messages.
   isn't currently observable as a mismatch - using the server's seed for
   real needs world generation deferred until after Welcome arrives, a
   bigger structural change than this phase's scope. See DECISIONS.md.
-- **Block edits aren't replicated at all.** Break/place still only
-  mutates the connected client's own local `World` - not sent to the
-  server, not seen by other clients. Needs the same reliable-message
-  machinery `PlayerInput`/`PlayerCorrection` already prove out, just not
-  wired for block edits yet.
+  Now partially moot for block *content* (not generation timing): Phase
+  14's `ChunkData` overwrites the client's locally-generated chunk with
+  the server's actual one right after connect, so even a genuinely
+  mismatched seed would self-correct for every chunk the server sends -
+  the structural gap (client briefly generates from the wrong seed
+  before that overwrite arrives) still exists, it just no longer causes
+  an observable, permanent difference.
+- ~~Block edits aren't replicated at all~~ **Fixed**: `BlockAction`
+  (client -> server, `ReliableOrdered`) / `BlockChange` (server -> all
+  clients, `ReliableOrdered`) now make block edits server-authoritative -
+  see "Block edit replication" below.
+- ~~No server-side inventory (item pickup/placement-cost is client-
+  authoritative, optimistic, and unrefunded on server rejection)~~
+  **Fixed** (Phase 15) for `game:stone` specifically: `VoxelServer` now
+  keeps a real, authoritative per-client `Inventory`, gates placing
+  `game:stone` on actually holding one server-side, and corrects the
+  client's optimistic guess via `InventoryUpdate` after every
+  `BlockAction` - see "Server-side inventory" below. Still deferred:
+  any other block/item isn't inventory-gated (no general block-id-to-
+  item-id mapping yet), and there's no persistence across a
+  disconnect/reconnect.
+- ~~No world-diff catch-up for a late-joining client~~ **Fixed**:
+  `VoxelServer` now keeps every applied `BlockChange` in order
+  (`block_change_history`) and replays the full history to a newly
+  connecting client right after its `Welcome`, before any per-tick
+  traffic - confirmed by an actual test run (a client that broke then
+  placed a block, followed later by a second client connecting only
+  after both edits had happened, still logs `Applied server BlockChange`
+  for both). Unbounded for the server process's lifetime - a real
+  long-running server needs to compact this against persisted chunk
+  state once chunk save/load has an actual server-side trigger (still
+  missing, see PROJECT_STATE.md), not keep every edit forever; fine for
+  this vertical slice's session lengths.
+- **No rejection feedback for a `BlockAction` the server refuses.** The
+  requester's own world silently stays as it was (correct), but nothing
+  tells the client *why* - no error message, no UI feedback. Combined
+  with the client-authoritative/optimistic item accounting above, a
+  rejected place request currently loses the player's item with no
+  visible explanation. Acceptable for this vertical slice (rejections
+  are rare - only a genuine race or a malicious client normally triggers
+  one); a real rejection channel is future work.
 - **RELIABLE_UNORDERED/RELIABLE_ORDERED reorder/ack-set correctness
   under sequence wraparound** (past 65536 messages on one channel) -
   `sequence_greater_than` itself handles wraparound correctly, but the

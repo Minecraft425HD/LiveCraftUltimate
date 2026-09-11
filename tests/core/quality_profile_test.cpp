@@ -5,15 +5,20 @@
 namespace lcu::core {
 namespace {
 
-TEST(QualityProfile, DesktopMatchesExistingHardcodedDefaults) {
-    // Must stay 1/0/3 - that's the exact radius/min/max this project's
-    // client/server main.cpp hardcoded before quality profiles existed
-    // (kLoadRadiusXZ/kMinChunkY/kMaxChunkY), and every prior phase's
-    // verified chunk-count claims ("Loaded 36 chunks") depend on it.
+TEST(QualityProfile, DesktopStraddlesSeaLevelWithTheSameTotalChunkCountAsBefore) {
+    // Phase 37 re-centered this around worldgen::kSeaLevel (0) - was
+    // 1/0/3 (this project's old client/server hardcoded
+    // kLoadRadiusXZ/kMinChunkY/kMaxChunkY, entirely above y=0, back
+    // when terrain itself was always positive too), now 1/-1/2: same
+    // radius, same total layer count (4), just shifted down by one
+    // chunk_y so the loaded volume actually straddles sea level
+    // instead of sitting entirely above where terrain/water can now
+    // go. "Loaded 36 chunks" (radius 1 -> 3x3=9 columns, 4 layers)
+    // still holds - the shift doesn't change the total.
     const ChunkLoadSettings settings = chunk_load_settings_for(QualityProfile::Desktop);
     EXPECT_EQ(settings.radius_xz, 1);
-    EXPECT_EQ(settings.min_chunk_y, 0);
-    EXPECT_EQ(settings.max_chunk_y, 3);
+    EXPECT_EQ(settings.min_chunk_y, -1);
+    EXPECT_EQ(settings.max_chunk_y, 2);
 }
 
 TEST(QualityProfile, MobileTiersLoadStrictlyFewerChunksThanDesktop) {

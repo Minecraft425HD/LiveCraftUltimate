@@ -1,8 +1,12 @@
 #include "lcu/lighting/propagation.h"
 
+#include <unordered_map>
+#include <unordered_set>
+
 #include <gtest/gtest.h>
 
 #include "lcu/lighting/light_storage.h"
+#include "lcu/lighting/world_light.h"
 #include "lcu/voxel/block_registry.h"
 #include "lcu/voxel/chunk.h"
 
@@ -28,6 +32,27 @@ BlockRegistry make_registry(lcu::voxel::BlockId& out_stone, lcu::voxel::BlockId&
 
     return registry;
 }
+
+// Minimal stand-in for lcu::world::World (Phase 31): a plain
+// ChunkCoord -> ChunkStorage map with a chunk_at() matching World's own
+// signature exactly (const ChunkStorage<EdgeLength>* chunk_at(coord)
+// const) - the duck-typed ChunkProviderT the cross-chunk propagation
+// functions are templated on. Real World isn't used here so these
+// tests stay focused on the propagation algorithm itself, not on
+// engine/world's own chunk lifecycle machinery.
+template <lcu::u32 EdgeLength>
+struct TestChunkProvider {
+    std::unordered_map<lcu::voxel::ChunkCoord, lcu::voxel::ChunkStorage<EdgeLength>> chunks;
+
+    void add_chunk(lcu::voxel::ChunkCoord coord, lcu::voxel::ChunkStorage<EdgeLength> chunk) {
+        chunks[coord] = std::move(chunk);
+    }
+
+    const lcu::voxel::ChunkStorage<EdgeLength>* chunk_at(lcu::voxel::ChunkCoord coord) const {
+        const auto it = chunks.find(coord);
+        return it != chunks.end() ? &it->second : nullptr;
+    }
+};
 
 }  // namespace
 
@@ -179,6 +204,205 @@ TEST(UnpropagateBlockLight, RemovingOneOfTwoSourcesRefillsFromTheRemainingOne) {
     }
 }
 
+TEST(PropagateAddedBlockLightCrossChunk, LightCrossesIntoAnAdjacentLoadedChunk) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);  // right at the +X chunk edge
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});  // neighbor loaded, all air
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+
+    // Real decay continuing across the boundary, not stopping at it.
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), emission - 1);
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(1, 8, 8), emission - 2);
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(2, 8, 8), emission - 3);
+}
+
+TEST(PropagateAddedBlockLightCrossChunk, DoesNotCrossIntoAnUnloadedNeighborChunk) {
+    // Honesty guarantee (see WorldLight's own doc comment): an unloaded
+    // neighbor is never written to, not guessed at - has_chunk_light
+    // must stay false for it, same as before this source ever existed.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    // {1, 0, 0} deliberately never added - not loaded.
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+
+    EXPECT_FALSE(world_light.has_chunk_light({1, 0, 0}));
+}
+
+TEST(UnpropagateBlockLightCrossChunk, RemovingACrossChunkSourceDarkensBothChunks) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+    ASSERT_GT(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), 0u);
+
+    // Torch removed from the origin chunk's own block data, then retract.
+    provider.add_chunk({0, 0, 0}, Chunk{});
+    lcu::lighting::unpropagate_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                        Chunk::kEdgeLength - 1, 8, 8, emission);
+
+    EXPECT_EQ(world_light.chunk_light({0, 0, 0}).block_light(Chunk::kEdgeLength - 1, 8, 8), 0u);
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), 0u);
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(1, 8, 8), 0u);
+}
+
+TEST(UnpropagateBlockLightCrossChunk, RemovingOneOfTwoCrossChunkSourcesRefillsFromTheRemainingOne) {
+    // Cross-chunk analog of UnpropagateBlockLight.RemovingOneOfTwo
+    // SourcesRefillsFromTheRemainingOne: one torch on each side of the
+    // boundary: removing the origin-chunk torch must correctly refill
+    // the overlap from the neighbor-chunk torch's own light, not leave
+    // a dark gap.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    Chunk neighbor_chunk;
+    neighbor_chunk.set_block(0, 8, 8, torch);
+    provider.add_chunk({1, 0, 0}, neighbor_chunk);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+    world_light.chunk_light({1, 0, 0}).set_block_light(0, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {1, 0, 0}, 0, 8, 8);
+
+    // Remove the origin-chunk torch only.
+    provider.add_chunk({0, 0, 0}, Chunk{});
+    lcu::lighting::unpropagate_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                        Chunk::kEdgeLength - 1, 8, 8, emission);
+
+    // The neighbor chunk's own torch is untouched and still lights its
+    // own cell at full emission - the refill phase must not have
+    // wrongly darkened a source that was never part of the retracted
+    // BFS tree.
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), emission);
+    // The origin chunk's edge cell, one step from the neighbor's torch,
+    // should be refilled to emission-1 by the neighbor's own light
+    // flowing back across the boundary - not left dark.
+    EXPECT_EQ(world_light.chunk_light({0, 0, 0}).block_light(Chunk::kEdgeLength - 1, 8, 8), emission - 1);
+}
+
+TEST(PropagateAddedBlockLightCrossChunk, TouchedChunksReportsTheRealNeighborLightActuallyReached) {
+    // Phase 33: the real answer to "which chunks besides the edited one
+    // need remeshing" - not a guessed fixed radius.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8, &touched);
+
+    EXPECT_EQ(touched.size(), 1u);
+    EXPECT_TRUE(touched.count({1, 0, 0}));
+    // The origin chunk's own extent (where most of the flood actually
+    // happens) must not appear - the caller already knows to remesh
+    // the chunk it just edited, this is purely the "what ELSE" answer.
+    EXPECT_FALSE(touched.count({0, 0, 0}));
+}
+
+TEST(PropagateAddedBlockLightCrossChunk, TouchedChunksStaysEmptyWhenLightNeverReachesAnyNeighbor) {
+    // A dim source (emission 2, unlike "torch"'s 14) placed dead center
+    // of a 16-wide chunk: 8 steps from the nearest face in any
+    // direction, far more than its 2-step reach - genuinely can't cross
+    // a boundary.
+    BlockRegistry registry;
+    BlockDefinition dim_light;
+    dim_light.namespaced_id = "test:glowstone_dim";
+    dim_light.is_transparent = true;
+    dim_light.light_emission = 2;
+    const auto dim = registry.register_block(dim_light);
+    const lcu::u8 emission = registry.definition_of(dim).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(8, 8, 8, dim);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(8, 8, 8, emission);
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0}, 8, 8, 8,
+                                                            &touched);
+
+    EXPECT_TRUE(touched.empty());
+}
+
+TEST(UnpropagateBlockLightCrossChunk, TouchedChunksReportsNeighborsDarkenedOrRefilled) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk origin_chunk;
+    origin_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);
+    provider.add_chunk({0, 0, 0}, origin_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    world_light.chunk_light({0, 0, 0}).set_block_light(Chunk::kEdgeLength - 1, 8, 8, emission);
+    lcu::lighting::propagate_added_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                            Chunk::kEdgeLength - 1, 8, 8);
+
+    provider.add_chunk({0, 0, 0}, Chunk{});
+    std::unordered_set<lcu::voxel::ChunkCoord> touched;
+    lcu::lighting::unpropagate_block_light_cross_chunk(provider, registry, world_light, {0, 0, 0},
+                                                        Chunk::kEdgeLength - 1, 8, 8, emission, &touched);
+
+    EXPECT_EQ(touched.size(), 1u);
+    EXPECT_TRUE(touched.count({1, 0, 0}));
+    EXPECT_FALSE(touched.count({0, 0, 0}));
+}
+
 TEST(ComputeSkyLight, OpenColumnIsFullyLitTopToBottom) {
     lcu::voxel::BlockId stone = 0;
     lcu::voxel::BlockId torch = 0;
@@ -223,6 +447,225 @@ TEST(ComputeSkyLight, AdjacentColumnsAreIndependent) {
     // DECISIONS.md): the neighboring open column is unaffected by the
     // roof one column over.
     EXPECT_EQ(light.sky_light(4, 9, 3), lcu::lighting::Light::kMaxLightLevel);
+}
+
+TEST(ComputeSkyLightCrossChunk, NoChunkAboveAssumesOpenSkySameAsSingleChunkDefault) {
+    // Phase 30: with nothing loaded above (the common "topmost loaded
+    // chunk" case), a cross-chunk column must behave identically to the
+    // original single-chunk compute_sky_light_column default.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    Chunk chunk;  // all air
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord coord{0, 0, 0};
+
+    lcu::lighting::compute_sky_light_cross_chunk(chunk, registry, world_light, coord);
+
+    for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+        EXPECT_EQ(world_light.chunk_light(coord).sky_light(3, y, 3), lcu::lighting::Light::kMaxLightLevel) << "y=" << y;
+    }
+}
+
+TEST(ComputeSkyLightCrossChunk, SolidRoofInTheChunkAboveDarkensThisChunksTopLayer) {
+    // The real bug Phase 30 fixes: a chunk with a solid roof directly
+    // above it (in the neighboring chunk) must show 0 sky light at its
+    // own top layer, not full brightness.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;
+    above_chunk.set_block(3, 0, 3, stone);  // solid floor at the bottom of the chunk above
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, Chunk::kEdgeLength - 1, 3), 0u);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 0, 3), 0u);
+    // An unrelated column (no roof above it anywhere) stays fully lit -
+    // proves the darkening is column-specific, not a whole-chunk effect.
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(4, Chunk::kEdgeLength - 1, 4),
+              lcu::lighting::Light::kMaxLightLevel);
+}
+
+TEST(ComputeSkyLightCrossChunk, OpenSkyInTheChunkAboveLeavesThisChunkFullyLit) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;  // all air
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, Chunk::kEdgeLength - 1, 3),
+              lcu::lighting::Light::kMaxLightLevel);
+}
+
+TEST(ComputeSkyLightCrossChunk, AChunksOwnRoofStillShadowsRegardlessOfWhatsAboveIt) {
+    // The chunk's own solid block still blocks light independent of
+    // sky_open_above - a chunk with open sky above it but its own roof
+    // partway down must still go dark below that roof.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    const lcu::voxel::ChunkCoord above{0, 1, 0};
+    const lcu::voxel::ChunkCoord below{0, 0, 0};
+
+    Chunk above_chunk;  // all air - open sky
+    lcu::lighting::compute_sky_light_cross_chunk(above_chunk, registry, world_light, above);
+
+    Chunk below_chunk;
+    below_chunk.set_block(3, 10, 3, stone);
+    lcu::lighting::compute_sky_light_cross_chunk(below_chunk, registry, world_light, below);
+
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 15, 3), lcu::lighting::Light::kMaxLightLevel);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 10, 3), 0u);
+    EXPECT_EQ(world_light.chunk_light(below).sky_light(3, 0, 3), 0u);
+}
+
+TEST(ReseedLightForNewlyLoadedChunk, BlockLightFromAnAlreadyLoadedNeighborReachesTheLateArrivingChunk) {
+    // The real Phase 31 gap this phase closes: a torch already lit in
+    // an already-loaded neighbor never reached a chunk that loads
+    // afterward, because that neighbor's own BFS had already finished
+    // by the time the new chunk showed up.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk neighbor_chunk;
+    neighbor_chunk.set_block(Chunk::kEdgeLength - 1, 8, 8, torch);  // right at the +X edge
+    provider.add_chunk({0, 0, 0}, neighbor_chunk);
+    provider.add_chunk({1, 0, 0}, Chunk{});  // the late-arriving chunk, all air
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    // Neighbor's own BFS already ran and finished (single-chunk scope,
+    // the newer chunk didn't exist yet at that time).
+    lcu::lighting::compute_block_light(neighbor_chunk, registry, world_light.chunk_light({0, 0, 0}));
+    ASSERT_EQ(world_light.chunk_light({0, 0, 0}).block_light(Chunk::kEdgeLength - 1, 8, 8), emission);
+    ASSERT_FALSE(world_light.has_chunk_light({1, 0, 0}));
+
+    // The new chunk loads: its own (single-chunk) initial light is
+    // computed first, exactly like client/main.cpp's
+    // compute_initial_block_light - nothing here crosses the boundary
+    // yet.
+    lcu::lighting::compute_block_light(Chunk{}, registry, world_light.chunk_light({1, 0, 0}));
+    ASSERT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), 0u);
+
+    const auto touched =
+        lcu::lighting::reseed_light_for_newly_loaded_chunk(provider, registry, world_light, {1, 0, 0});
+
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), emission - 1);
+    EXPECT_EQ(world_light.chunk_light({1, 0, 0}).block_light(1, 8, 8), emission - 2);
+    // The neighbor's own light didn't change (it already had its
+    // correct value before the reseed) - only the late-arriving chunk
+    // itself received new light, which the caller already knows to
+    // remesh regardless of what touched reports for it.
+    EXPECT_FALSE(touched.count({0, 0, 0}));
+}
+
+TEST(ReseedLightForNewlyLoadedChunk, TheNewChunksOwnNearBoundaryLightReachesAnAlreadyLoadedNeighbor) {
+    // The symmetric direction of the same gap: a torch placed near the
+    // edge of a chunk that just loaded must reach an already-loaded,
+    // already-lit (but dark) neighbor, not just light its own chunk.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+    const lcu::u8 emission = registry.definition_of(torch).light_emission;
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    provider.add_chunk({0, 0, 0}, Chunk{});  // already-loaded neighbor, all air
+    Chunk new_chunk;
+    new_chunk.set_block(0, 8, 8, torch);  // right at the -X edge (touches {0,0,0})
+    provider.add_chunk({1, 0, 0}, new_chunk);
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    // Neighbor already loaded and already lit (nothing in it, so all-zero).
+    lcu::lighting::compute_block_light(Chunk{}, registry, world_light.chunk_light({0, 0, 0}));
+    // New chunk's own single-chunk initial light.
+    lcu::lighting::compute_block_light(new_chunk, registry, world_light.chunk_light({1, 0, 0}));
+    ASSERT_EQ(world_light.chunk_light({1, 0, 0}).block_light(0, 8, 8), emission);
+
+    const auto touched =
+        lcu::lighting::reseed_light_for_newly_loaded_chunk(provider, registry, world_light, {1, 0, 0});
+
+    EXPECT_EQ(world_light.chunk_light({0, 0, 0}).block_light(Chunk::kEdgeLength - 1, 8, 8), emission - 1);
+    EXPECT_TRUE(touched.count({0, 0, 0}));
+}
+
+TEST(ReseedLightForNewlyLoadedChunk, SkyLightCascadesDownThroughEveryAlreadyLoadedChunkBelow) {
+    // The real Phase 30 gap this phase closes: a chunk loading ABOVE an
+    // already-loaded, already-lit stack must retroactively darken every
+    // link in that stack, not just leave them at their stale
+    // (computed-before-anything-was-above-them) open-sky values.
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk roof_chunk;
+    roof_chunk.set_block(3, 0, 3, stone);  // solid floor at the very bottom of the roof chunk
+    provider.add_chunk({0, 1, 0}, roof_chunk);
+    provider.add_chunk({0, 0, 0}, Chunk{});   // already loaded+lit, stale open-sky values
+    provider.add_chunk({0, -1, 0}, Chunk{});  // already loaded+lit, stale open-sky values
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    // Both lower chunks were lit *before* the roof chunk existed -
+    // computed assuming open sky above (the honest default for "nothing
+    // loaded above yet").
+    lcu::lighting::compute_sky_light_cross_chunk(Chunk{}, registry, world_light, {0, 0, 0});
+    lcu::lighting::compute_sky_light_cross_chunk(Chunk{}, registry, world_light, {0, -1, 0});
+    ASSERT_EQ(world_light.chunk_light({0, 0, 0}).sky_light(3, Chunk::kEdgeLength - 1, 3),
+              lcu::lighting::Light::kMaxLightLevel);
+    ASSERT_EQ(world_light.chunk_light({0, -1, 0}).sky_light(3, Chunk::kEdgeLength - 1, 3),
+              lcu::lighting::Light::kMaxLightLevel);
+
+    // The roof chunk now loads above them.
+    lcu::lighting::compute_sky_light_cross_chunk(roof_chunk, registry, world_light, {0, 1, 0});
+    const auto touched =
+        lcu::lighting::reseed_light_for_newly_loaded_chunk(provider, registry, world_light, {0, 1, 0});
+
+    EXPECT_EQ(world_light.chunk_light({0, 0, 0}).sky_light(3, Chunk::kEdgeLength - 1, 3), 0u)
+        << "the roof's shadow must cascade into the chunk directly below it";
+    EXPECT_EQ(world_light.chunk_light({0, -1, 0}).sky_light(3, Chunk::kEdgeLength - 1, 3), 0u)
+        << "and continue cascading into the chunk below THAT one, not stop after one link";
+    EXPECT_TRUE(touched.count({0, 0, 0}));
+    EXPECT_TRUE(touched.count({0, -1, 0}));
+}
+
+TEST(ReseedLightForNewlyLoadedChunk, TouchedChunksStaysEmptyWithNoAlreadyLoadedNeighbors) {
+    lcu::voxel::BlockId stone = 0;
+    lcu::voxel::BlockId torch = 0;
+    const BlockRegistry registry = make_registry(stone, torch);
+
+    TestChunkProvider<Chunk::kEdgeLength> provider;
+    Chunk isolated_chunk;
+    isolated_chunk.set_block(8, 8, 8, torch);
+    provider.add_chunk({5, 5, 5}, isolated_chunk);  // no neighbors loaded at all
+
+    lcu::lighting::WorldLight<Chunk::kEdgeLength> world_light;
+    lcu::lighting::compute_block_light(isolated_chunk, registry, world_light.chunk_light({5, 5, 5}));
+
+    const auto touched =
+        lcu::lighting::reseed_light_for_newly_loaded_chunk(provider, registry, world_light, {5, 5, 5});
+
+    EXPECT_TRUE(touched.empty());
 }
 
 TEST(LightStorage, CombinedLightIsTheBrighterChannel) {
