@@ -14,11 +14,14 @@
 
 #include "game/components/ai_wander.h"
 #include "game/components/item_entity.h"
+#include "game/components/player_health.h"
+#include "game/components/player_hunger.h"
 #include "game/components/position.h"
 #include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/item_entity_system.h"
+#include "game/systems/player_vitals_system.h"
 #include "game/systems/replication_protocol.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
@@ -466,6 +469,36 @@ constexpr lcu::f32 kVerifyWorkbenchPickupWoodAtSeconds = 0.4f;
 constexpr lcu::f32 kVerifyWorkbenchDropInGridAtSeconds = 0.6f;
 constexpr lcu::f32 kVerifyWorkbenchTakeResultAtSeconds = 0.8f;
 constexpr lcu::f32 kVerifyWorkbenchCloseAtSeconds = 1.0f;
+
+// A seventh, independent headless hook (LCU_VERIFY_HEALTH, Phase 51):
+// directly teleports the player kVerifyHealthFallHeightBlocks above
+// their own real spawn ground position with grounded=false (the same
+// "synthesize exactly the state a real action would produce" honesty
+// LCU_VERIFY_WORKBENCH's own direct world-block seed already uses - a
+// real jump can't reach this height deterministically, but the fall
+// from here on is real, unmodified gravity/collision, exactly what a
+// fall from an actual tower would do), grants 1 game:apple directly and
+// seeds hunger to a real non-max value (so eating it has an observable
+// effect - hunger starts at its own full default otherwise, see
+// PlayerHunger's own doc comment), then simulates a PlaceBlock press
+// once the fall has had real time to land, to verify eating end to end
+// (hunger rises, the apple is consumed). Fall damage is logged the
+// moment it's dealt (see update_fall_tracking's own call site below),
+// so a real run's log output proves both halves of this phase's own
+// "jump from a tower, health drops; eat, hunger rises" directive. Real,
+// confirmed single-player-only gap: in networked mode the teleport is
+// invisible to VoxelServer's own authoritative simulation (it only ever
+// learns the player's position from real PlayerInput packets - see
+// DECISIONS.md "block edits are not client-predicted", the same
+// reasoning applies to a client-only position write), so the very next
+// PlayerCorrection snaps the client back down before a real fall
+// distance can accumulate - eating still verifies correctly in
+// networked mode (item grants/consumption are real client-authoritative
+// state, same as every other verify hook's own item grant), just not
+// fall damage.
+constexpr lcu::f32 kVerifyHealthFallHeightBlocks = 10.0f;
+constexpr lcu::f32 kVerifyHealthSeedHunger = 10.0f;
+constexpr lcu::f32 kVerifyHealthEatAtSeconds = 2.0f;
 
 // Real Minecraft-sized inventory (Phase 49): 9 hotbar slots (indices
 // 0-8, real Minecraft slot numbering) + 27 main storage slots (indices
@@ -941,6 +974,36 @@ int main() {
     planks_item_def.max_stack_size = 64;
     planks_item_def.icon_color = {0.65f, 0.48f, 0.28f, 1.0f};
     const lcu::items::ItemId planks_item_id = item_registry.register_item(planks_item_def);
+
+    // game:apple / game:bread (Phase 51.2) - real Minecraft hunger-
+    // restore values (apple=4, bread=5). Neither has a survival obtain
+    // path yet (no farming, no mob drops - both explicitly out of this
+    // phase's scope, see PROJECT_STATE.md Known Limitations); like
+    // game:planks above, they exist as real, functioning item content
+    // with no in-game source yet (LCU_VERIFY_HEALTH grants one directly,
+    // the same synthetic-setup honesty every other verify hook's own
+    // item grant already uses). edible_hunger_restore below is the only
+    // thing that marks an item as edible - right-click with one selected
+    // restores hunger and consumes it (see the place_pressed dispatch
+    // below) instead of placing or being ignored.
+    lcu::items::ItemDefinition apple_item_def;
+    apple_item_def.namespaced_id = "game:apple";
+    apple_item_def.display_name = "Apple";
+    apple_item_def.max_stack_size = 64;
+    apple_item_def.icon_color = {0.8f, 0.1f, 0.1f, 1.0f};
+    const lcu::items::ItemId apple_item_id = item_registry.register_item(apple_item_def);
+
+    lcu::items::ItemDefinition bread_item_def;
+    bread_item_def.namespaced_id = "game:bread";
+    bread_item_def.display_name = "Bread";
+    bread_item_def.max_stack_size = 64;
+    bread_item_def.icon_color = {0.75f, 0.55f, 0.25f, 1.0f};
+    const lcu::items::ItemId bread_item_id = item_registry.register_item(bread_item_def);
+
+    const std::unordered_map<lcu::items::ItemId, lcu::f32> edible_hunger_restore{
+        {apple_item_id, 4.0f},
+        {bread_item_id, 5.0f},
+    };
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
 
@@ -1425,6 +1488,22 @@ int main() {
          static_cast<lcu::f32>(spawn_column.z)});
     lcu::physics::PlayerPhysicsConfig physics_config;
 
+    // Real player health/hunger (Phase 51) - plain structs, not ECS
+    // components, matching PlayerPhysicsState's own placement right
+    // above (see each component header's own doc comment for why:
+    // player state here has never been an entity_registry entity).
+    game::components::PlayerHealth player_health;
+    game::components::PlayerHunger player_hunger;
+    // Real per-player fall-distance tracking (Phase 51.1) + the three
+    // real caller-owned accumulators update_health_regen/
+    // update_starvation/update_hunger_drain each need (see their own
+    // doc comments in player_vitals_system.h) - reset together on
+    // respawn (see respawn_player below).
+    game::systems::FallTracker fall_tracker;
+    lcu::f32 health_regen_accumulator = 0.0f;
+    lcu::f32 starvation_accumulator = 0.0f;
+    lcu::f32 hunger_drain_accumulator = 0.0f;
+
     // Per-movement chunk streaming (brief section 22, Phase 16 - the gap
     // Phase 14's connect-time-only ChunkData sync honestly left open,
     // see DECISIONS.md): as the player crosses into a new chunk column,
@@ -1605,6 +1684,52 @@ int main() {
                      item_registry.definition_of(item_id).namespaced_id, block_pos.x, block_pos.y, block_pos.z);
     };
 
+    // Real death item drop (Phase 51.1: "inventory drops as item
+    // entities") - spawns one real ItemEntity per non-empty slot
+    // (carrying that slot's whole real stack, not split into 1s) at the
+    // player's own current position, then empties every one of the 36
+    // slots. Same real ECS entity-spawn shape spawn_item_entity_for_
+    // broken_block above already uses, just centered on the player
+    // instead of a broken block.
+    const auto drop_inventory_on_death = [&]() {
+        const lcu::math::Vec3 drop_center = player.aabb.center();
+        for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
+            const lcu::items::ItemStack stack = player_inventory.slot_at(slot);
+            if (stack.is_empty()) {
+                continue;
+            }
+            const lcu::ecs::EntityId entity = entity_registry.create_entity();
+            entity_registry.add_component<game::components::Position>(entity, {drop_center});
+            game::components::ItemEntity item_entity;
+            item_entity.stack = stack;
+            item_entity.vertical_velocity = game::systems::kItemEntitySpawnUpSpeed;
+            item_entity.pickup_delay_seconds = game::systems::kItemEntityPickupDelaySeconds;
+            entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
+            player_inventory.set_slot(slot, lcu::items::ItemStack{});
+        }
+        LCU_LOG_INFO("Player died - inventory dropped as item entities at ({:.2f}, {:.2f}, {:.2f})", drop_center.x,
+                     drop_center.y, drop_center.z);
+    };
+
+    // Real respawn (Phase 51.1): resets position to the same real spawn
+    // point the player first spawned at (spawn_column/spawn_ground_y
+    // above), and every piece of real per-player vitals state back to
+    // full/zeroed - the same fields respawn conceptually "restarts".
+    const auto respawn_player = [&]() {
+        player.aabb = make_player_aabb(
+            {static_cast<lcu::f32>(spawn_column.x), static_cast<lcu::f32>(spawn_ground_y),
+             static_cast<lcu::f32>(spawn_column.z)});
+        player.vertical_velocity = 0.0f;
+        player.grounded = false;
+        player_health.current = player_health.max;
+        player_hunger.current = player_hunger.max;
+        fall_tracker = game::systems::FallTracker{};
+        health_regen_accumulator = 0.0f;
+        starvation_accumulator = 0.0f;
+        hunger_drain_accumulator = 0.0f;
+        LCU_LOG_INFO("Player respawned at spawn point ({}, {}, {})", spawn_column.x, spawn_ground_y, spawn_column.z);
+    };
+
     // One interpolator per remote AI entity (keyed by the EntityState
     // wire format's entity_index - see replication_protocol.h), fed by
     // EntityState messages below. network_clock is this client's own
@@ -1713,6 +1838,10 @@ int main() {
     const bool verify_workbench = std::getenv("LCU_VERIFY_WORKBENCH") != nullptr;
     const auto verify_workbench_start = std::chrono::steady_clock::now();
     bool verify_workbench_setup_done = false;
+
+    const bool verify_health = std::getenv("LCU_VERIFY_HEALTH") != nullptr;
+    const auto verify_health_start = std::chrono::steady_clock::now();
+    bool verify_health_setup_done = false;
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -2015,6 +2144,52 @@ int main() {
         screen.items.push_back(std::move(back));
 
         return screen;
+    };
+
+    // Real "You died" screen (Phase 51.3, brief section 87's own
+    // directive: "brief 'You died' screen with respawn button") - a
+    // MenuScreen like every other one above, pushed directly (not via
+    // pending_menu_action) from handle_player_death below since death is
+    // detected from real per-frame gameplay code, never from inside
+    // another MenuItem's own callback (the only case pending_menu_action
+    // itself needs to guard against - see its own doc comment).
+    // Respawn's own on_activate still goes through pending_menu_action,
+    // same as every other row above that changes menu_stack - it's
+    // running from inside a MenuItem callback on this very screen.
+    std::function<lcu::ui::MenuScreen()> build_death_screen;
+    build_death_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Du bist gestorben";
+        lcu::ui::MenuItem respawn;
+        respawn.label = "Respawn";
+        respawn.on_activate = [&]() {
+            pending_menu_action = [&]() {
+                respawn_player();
+                menu_stack.clear();
+            };
+        };
+        screen.items.push_back(std::move(respawn));
+        return screen;
+    };
+
+    // Real death handling (Phase 51.1: "death (health <=0 -> respawn at
+    // spawn point, inventory drops as item entities)") - called from
+    // wherever a real damage source (fall damage, starvation) brings
+    // player_health.current to 0 this frame. Drops the inventory,
+    // releases mouse capture and closes any open inventory/workbench
+    // screen (same real "can't stay mid-drag/drop while dead" cleanup
+    // close_inventory/close_workbench already do for their own screens),
+    // then opens the death screen - `menu_stack` becoming non-empty here
+    // makes `paused` true starting next frame, freezing simulation same
+    // as opening the pause menu already does.
+    const auto handle_player_death = [&]() {
+        LCU_LOG_INFO("Player died (health reached 0)");
+        drop_inventory_on_death();
+        inventory_open = false;
+        workbench_open = false;
+        window.set_relative_mouse_mode(false);
+        menu_stack.clear();
+        menu_stack.push(build_death_screen());
     };
 
     while (window.pump_events()) {
@@ -2709,6 +2884,35 @@ int main() {
                             elapsed >= kVerifyTorchPlaceAtSeconds &&
                                 elapsed < kVerifyTorchPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
+        if (verify_health) {
+            if (!verify_health_setup_done) {
+                // Synthetic setup (see kVerifyHealthFallHeightBlocks' own
+                // doc comment above): teleports straight up with
+                // grounded=false so real gravity/collision (not a
+                // scripted position) carries the player back down and
+                // through a real landing-frame fall-damage application
+                // below, and seeds hunger below max so eating the
+                // granted apple has a real observable effect.
+                player.aabb = make_player_aabb(
+                    {static_cast<lcu::f32>(spawn_column.x),
+                     static_cast<lcu::f32>(spawn_ground_y) + kVerifyHealthFallHeightBlocks,
+                     static_cast<lcu::f32>(spawn_column.z)});
+                player.vertical_velocity = 0.0f;
+                player.grounded = false;
+                fall_tracker = game::systems::FallTracker{};
+                fall_tracker.was_grounded = false;
+                player_hunger.current = kVerifyHealthSeedHunger;
+                player_inventory.add_item(item_registry, {apple_item_id, 1});
+                verify_health_setup_done = true;
+                LCU_LOG_INFO("LCU_VERIFY_HEALTH setup: teleported to y={:.2f}, hunger seeded to {:.1f}",
+                             player.aabb.min.y, player_hunger.current);
+            }
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_health_start).count();
+            input.set_down(lcu::platform::Action::PlaceBlock,
+                            elapsed >= kVerifyHealthEatAtSeconds &&
+                                elapsed < kVerifyHealthEatAtSeconds + kVerifyEdgePulseSeconds);
+        }
         const auto now = std::chrono::steady_clock::now();
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
@@ -2982,6 +3186,33 @@ int main() {
             }
         }
 
+        // Real hunger/regen/starvation ticking (Phase 51.1/51.2) - gated
+        // on `paused` alone, same as the item-entity block just above:
+        // hunger keeps draining and regen/starvation keep ticking even
+        // while the inventory or workbench screen is open (only the
+        // player's own movement/mining/placing/eating locks for those -
+        // see the narrower `!inventory_open && !workbench_open` gate
+        // below), matching real Minecraft (vitals aren't part of "player
+        // control"). `sprinting_now` only reads real held Actions
+        // (Sprint + any move key), not movement_direction_from_input -
+        // that's already computed once, inside the narrower gate below,
+        // and calling it a second time here would just be redundant work
+        // for the same real per-frame answer.
+        if (!paused) {
+            const bool sprinting_now =
+                input.is_down(lcu::platform::Action::Sprint) &&
+                (input.is_down(lcu::platform::Action::MoveForward) ||
+                 input.is_down(lcu::platform::Action::MoveBackward) ||
+                 input.is_down(lcu::platform::Action::MoveLeft) || input.is_down(lcu::platform::Action::MoveRight));
+            game::systems::update_hunger_drain(player_hunger, sprinting_now, hunger_drain_accumulator, delta_seconds);
+            game::systems::update_health_regen(player_health, player_hunger, health_regen_accumulator, delta_seconds);
+            const bool starved_to_death =
+                game::systems::update_starvation(player_health, player_hunger, starvation_accumulator, delta_seconds);
+            if (starved_to_death) {
+                handle_player_death();
+            }
+        }
+
         // Real inventory-screen player-control lock (Phase 49, brief
         // section 60's own directive: "game keeps running - Minecraft
         // behavior: no pause in inventory"): unlike `paused` above
@@ -3031,9 +3262,30 @@ int main() {
             const lcu::math::Vec3 move_dir = lcu::player::movement_direction_from_input(input, camera);
             const lcu::math::Vec3 horizontal_delta = move_dir * (kMoveSpeed * delta_seconds);
 
+            // Real per-jump hunger cost (Phase 51.2) - edge-detected
+            // (a fresh Jump press, not held) and read BEFORE try_jump
+            // below runs, since try_jump itself is what would otherwise
+            // change `player.grounded` this same call - reading it after
+            // would see the post-jump state, not "was the player
+            // actually standing on something when they pressed Jump".
+            const bool jump_pressed_edge =
+                input.is_down(lcu::platform::Action::Jump) && !previous_input.is_down(lcu::platform::Action::Jump);
             if (input.is_down(lcu::platform::Action::Jump)) {
+                if (jump_pressed_edge && player.grounded) {
+                    game::systems::apply_jump_hunger_cost(player_hunger);
+                }
                 lcu::physics::try_jump(player, physics_config);
             }
+
+            // Real fall-damage tracking (Phase 51.1) - `previous_player_y`
+            // captured before this frame's own gravity/collision resolve
+            // it into a new position below, `delta_y` handed to
+            // update_fall_tracking as "how far down did the player move
+            // this frame" (see its own doc comment for the sign
+            // convention). Wired for both the networked and single-
+            // player physics path below (both end up mutating the same
+            // `player.aabb`/`player.grounded`), not duplicated per branch.
+            const lcu::f32 previous_player_y = player.aabb.min.y;
 
             if (networked) {
                 // Predict locally (so movement feels instant, not delayed by
@@ -3047,6 +3299,16 @@ int main() {
             } else {
                 lcu::physics::apply_gravity(player, physics_config, delta_seconds);
                 lcu::physics::integrate_player(world, player, horizontal_delta, physics_config, delta_seconds, is_solid);
+            }
+
+            const lcu::f32 fall_damage_dealt = game::systems::update_fall_tracking(
+                fall_tracker, player_health, previous_player_y - player.aabb.min.y, player.grounded);
+            if (fall_damage_dealt > 0.0f) {
+                LCU_LOG_INFO("Fall damage: {:.1f} (health: {:.1f}/{:.1f})", fall_damage_dealt, player_health.current,
+                             player_health.max);
+                if (player_health.current <= 0.0f) {
+                    handle_player_death();
+                }
             }
 
             camera.position = {player.aabb.center().x, player.aabb.min.y + kEyeHeight, player.aabb.center().z};
@@ -3296,6 +3558,13 @@ int main() {
                 }
             }
 
+            // Computed once, before the three-way real right-click
+            // dispatch below (crafting-table interception / eating /
+            // placement), since all three need to know what's physically
+            // in the selected hotbar slot right now.
+            const lcu::items::ItemStack selected_stack = player_inventory.slot_at(selected_hotbar_slot);
+            const auto selected_edible = edible_hunger_restore.find(selected_stack.item);
+
             // Real crafting-table right-click interception (Phase 50.3):
             // right-clicking a `game:crafting_table` block opens the
             // workbench screen instead of placing/breaking through it -
@@ -3314,6 +3583,20 @@ int main() {
                 window.set_relative_mouse_mode(false);
                 recompute_workbench_result();
                 LCU_LOG_INFO("Workbench opened");
+            } else if (place_pressed && selected_edible != edible_hunger_restore.end()) {
+                // Real eating (Phase 51.2): unlike placement/the
+                // crafting-table intercept above, this deliberately
+                // doesn't require `hit` - Minecraft lets you eat while
+                // looking at open air, same as right-clicking into the
+                // sky. Checked before the placement branch below so a
+                // food item never falls through to "no registered block,
+                // no-op" the way game:planks/game:compost do.
+                game::systems::eat(player_hunger, selected_edible->second);
+                player_inventory.remove_item(selected_stack.item, 1);
+                hand_swing_elapsed = 0.0f;
+                LCU_LOG_INFO("Ate {} (hunger: {:.1f}/{:.1f})",
+                             item_registry.definition_of(selected_stack.item).namespaced_id, player_hunger.current,
+                             player_hunger.max);
             } else {
                 // Real slot-driven placement (Phase 49): whatever item
             // physically sits in the selected hotbar slot right now is
@@ -3324,7 +3607,6 @@ int main() {
             // both crafted-only with no placeable block) real-honestly
             // no-ops here rather than "placing air" - see block_for_item's
             // own doc comment for why kAirBlockId is the sentinel.
-            const lcu::items::ItemStack selected_stack = player_inventory.slot_at(selected_hotbar_slot);
             const lcu::voxel::BlockId selected_place_block_id = block_item_mapping.block_for_item(selected_stack.item);
             if (place_pressed && hit && selected_place_block_id != lcu::voxel::kAirBlockId &&
                 player_inventory.remove_item(selected_stack.item, 1) == 1) {
@@ -3388,7 +3670,7 @@ int main() {
                     }
                 }
             }
-            }  // else (not a crafting-table right-click)
+            }  // else (not a crafting-table right-click or eating)
         }  // if (!paused && !inventory_open && !workbench_open)
 
         // Real F-key HUD/display toggles (Phase 47) - work regardless
@@ -3476,10 +3758,17 @@ int main() {
         // Populated below (hotbar contents/selection), consumed by both
         // queue_hud_quads (before flush_ui_quads) and draw_hud_labels
         // (after the debug overlay's own text) - see hud.h's own doc
-        // comment. Health/hunger stay at HudState's own real defaults
-        // (20/20, full) this phase - Phase 51 wires real per-frame
-        // values in once PlayerHealth/PlayerHunger exist.
+        // comment. Health/hunger (Phase 51.3) come straight from the
+        // real per-player player_health/player_hunger updated above -
+        // queue_hud_quads' own real full/three-quarter/half/empty icon
+        // math (Phase 47.3) already reads these two fields, this is the
+        // only change needed to feed it real values instead of the
+        // struct's own 20/20 defaults.
         lcu::ui::HudState hud_state;
+        hud_state.health = player_health.current;
+        hud_state.max_health = player_health.max;
+        hud_state.hunger = player_hunger.current;
+        hud_state.max_hunger = player_hunger.max;
 
         // Real inventory screen (Phase 49.1) - same populate-then-queue-
         // then-draw-labels split as hud_state above. Only actually

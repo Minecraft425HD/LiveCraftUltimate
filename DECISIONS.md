@@ -3489,3 +3489,91 @@ velocity on item spawn to more closely match real Minecraft - rejected
 as unnecessary complexity this phase's own scope didn't need (the
 pickup-range fix above already makes stationary-player pickup reliable
 without it).
+
+## 2026-09-11 — Health/hunger/fall damage: plain structs not ECS components, and a real single-player-only verification gap
+
+**Context:** Phase 51 added real player vitals - health, hunger, fall
+damage, natural regen, starvation, eating, and death/respawn.
+
+**`PlayerHealth`/`PlayerHunger` are plain structs held as local
+variables in `client/main.cpp`, not `entity_registry` components -
+despite the standing directive itself calling them "components."**
+This project's player state has never been an ECS entity:
+`PlayerPhysicsState player` (Phase 4) has always been a standalone
+local, not attached to `entity_registry` the way AI wander
+entities/item entities are. Making health/hunger components on an
+entity that doesn't otherwise exist would mean either inventing a
+"player entity" with no other real consumer, or attaching them to some
+unrelated existing entity - both real, unforced complexity for a
+single-player's worth of state that's read/written from exactly one
+place. Each new component header documents this choice itself.
+
+**Fall-damage tracking mirrors Minecraft's own real `fallDistance`
+semantics, not a naive velocity-at-impact or airborne-duration
+heuristic.** `FallTracker::fall_distance` accumulates only while
+airborne *and* actually descending (`delta_y > 0`) - an ascending jump
+never adds to it - and damage is applied/reset only on the exact frame
+`grounded` transitions from false to true (the real landing frame),
+using whatever distance had accumulated by then. This is what makes a
+normal jump (rise then fall the same small height) deal zero damage
+without any separate "is this a real fall vs. a hop" special case -
+proven by a dedicated `NoDamageForARealSmallHop` unit test, not just
+asserted.
+
+**Death drops the *entire* inventory, not a random subset, and reuses
+Phase 50's item-entity pipeline wholesale rather than a new one.**
+`drop_inventory_on_death` is structurally identical to
+`spawn_item_entity_for_broken_block` (create entity, add `Position` +
+`ItemEntity` with the same real upward-toss/pickup-delay constants) -
+just centered on the player's position instead of a broken block's,
+and carrying each slot's whole real stack instead of a fixed count of
+1. Reusing the exact same real physics/despawn/pickup system a death
+drop already gets for free means a respawning player can walk back and
+recover their own dropped items, matching real Minecraft, with zero new
+physics code.
+
+**The "You died" screen is a plain `MenuScreen` pushed directly onto
+the existing `MenuStack`, not a new UI system.** `handle_player_death`
+calls `menu_stack.push(build_death_screen())` straight from the real
+per-frame gameplay code where death is detected - not through
+`pending_menu_action`, since that indirection exists only to protect a
+`MenuItem` callback from destroying its own currently-executing
+`MenuScreen` (see the Phase 46 entry above), and death is never
+detected from inside such a callback. The screen's own "Respawn" row,
+being a `MenuItem::on_activate` itself, *does* go through
+`pending_menu_action`, same as every other row that mutates
+`menu_stack` from inside its own screen.
+
+**A real, confirmed (not merely suspected) gap: `LCU_VERIFY_HEALTH`'s
+synthetic mid-air teleport only produces real fall damage in
+single-player mode.** The hook directly writes `player.aabb`/
+`player.grounded` to simulate "the player fell off a tower" - the same
+honest direct-state-seed pattern `LCU_VERIFY_WORKBENCH`'s block seed
+already uses. In networked mode this write is invisible to
+`VoxelServer`'s own authoritative simulation, which only ever learns
+the player's position from real `PlayerInput` packets (matching this
+project's existing "block edits are not client-predicted" reasoning,
+just applied to position instead) - so the very next `PlayerCorrection`
+snaps the client back down before a real fall distance can accumulate.
+Confirmed via an actual two-process networked run, not assumed: eating
+still verifies correctly (`Ate game:apple (hunger: 14.0/20.0)` appears
+- item state is real client-authoritative state, unaffected by
+reconciliation), but no `Fall damage:` line appears. Documented in the
+hook's own doc comment rather than silently worked around; fixing it
+properly would mean either a real server-side vertical-physics/fall-
+damage simulation (a genuinely separate, larger feature - server-
+authoritative gravity, not just horizontal movement) or a
+server-side test-only teleport command, neither justified by this
+phase's own scope.
+
+**Alternatives considered:** attaching `PlayerHealth`/`PlayerHunger` to
+a newly-invented "player entity" in `entity_registry` for consistency
+with item entities/AI - rejected per the reasoning above (no other real
+consumer needs it, would only add indirection); computing sprint
+detection by re-calling `movement_direction_from_input` a second time
+from the vitals-ticking block (so it could run under the same broader
+`!paused` gate as hunger drain) - rejected as redundant per-frame work
+for the same real answer already computed once, later in the frame,
+under the narrower movement gate; a server-side fix for the networked
+fall-damage verification gap - rejected as out of this phase's own
+scope (see above), documented instead as a real, known limitation.

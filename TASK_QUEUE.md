@@ -2144,6 +2144,74 @@ the whole inventory rather than hotbar-first; a recipe needing >1 of
 the same ingredient in one cell still isn't correctly consumed by
 either result-click.
 
+## Phase 51 — Health, hunger, fall damage, respawn
+
+Real player vitals, closing Phase 47's own "hardcoded full this phase"
+HUD gap.
+
+- [x] **Real health/hunger**: new `game::components::PlayerHealth`/
+  `PlayerHunger` (plain structs, not ECS components - matches
+  `PlayerPhysicsState`'s own placement, see DECISIONS.md) and
+  `game::systems::player_vitals_system.{h,cpp}` (pure logic): real
+  Minecraft-shaped fall damage (`fallDistance` accumulates only while
+  airborne and descending; damage applied/reset only on the real
+  landing-frame transition, so a normal jump deals zero), natural regen
+  (+1 HP/4s at hunger>=18), starvation (-1 HP/4s at hunger==0), hunger
+  drain (-1/30s, 2x sprinting-and-moving), per-jump hunger cost, eating.
+- [x] **Wired into `client/main.cpp`**: `previous_player_y` captured
+  before gravity/collision resolve each frame, fed to
+  `update_fall_tracking` after (works for both single-player and
+  networked physics paths); jump hunger cost applied on a real
+  edge-detected fresh Jump press, read *before* `try_jump` changes
+  `player.grounded`; hunger drain/regen/starvation tick every frame
+  gated on `paused` alone (keeps running while the inventory/workbench
+  screen is open, matching real Minecraft). Real HUD wiring:
+  `hud_state.health`/`hunger` now read from `player_health`/
+  `player_hunger` instead of `HudState`'s own 20/20 defaults.
+- [x] **Real eating**: new `game:apple` (+4 hunger)/`game:bread`
+  (+5 hunger) items. Right-click dispatch is now a real three-way
+  branch: crafting-table intercept (checked first) -> eating (new -
+  doesn't require a raycast hit) -> normal placement. Neither food item
+  has a survival obtain path yet (no farming/mob drops, out of scope) -
+  `LCU_VERIFY_HEALTH` grants one directly.
+- [x] **Real death + respawn**: a death transition drops the *entire*
+  36-slot inventory as real item entities at the player's position
+  (reusing Phase 50's `ItemEntity` pipeline wholesale), closes any open
+  inventory/workbench screen, and pushes a "Du bist gestorben"
+  `MenuScreen` (reusing Phase 46's `MenuStack`) with a Respawn row that
+  resets position/health/hunger/every accumulator.
+- [x] **New `LCU_VERIFY_HEALTH` hook**: teleports the player 10 blocks
+  above spawn with `grounded=false` (same direct-state-seed honesty
+  `LCU_VERIFY_WORKBENCH`'s own block seed uses), seeds hunger below
+  max, grants an apple, simulates a real right-click once the fall has
+  landed. Real run: `Fall damage: 6.9 (health: 13.1/20.0)` then
+  `Ate game:apple (hunger: 14.0/20.0)`. Death+respawn separately
+  confirmed via a real run with a temporarily-lethal fall height.
+- [x] **A real, confirmed single-player-only gap found this phase**: in
+  networked mode the synthetic teleport is invisible to `VoxelServer`'s
+  own authoritative simulation, so the next `PlayerCorrection` snaps
+  the client back down before a real fall distance can accumulate -
+  confirmed via an actual two-process run (eating still verifies; fall
+  damage doesn't). Documented in the hook's own doc comment and
+  DECISIONS.md, not silently worked around.
+- [x] 24 new unit tests (`ApplyDamage`/`FallDamageForDistance`/
+  `UpdateFallTracking`/`UpdateHealthRegen`/`UpdateStarvation`/
+  `UpdateHungerDrain`/`ApplyJumpHungerCost`/`Eat`).
+- [x] Verified via real `LCU_VERIFY_HEALTH` runs (bgfx + non-bgfx), a
+  real two-process networked run, real regression runs of every
+  existing hook (`LCU_VERIFY_BREAK_PLACE`/`CRAFT`/`TORCH`/`MENU`/`HUD`/
+  `INVENTORY`/`WORKBENCH`), and a real `LCU_BUILD_SHADER_TOOLS=ON`
+  build.
+
+`ctest` 547/547 (bgfx, up from 523) / 539/539 (non-bgfx, up from 515).
+
+Honestly scoped: no armor/enchantments reduce fall damage (out of
+scope entirely); `Action::Sprint` drives hunger drain's 2x multiplier
+but still doesn't move the player any faster (a real, pre-existing gap
+from Phase 43); apple/bread have no survival obtain path (no
+farming/mob drops); real fall damage isn't verifiable in networked
+mode (see above).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

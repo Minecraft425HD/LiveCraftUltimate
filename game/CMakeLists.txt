@@ -15,6 +15,7 @@ add_library(LcuGame STATIC
     systems/src/day_night_cycle.cpp
     systems/src/replication_protocol.cpp
     systems/src/item_entity_system.cpp
+    systems/src/player_vitals_system.cpp
     items/src/block_item_mapping.cpp
 )
 add_library(Lcu::Game ALIAS LcuGame)

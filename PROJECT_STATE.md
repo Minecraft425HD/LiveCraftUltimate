@@ -43,8 +43,9 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 **Phase 46 (menu framework: pause/options/controls)**, **Phase 47
 (HUD overhaul: hotbar + health/hunger bars + F-toggles)**, **Phase
 48 (block highlight + hold-to-break + hand)**, **Phase 49
-(inventory screen + drag/drop + crafting grid)**, and **Phase 50
-(item entities + crafting table)** are done; see
+(inventory screen + drag/drop + crafting grid)**, **Phase 50
+(item entities + crafting table)**, and **Phase 51 (health, hunger,
+fall damage, respawn)** are done; see
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -1942,6 +1943,95 @@ grid already has); a recipe needing more than one of the same
 ingredient in a single grid cell still isn't correctly consumed by
 either result-click (documented, no registered recipe needs it yet).
 
+**Phase 51 (health, hunger, fall damage, respawn)**: closes Phase 47's
+own "hardcoded full this phase" gap - the HUD's real half-icon fill
+math finally gets real values. New `game::components::PlayerHealth`/
+`PlayerHunger` (plain structs, not ECS components - player state here
+has never been an `entity_registry` entity, matching
+`PlayerPhysicsState`'s own placement since Phase 4, see DECISIONS.md)
+and `game::systems::player_vitals_system.{h,cpp}`: real Minecraft-
+shaped fall damage (`fallDistance` accumulates only while airborne and
+actually descending; damage is applied/reset only on the exact landing-
+frame transition, so a normal jump deals zero, not just "usually
+zero"), natural regen (+1 HP every real 4s at hunger>=18), starvation
+(-1 HP every real 4s at hunger==0), hunger drain (-1 every real 30s
+normally, 2x while sprinting-and-moving), a real per-jump hunger cost,
+and eating.
+
+Wired into `client/main.cpp`: `previous_player_y` captured before each
+frame's own gravity/collision resolve, fed to `update_fall_tracking`
+after - works identically for the single-player and networked physics
+paths since both end up mutating the same `player.aabb`/
+`player.grounded`. Hunger drain/regen/starvation tick every frame gated
+on `paused` alone (menu_stack empty), same as day/night - vitals keep
+ticking while the inventory/workbench screen is open, matching real
+Minecraft (only movement/mining/placing/eating lock for those). Real
+HUD wiring: `hud_state.health`/`hunger` now read straight from
+`player_health`/`player_hunger` - Phase 47's own icon math needed zero
+changes.
+
+New `game:apple` (+4 hunger)/`game:bread` (+5 hunger) items with real
+Minecraft restore values. Right-click dispatch is now a real three-way
+branch: crafting-table intercept (Phase 50.3, checked first) -> eating
+(new - deliberately doesn't require a raycast hit, matching Minecraft
+letting you eat while looking at open air) -> normal slot-driven
+placement (Phase 49, unchanged). Neither food item has a survival
+obtain path yet (no farming, no mob drops - both explicitly out of this
+phase's scope) - see Known Limitations below.
+
+Death (from fall damage or starvation) drops the *entire* 36-slot
+inventory as real item entities at the player's position - reusing
+Phase 50's `ItemEntity`/`update_item_entities`/`pickup_item_entities`
+pipeline wholesale (same spawn shape as a broken block's own drop, just
+centered on the player), closes any open inventory/workbench screen,
+and pushes a new "Du bist gestorben" `MenuScreen` (reusing Phase 46's
+`MenuStack` framework entirely - zero new UI plumbing) with a single
+Respawn row that resets position to the original spawn point plus every
+vitals field/accumulator to its starting value.
+
+24 new unit tests. New `LCU_VERIFY_HEALTH` hook (the project's
+seventh): teleports the player 10 blocks above spawn with
+`grounded=false` (the same direct-state-seed honesty
+`LCU_VERIFY_WORKBENCH`'s own block seed already uses - a real jump
+can't reach that height deterministically, but the fall from there on
+is real, unmodified gravity/collision), seeds hunger below max, grants
+an apple, then simulates a real right-click once the fall has had time
+to land. A real run's log output proves both halves of this phase's own
+directive: `Fall damage: 6.9 (health: 13.1/20.0)` then `Ate game:apple
+(hunger: 14.0/20.0)`. Death+respawn were separately confirmed via a
+real run with a temporarily-lethal fall height (`Player died (health
+reached 0)` / `Player died - inventory dropped as item entities`) -
+the respawn button itself reuses the exact same `MenuStack`/
+`pending_menu_action` machinery `LCU_VERIFY_MENU` already proves works,
+so it wasn't re-verified via a second simulated click sequence.
+
+**A real, confirmed (not merely suspected) single-player-only gap**: in
+networked mode, the synthetic teleport is invisible to `VoxelServer`'s
+own authoritative simulation - the server only ever learns the
+player's position from real `PlayerInput` packets, so the very next
+`PlayerCorrection` snaps the client back down before a real fall
+distance can accumulate. Confirmed via an actual two-process networked
+run: eating still verifies correctly (item state is real
+client-authoritative state, unaffected by reconciliation), but no
+`Fall damage:` line appears. Documented in the hook's own doc comment
+and in DECISIONS.md, not silently worked around.
+
+Verified via real `LCU_VERIFY_HEALTH` runs (bgfx + non-bgfx), a real
+two-process networked run, real regression runs of every existing hook
+(`LCU_VERIFY_BREAK_PLACE`/`CRAFT`/`TORCH`/`MENU`/`HUD`/`INVENTORY`/
+`WORKBENCH` - all still pass), and a real `LCU_BUILD_SHADER_TOOLS=ON`
+build. `ctest` 547/547 (bgfx, up from 523) / 539/539 (non-bgfx, up from
+515).
+
+Honestly scoped: no armor/enchantments reduce fall damage (out of this
+program's scope entirely); `Action::Sprint` now drives hunger drain's
+real 2x multiplier but still doesn't itself move the player any faster
+(a real, pre-existing gap from Phase 43 - Sprint had no consumer at
+all before this phase); apple/bread have no survival obtain path (no
+farming/mob drops, both explicitly out of scope - see Known
+Limitations); real fall damage isn't verifiable in networked mode (see
+above).
+
 ## Build Status
 
 See `BUILD_STATUS.md` for the full target-by-target table. Summary: core
@@ -1954,26 +2044,28 @@ toolchain/host, not because the CMake presets are known-broken.
 
 ## Test Status
 
-`ctest --test-dir build/dev-bgfx`: 352/352 passing (this build dir is
+`ctest --test-dir build/dev-bgfx`: 547/547 passing (this build dir is
 configured with `LCU_BUILD_SHADER_TOOLS=ON` too, so it also produces
 compiled chunk shaders - `ctest` itself doesn't test shader compilation
 directly, that's verified by actually running `VoxelClient`, see
-`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 349/349 passing
+`BUILD_STATUS.md`). `ctest --test-dir build/dev-nobgfx`: 539/539 passing
 (`ChunkMeshUpload.*` only exists in the bgfx build, since it needs a
 real bgfx context). Covers Log, QualityProfile, Vec3, Mat4, FrameStats,
 InputState, TouchInputBackend, Chunk, ChunkStorage, ChunkCoord,
 BlockRegistry, GreedyMesher, JobSystem,
 ChunkMeshUpload, World, Worldgen, ChunkSerializer, Raycast,
 PlayerPhysics/AABB, FirstPersonCamera, MovementInput, ItemRegistry,
-Inventory, RecipeRegistry, ecs::Registry, block/sky light propagation,
-AIWanderSystem, DayNightCycle, Sequence, PacketHeader, Connection,
+Inventory, InventoryOps, RecipeRegistry, ecs::Registry, block/sky light
+propagation, AIWanderSystem, DayNightCycle, ItemEntitySystem,
+PlayerVitalsSystem, BlockItemMapping, InventoryScreen,
+CraftingTableScreen, Sequence, PacketHeader, Connection,
 UdpSocket, Address, LoopbackIntegration, FragmentPayload,
 FragmentReassembler, PositionInterpolator,
 PredictionBuffer, ReplicationProtocol (incl. BlockAction/BlockChange/
 ChunkData/ChunkDataFragment/InventoryUpdate),
 LuaState, EventBus,
-RegistryBindings, ModLoader, GenerateSineWave, ComputeStereoPan,
-DistanceAttenuation. JobSystem
+RegistryBindings, ModLoader, MenuStack, Hud, GenerateSineWave,
+ComputeStereoPan, DistanceAttenuation. JobSystem
 additionally verified via 200 repeated `ctest`-suite runs and 50 runs
 under ThreadSanitizer, zero failures/races - see `BUILDING.md` "Testing
 under ThreadSanitizer" for the exact commands. GreedyMesher's triangle
@@ -2370,6 +2462,38 @@ None currently tracked.
   section 96's Phase 12 sense (imported/authored game assets) is still
   entirely absent; every visual/audio element in this project today is
   generated, not loaded.
+- **No mobs** — no hostile/passive/neutral entity content of any kind
+  (only the pre-existing wandering AI/item entities exist). **No
+  redstone** — no wiring/logic-gate/mechanism content. **No
+  enchantments/anvil/potions** — no enchanting table, anvil repair, or
+  brewing. **No Nether/End** — a single overworld dimension only. **No
+  villagers/trading**. **No structures** (out of scope since Phase
+  38-41's own worldgen phases, still true). **No farming** — no crops,
+  no way to grow/harvest food; `game:apple`/`game:bread` (Phase 51)
+  therefore have no survival obtain path, only a direct debug-style
+  grant (`LCU_VERIFY_HEALTH`'s own setup). **No chat/server browser** —
+  networked mode is still connect-by-port only, no in-game text
+  communication. **No skin customization**. All of these are explicit,
+  standing exclusions from the current multi-phase directive, not
+  phases that were attempted and fell short.
+- Fall damage has no armor/enchantment mitigation — `fall_damage_for_
+  distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
+  it, matching this project's real current scope (no armor/enchantment
+  content exists at all, see above).
+- `Action::Sprint` drives hunger drain's real 2x multiplier (Phase 51)
+  but still doesn't itself move the player any faster — a real,
+  pre-existing gap from Phase 43 (the action was bound with no consumer
+  at all before Phase 51 gave it one), not something this phase's own
+  "more when sprinting" hunger-drain requirement needed to close to be
+  satisfied.
+- Real fall damage isn't verifiable in networked mode (Phase 51,
+  `LCU_VERIFY_HEALTH`) — the hook's synthetic mid-air teleport is
+  invisible to `VoxelServer`'s own authoritative simulation (the server
+  only learns position from real `PlayerInput`), so the next
+  `PlayerCorrection` snaps the client back down before a real fall
+  distance can accumulate; confirmed via an actual two-process run, not
+  assumed — see DECISIONS.md. Eating verifies correctly in networked
+  mode regardless (item state is real client-authoritative state).
 
 ## Next Task
 
@@ -2446,6 +2570,17 @@ before content/polish):
    packet volume) - deferred since it needs dedicated networking-code
    investigation, not a quick fix, and hasn't affected any real
    verification run at this vertical slice's normal traffic volume.
+8. **Active, user-directed program (Phases 43-52)**: a third program
+   after items 6/above - rebindable input (43), a 2D UI framework (44),
+   persistent options (45), the menu/pause framework (46), a real HUD
+   (47), block highlight/hold-to-break/hand (48), the inventory screen +
+   drag/drop + crafting grid (49), item entities + a crafting table
+   (50), and health/hunger/fall damage/respawn (51) are all done - see
+   PROJECT_STATE.md "Phase 43" through "Phase 51" above and
+   TASK_QUEUE.md for full per-phase detail. Next: Phase 52
+   (documentation: README controls table, BUILDING options.txt note,
+   CHANGELOG/PROJECT_STATE/DECISIONS.md wrap-up for Phases 43-51, then a
+   final summary to the user), which closes this program out.
 
 Update state docs and commit after each, same discipline as every phase
 before it - see "Resume Protocol" implicit throughout this file: read

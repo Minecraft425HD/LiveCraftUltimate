@@ -2,7 +2,101 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51
+
+### Phase 51
+
+- **Real health/hunger/fall-damage/respawn** - new `game::components::
+  PlayerHealth`/`PlayerHunger` (plain structs, not ECS components -
+  matches `PlayerPhysicsState`'s own placement, see each header's own
+  doc comment) and `game::systems::player_vitals_system.{h,cpp}` (pure
+  logic, 24 new unit tests): `apply_damage` (clamped, returns true only
+  on the real 0-transition so a caller can call it every frame without
+  re-triggering death), `fall_damage_for_distance`/`update_fall_tracking`
+  (real Minecraft-shaped `fallDistance` semantics - accumulates only
+  while airborne and actually descending, damage applied/reset only on
+  the real landing-frame transition, so a normal jump deals zero
+  damage), `update_health_regen` (+1 HP/4s at hunger >= 18),
+  `update_starvation` (-1 HP/4s at hunger == 0), `update_hunger_drain`
+  (-1/30s normally, 2x while sprinting-and-moving), `apply_jump_hunger_
+  cost`/`eat` - each real per-frame timer using the same caller-owned
+  accumulator pattern `hand_swing_elapsed` already established.
+- **Wired into `client/main.cpp`**: `previous_player_y` captured before
+  gravity/collision resolve each frame, fed to `update_fall_tracking`
+  after (works for both the single-player and networked physics path -
+  both mutate the same `player.aabb`/`player.grounded`); jump hunger
+  cost applied on a real edge-detected fresh Jump press, read *before*
+  `try_jump` itself changes `player.grounded`; hunger drain/regen/
+  starvation tick every frame gated on `paused` alone (like day/night -
+  vitals keep ticking while the inventory/workbench screen is open,
+  matching real Minecraft, only movement/mining/placing/eating lock for
+  those). Real HUD wiring: `hud_state.health`/`hunger` now read straight
+  from `player_health`/`player_hunger` instead of `HudState`'s own 20/20
+  defaults - Phase 47's icon math needed no changes at all.
+- **Real eating**: new `game:apple` (+4 hunger)/`game:bread` (+5 hunger)
+  items, real Minecraft restore values. Right-click dispatch is now a
+  real three-way branch: crafting-table intercept (Phase 50.3, checked
+  first) -> eating (new - deliberately doesn't require a raycast hit,
+  same as Minecraft letting you eat while looking at open air) ->
+  normal slot-driven placement (Phase 49, unchanged). Neither apple nor
+  bread has a survival obtain path yet (no farming/mob drops - both
+  explicitly out of scope, see PROJECT_STATE.md Known Limitations) -
+  `LCU_VERIFY_HEALTH` grants one directly, same synthetic-setup honesty
+  every other verify hook's own item grant already uses.
+- **Real death + respawn**: a death transition (from fall damage or
+  starvation) calls `handle_player_death` - drops the *entire* 36-slot
+  inventory as real item entities at the player's position (reusing the
+  exact same `ItemEntity`/`update_item_entities`/`pickup_item_entities`
+  pipeline Phase 50 built, just centered on the player instead of a
+  broken block), closes any open inventory/workbench screen, and pushes
+  a new "Du bist gestorben" `MenuScreen` (reusing Phase 46's `MenuStack`
+  framework wholesale - no new UI code needed) with a single Respawn
+  row. Respawn resets position to the original spawn point, health/
+  hunger to full, and every fall/regen/starvation/drain accumulator.
+- **New `LCU_VERIFY_HEALTH` headless hook** (the project's seventh):
+  directly teleports the player 10 blocks above their own real spawn
+  ground position with `grounded=false` (a real jump can't reach that
+  height deterministically, but the fall from there on is real,
+  unmodified gravity/collision - the same "synthesize exactly the state
+  a real action would produce" honesty `LCU_VERIFY_WORKBENCH`'s own
+  direct world-block seed already uses), seeds hunger below max (so
+  eating has an observable effect) and grants 1 `game:apple`, then
+  simulates a real right-click once the fall has had time to land. A
+  real run's log output proves both halves of this phase's own "jump
+  from a tower, health drops; eat, hunger rises" directive: `Fall
+  damage: 6.9 (health: 13.1/20.0)` then `Ate game:apple (hunger: 14.0/
+  20.0)`. Death + respawn were separately confirmed via a real run with
+  a temporarily-lethal fall height (`Player died (health reached 0)` /
+  `Player died - inventory dropped as item entities`) - the respawn
+  button itself reuses the exact same `MenuStack`/`pending_menu_action`
+  machinery `LCU_VERIFY_MENU` already proves works, so it wasn't
+  re-verified via a second simulated click sequence.
+- **A real, confirmed single-player-only gap**: in networked mode,
+  `LCU_VERIFY_HEALTH`'s synthetic mid-air teleport is invisible to
+  `VoxelServer`'s own authoritative simulation (the server only ever
+  learns the player's position from real `PlayerInput` packets), so the
+  very next `PlayerCorrection` snaps the client back down before a real
+  fall distance can accumulate - confirmed via a real two-process
+  networked run (`Ate game:apple (hunger: 14.0/20.0)` appears; no `Fall
+  damage:` line does). Eating verifies correctly in networked mode
+  regardless (item grants/consumption are real client-authoritative
+  state, same as every other verify hook's own item grant) - documented
+  in the hook's own doc comment, not silently accepted.
+- Verified via real `LCU_VERIFY_HEALTH` runs on both bgfx and non-bgfx
+  builds, a real two-process networked run, real regression runs of
+  every existing hook (`LCU_VERIFY_BREAK_PLACE`/`CRAFT`/`TORCH`/`MENU`/
+  `HUD`/`INVENTORY`/`WORKBENCH` - all still pass), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build.
+- `ctest` 547/547 (bgfx) / 539/539 (non-bgfx), both up 24 from Phase 50.
+- Honestly scoped: no armor/enchantments reduce fall damage (out of
+  scope, see the standing directive's own exclusion list); sprinting
+  itself doesn't move the player any faster yet (`Action::Sprint` was
+  already a real bound action with no consumer before this phase - it
+  now drives hunger drain's real 2x multiplier, but no speed boost
+  exists to pair with it - a real, pre-existing gap this phase didn't
+  need to close to satisfy its own "more when sprinting" hunger-drain
+  requirement); apple/bread have no survival obtain path (no farming/
+  mob drops, both out of scope) - see PROJECT_STATE.md.
 
 ### Phase 50
 
