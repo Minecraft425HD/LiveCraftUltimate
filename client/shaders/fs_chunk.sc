@@ -80,9 +80,22 @@ void main()
     float ty = floor(v_texindex / 16.0);
     vec2 tile_origin = vec2(tx, ty) * u_tileStep.xy + u_tileInset.xy;
     vec2 atlas_uv = tile_origin + local_uv * u_tileStep.zw;
-    vec3 tex_color = texture2D(s_atlas, atlas_uv).rgb;
+    vec4 tex_sample = texture2D(s_atlas, atlas_uv);
 
-    vec3 base_color = mix(v_color0, tex_color, u_useTextures.x);
+    vec3 base_color = mix(v_color0, tex_sample.rgb, u_useTextures.x);
+    // Real per-texel alpha (Phase 61) - was hardcoded 1.0 before this
+    // phase, since nothing needed anything else yet. Sampling the
+    // atlas's own real alpha here (kept 1.0 in flat-color mode, same as
+    // the old behavior) costs nothing for every existing opaque draw
+    // call (Renderer::submit_chunk_mesh's opaque path has no blend state
+    // set, so a fragment's alpha value is simply never used for
+    // compositing there) - it only actually matters for the one real
+    // NEW caller that does enable blending (the water layer's own
+    // alpha-blended draw, see submit_chunk_mesh's own `alpha_blend`
+    // parameter), where water's real semi-transparent texture alpha
+    // (~180/255, see lcu::assets::generate_water) now genuinely
+    // composites see-through instead of being silently discarded.
+    float base_alpha = mix(1.0, tex_sample.a, u_useTextures.x);
     vec3 final_color = base_color * light * noise_factor;
-    gl_FragColor = vec4(final_color, 1.0);
+    gl_FragColor = vec4(final_color, base_alpha);
 }

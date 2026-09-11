@@ -2501,6 +2501,51 @@ overlay covers all 6 faces uniformly rather than only the specific
 face being broken (a real, documented simplification, see
 DECISIONS.md).
 
+## Phase 61 — Transparent water rendering
+
+- [x] `mesh_chunk_greedy`'s face-visibility test gains a real second
+  branch for "two different non-opaque substances touching" (today:
+  water next to air), alongside the existing opaque-vs-transparent
+  XOR - a transparent block is no longer invisible against another
+  non-opaque material.
+- [x] Quads route to `mesh.water` vs `mesh.opaque` by reusing the
+  existing `BlockDefinition::is_transparent` flag (no new field
+  added) - water is now the one real block with it flipped true.
+- [x] New `Renderer::submit_chunk_mesh` `alpha_blend` parameter
+  (defaulted false, existing opaque calls unaffected) - real
+  `BGFX_STATE_BLEND_ALPHA` (depth test on, depth write off) for the
+  water draw pass.
+- [x] `fs_chunk.sc` now samples and outputs the atlas's real per-texel
+  alpha instead of a hardcoded `1.0` - safe for every existing opaque
+  draw (alpha only matters when blend state is enabled), lets water's
+  real ~180/255-alpha texture (Phase 54) actually composite
+  see-through.
+- [x] Real client wiring: a second `gpu_water_meshes` map mirrors
+  `gpu_meshes` through remesh/upload, far-chunk unload, and shutdown;
+  the render loop draws all opaque chunks first, then all water chunks
+  alpha-blended, reusing bgfx view 0.
+- [x] 3 new `GreedyMesher` unit tests for the new visibility branch and
+  layer routing; 1 existing test's stale assertion/comment fixed (a
+  2-block transparent pair's 5 real air-facing faces are not empty,
+  only the shared internal boundary stays face-less).
+- [x] Verified via real headless runs, real `LCU_VERIFY_BREAK_PLACE`
+  and the full regression sweep (`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH`/`HUD`, all clean), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build confirming `fs_chunk.sc` recompiles
+  cleanly to all 3 profiles (spirv/glsl/essl).
+
+`ctest` 591/591 (bgfx, up from 587) / 586/586 (non-bgfx, up from 583).
+
+Honestly scoped: what real transparent water looks like on a real
+GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; there
+is no back-to-front sort between separate water chunks (a real,
+low-risk limitation - a single contiguous water body renders correctly
+regardless of inter-chunk draw order); leaves deliberately stay opaque
+this phase (a real open choice per the brief's own wording, not a
+gap); light now also passes through water as a real, accepted,
+directionally-correct side effect of reusing `is_transparent` for both
+layer routing and lighting opacity (see DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

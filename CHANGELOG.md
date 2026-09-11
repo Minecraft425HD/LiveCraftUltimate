@@ -2,7 +2,56 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61
+
+### Phase 61
+
+- **Real transparent water rendering**: the `ChunkMesh::water` layer
+  (structurally present since early phases, never populated) is now
+  real. `mesh_chunk_greedy`'s face-visibility test gains a second real
+  branch - beyond the existing opaque-vs-transparent XOR - for "two
+  different non-opaque substances touching" (today: water next to
+  air), so a transparent block is no longer silently invisible where
+  it borders another non-opaque material. Quads route to `mesh.water`
+  vs `mesh.opaque` by reusing the existing `BlockDefinition::
+  is_transparent` flag (no new field needed) - water is now the one
+  real block with that flag flipped true.
+- **Real alpha-blended chunk draw**: `Renderer::submit_chunk_mesh`
+  gains an `alpha_blend` parameter (default false, every existing
+  opaque call site unaffected) - when true, real
+  `BGFX_STATE_BLEND_ALPHA` replaces the opaque state, keeping depth
+  test but dropping depth write. `fs_chunk.sc` now samples and outputs
+  the atlas's real per-texel alpha (previously hardcoded `1.0`) -
+  harmless for every opaque draw (alpha is only ever consumed when
+  blend state is enabled) and lets water's real semi-transparent
+  texture (alpha ~180/255, Phase 54) genuinely composite see-through.
+- **Real client wiring**: a second `gpu_water_meshes` map mirrors
+  `gpu_meshes` through every lifecycle point (remesh/upload, far-chunk
+  unload, shutdown); the render loop draws the opaque layer fully
+  first, then a second pass over `gpu_water_meshes` with
+  `alpha_blend=true`, reusing view 0 (no new bgfx view) - opaque-then-
+  transparent with no back-to-front sort between water chunks, a real,
+  documented limitation.
+- Real, accepted side effect: `is_transparent` also drives light
+  propagation (`engine/lighting/propagation.h`), so light now passes
+  through water too - not separately fixed, see DECISIONS.md.
+- Leaves deliberately stay opaque (`is_transparent = false`) - out of
+  scope for this phase, which is titled and scoped to water only.
+- 3 new `GreedyMesher` unit tests for the new visibility branch and
+  layer routing; 1 existing test's stale assertion/comment fixed (a
+  2-block transparent pair's 5 real air-facing faces are NOT empty,
+  only the shared internal boundary between them stays face-less).
+- Verified via real headless runs (default + `LCU_VERIFY_BREAK_PLACE`,
+  60 frames, clean shutdown) and the full regression sweep (`HEALTH`/
+  `MENU`/`INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH`/`HUD`, all complete
+  cleanly), plus a real `LCU_BUILD_SHADER_TOOLS=ON` build confirming
+  `fs_chunk.sc` recompiles cleanly to all 3 profiles (spirv/glsl/
+  essl). `ctest` 591/591 (bgfx, up from 587) / 586/586 (non-bgfx, up
+  from 583).
+- Honestly scoped: no back-to-front sorting between separate water
+  chunks (a real, low-risk limitation - single water bodies render
+  correctly either way); what real transparency looks like on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**.
 
 ### Phase 60
 

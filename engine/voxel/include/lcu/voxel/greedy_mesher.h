@@ -236,9 +236,42 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     const bool pos_opaque = detail::is_opaque_block(pos_id, registry);
 
                     detail::MaskCell cell;
+                    // `solid_is_neg` - which side (if either) actually
+                    // draws a face this cell, "solid" meaning "the real
+                    // substance side, not the side this face is exposed
+                    // to" (an opaque block normally, but see the Phase 61
+                    // branch below for a non-opaque real substance like
+                    // water too).
+                    bool solid_is_neg = false;
                     if (neg_opaque != pos_opaque) {
                         cell.has_face = true;
-                        if (neg_opaque) {
+                        solid_is_neg = neg_opaque;
+                    } else if (!neg_opaque && !pos_opaque && neg_id != pos_id) {
+                        // Real substance boundary between two DIFFERENT
+                        // non-opaque blocks (Phase 61: water's own real
+                        // surface against open air) - the plain
+                        // `neg_opaque != pos_opaque` test above only ever
+                        // catches "one side is a solid wall", so a
+                        // transparent-but-real block like water sitting
+                        // next to air (also transparent) would otherwise
+                        // never get a face at all, making it invisible -
+                        // exactly the trap `game:water`'s own Phase-53-
+                        // era registration comment already named. Today
+                        // air and water are the only two `is_transparent`
+                        // blocks that exist, so this real branch only
+                        // ever fires for a water/air boundary - it
+                        // generalizes correctly to any future non-opaque-
+                        // vs-non-opaque pairing too, preferring whichever
+                        // side isn't air to draw its face (falling back to
+                        // the negative side if somehow neither is air - a
+                        // real, deliberate but arbitrary tie-break with no
+                        // existing block pair to have a "right" answer
+                        // for).
+                        cell.has_face = true;
+                        solid_is_neg = (pos_id == kAirBlockId) || (neg_id != kAirBlockId);
+                    }
+                    if (cell.has_face) {
+                        if (solid_is_neg) {
                             // Solid is on the negative side: the visible
                             // face points away from it, along +d.
                             cell.block_id = neg_id;
@@ -260,7 +293,7 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         // computed yet (Phase 29-31), so this keeps the
                         // Phase 26/27-era full-bright default rather than
                         // reading out of bounds or guessing dark.
-                        const i32* air_pos = neg_opaque ? pos_pos : neg_pos;
+                        const i32* air_pos = solid_is_neg ? pos_pos : neg_pos;
                         if (air_pos[0] >= 0 && air_pos[0] < N && air_pos[1] >= 0 && air_pos[1] < N &&
                             air_pos[2] >= 0 && air_pos[2] < N) {
                             const u32 ax = static_cast<u32>(air_pos[0]);
@@ -375,10 +408,21 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     const u8 light_b = detail::smooth_corner_light(mask, N, iu + width, jv);
                     const u8 light_c = detail::smooth_corner_light(mask, N, iu + width, jv + height);
                     const u8 light_d = detail::smooth_corner_light(mask, N, iu, jv + height);
+                    // Real transparent-layer routing (Phase 61): the same
+                    // `is_transparent` flag that decided this quad's own
+                    // face visibility above also decides which real
+                    // layer it belongs in - a transparent "current" block
+                    // (only water today; air itself is never `current`,
+                    // see the face-visibility branch above) goes into
+                    // `mesh.water` for its own separate, alpha-blended
+                    // draw call (Renderer::submit_chunk_mesh's real
+                    // `alpha_blend` parameter); everything else keeps
+                    // going into `mesh.opaque`, unchanged.
+                    ChunkMeshLayer& target_layer = def.is_transparent ? mesh.water : mesh.opaque;
                     if (current.positive_facing) {
-                        mesh.opaque.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color, light_a, light_b, light_c,
-                                              light_d, static_cast<u16>(quad_texture_index));
+                        target_layer.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
+                                               static_cast<f32>(height), quad_color, light_a, light_b, light_c,
+                                               light_d, static_cast<u16>(quad_texture_index));
                     } else {
                         // Winding reversed (c0,c3,c2,c1) for a negative-
                         // facing quad - the light argument order must
@@ -386,9 +430,9 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         // gets the light for the corner it's actually
                         // at, not the corner it would be at under the
                         // other winding.
-                        mesh.opaque.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color, light_a, light_d, light_c,
-                                              light_b, static_cast<u16>(quad_texture_index));
+                        target_layer.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
+                                               static_cast<f32>(height), quad_color, light_a, light_d, light_c,
+                                               light_b, static_cast<u16>(quad_texture_index));
                     }
 
                     for (i32 l = 0; l < height; ++l) {

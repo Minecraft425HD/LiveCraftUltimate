@@ -260,13 +260,78 @@ TEST(GreedyMesher, TwoAdjacentTransparentBlocksProduceNoOpaqueFaces) {
 
     const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
 
-    // Known simplification, not a bug: transparent-vs-transparent never
-    // draws a face here (even between two *different* transparent
-    // materials, e.g. glass touching water), since no transparent-layer
-    // meshing exists yet - see DECISIONS.md. Revisit once a real
-    // transparent block exists to motivate it.
+    // Two adjacent cells of the SAME transparent block never draw a face
+    // between them (a real merged transparent body, e.g. two touching
+    // water blocks - Phase 61's own visibility rule only fires for
+    // DIFFERENT transparent substances, see
+    // TwoDifferentTransparentBlocksProduceARealFaceBetweenThem below) -
+    // a real 2x1x1 glass box has exactly 6 real exposed faces (greedy-
+    // merged into 6 quads = 36 indices, the same real count a single
+    // isolated glass block would have), proving the shared internal
+    // boundary itself contributed zero extra faces.
     EXPECT_TRUE(mesh.opaque.empty());
-    EXPECT_TRUE(mesh.transparent.empty());
+    EXPECT_EQ(mesh.water.indices.size(), 36u);
+}
+
+TEST(GreedyMesher, TwoDifferentTransparentBlocksProduceARealFaceBetweenThem) {
+    // Phase 61: a real transparent substance (e.g. water) touching a
+    // DIFFERENT transparent block (including plain air) must still draw
+    // a real face - water sitting under open air needs a visible top
+    // face, or it would be completely invisible. This is the real fix
+    // for the exact gap the old EmptyChunk-style test above used to
+    // document as "known simplification, not a bug".
+    BlockRegistry registry;
+    const auto glass = register_transparent(registry, "test:glass");
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, glass);
+    chunk.set_block(6, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    EXPECT_TRUE(mesh.opaque.empty());
+    EXPECT_FALSE(mesh.water.empty());
+}
+
+TEST(GreedyMesher, TransparentBlockNextToAirProducesARealVisibleFace) {
+    // The real, common Phase 61 case: a single water block surrounded by
+    // open air (e.g. a lone water source block) - every one of its 6
+    // faces must be real and visible, not silently culled the way the
+    // old opaque-only visibility test would have culled them.
+    BlockRegistry registry;
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    EXPECT_TRUE(mesh.opaque.empty());
+    EXPECT_EQ(mesh.water.indices.size(), 36u);  // 6 faces * 6 indices, unmerged (isolated block).
+}
+
+TEST(GreedyMesher, TransparentBlockFacesRouteToTheWaterLayerNotOpaque) {
+    // A real opaque neighbor still culls correctly against a transparent
+    // block (the pre-existing `neg_opaque != pos_opaque` path), but the
+    // resulting face must land in mesh.water, not mesh.opaque - Phase 61's
+    // own real per-quad layer routing, keyed off the SAME `is_transparent`
+    // flag the face-visibility test itself already uses.
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone);
+    chunk.set_block(6, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    // Stone's own real face at the shared stone/water boundary lands in
+    // mesh.opaque; water's own real faces (this shared boundary belongs
+    // to stone, not water - see solid_is_neg's own doc comment - but
+    // water's other 5 faces, all touching open air, are real too) land
+    // in mesh.water. Both layers end up real and non-empty, each with
+    // the right block's own geometry.
+    EXPECT_FALSE(mesh.opaque.empty());
+    EXPECT_FALSE(mesh.water.empty());
 }
 
 TEST(GreedyMesher, BlockAtChunkBoundaryStillProducesBoundaryFace) {

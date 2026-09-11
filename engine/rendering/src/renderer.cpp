@@ -172,7 +172,7 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
 
 void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
                                   const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj,
-                                  f32 sky_light_scale, bgfx::TextureHandle atlas_texture) {
+                                  f32 sky_light_scale, bgfx::TextureHandle atlas_texture, bool alpha_blend) {
     LCU_ASSERT(initialized_);
     if (!mesh.is_valid() || !bgfx::isValid(program)) {
         return;
@@ -182,7 +182,16 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     bgfx::setTransform(model.data());
     bgfx::setVertexBuffer(0, mesh.vertex_buffer);
     bgfx::setIndexBuffer(mesh.index_buffer);
-    bgfx::setState(BGFX_STATE_DEFAULT);
+    // Real translucent state (Phase 61) - see this function's own doc
+    // comment in renderer.h. BGFX_STATE_DEFAULT (every opaque chunk
+    // draw, unchanged) already includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/
+    // MSAA; the alpha-blended path keeps depth TESTING (so water still
+    // correctly hides behind solid terrain) but drops depth WRITING and
+    // adds real alpha blending instead.
+    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
+                                      BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA)
+                                   : BGFX_STATE_DEFAULT;
+    bgfx::setState(state);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
     bgfx::setUniform(sky_light_scale_uniform_, uniform_value);
 

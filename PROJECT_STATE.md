@@ -72,9 +72,14 @@ walk/idle animation; debug wireframe boxes became a real toggle,
 default off)**, and **Phase 60 (the Phase 48.2 flat-darkening break-
 progress box is now a real alpha-blended, procedurally-generated
 crack-texture overlay, 10 real growing-damage stages sharing the
-existing block atlas)** are done - see TASK_QUEUE.md for per-phase
-detail as each of the remaining
-6 phases lands. See
+existing block atlas)**, and **Phase 61 (the long-dormant
+`ChunkMesh::water` layer is now real - water renders real
+alpha-blended, see-through geometry via a new face-visibility branch
+for transparent-vs-transparent boundaries, layer routing that reuses
+the existing `BlockDefinition::is_transparent` flag, and a real
+per-texel-alpha `fs_chunk.sc` change)** are done - see TASK_QUEUE.md
+for per-phase detail as each of the remaining
+5 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2553,6 +2558,18 @@ None currently tracked.
   `render_hit` doesn't currently expose which face was hit, and the
   effect is still real and visible from every angle, just not face-
   specific).
+- Phase 61 water transparency has no back-to-front sort between
+  separate water chunks' draw calls (a real, low-risk limitation - a
+  single contiguous water body renders correctly regardless of
+  inter-chunk draw order; only adjacent/overlapping separate
+  transparent volumes could show minor sorting artifacts, unverifiable
+  in this headless sandbox anyway). Leaves are still opaque (not
+  alpha-tested) - out of this phase's own water-only scope, a real
+  open choice per the brief's own wording (see DECISIONS.md). Light now
+  also passes through water, a real, accepted, directionally-correct
+  side effect of reusing `is_transparent` as both the water
+  visibility/layer-routing key and the pre-existing lighting-opacity
+  flag (see DECISIONS.md).
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No

@@ -4048,3 +4048,80 @@ normal field it doesn't have) for a visual improvement unverifiable in
 this headless sandbox anyway; a new parallel `submit_alpha_textured_box`
 function - rejected as unnecessary duplication of `submit_textured_box`'s
 own vertex-building logic.
+
+## 2026-09-11 — Phase 61: reusing `is_transparent` as the layer-routing key, letting light pass through water as an accepted side effect, leaves stay opaque, and no back-to-front sort between water chunks
+
+**Context:** Phase 61 makes the long-dormant `ChunkMesh::water` layer
+real - water actually renders as alpha-blended, see-through geometry
+instead of a fully opaque block, closing a gap that has existed since
+`ChunkMesh` first gained its `opaque`/`transparent`/`water` fields.
+
+**Quads route to `mesh.water` vs `mesh.opaque` via the EXISTING
+`BlockDefinition::is_transparent` flag - no new field was added.**
+`is_transparent` already exists and is already true for exactly one
+real block (water); reusing it as the layer key needed zero new
+per-block data and zero registry changes, versus a hypothetical new
+`render_layer` enum field that would have duplicated information
+`is_transparent` already encodes for every block that currently has
+this phase's real content (water only - nothing else is transparent
+yet). The real cost of this reuse is accepted explicitly below.
+
+**Real, accepted side effect: flipping water's `is_transparent` to
+true also changes lighting, since `engine/lighting/propagation.h`
+reads the SAME flag to decide whether light passes through a block.**
+Sky/block light now propagates through water voxels where it
+previously stopped dead at the first water face. This was not
+separately special-cased or fixed - real Minecraft itself also lets
+light (attenuated) pass through water, so the side effect happens to
+be directionally correct rather than a regression, and adding a
+second, lighting-only "is this block opaque to light" flag purely to
+avoid an already-plausible behavior change would have been real,
+unjustified complexity for a phase titled and scoped to rendering, not
+lighting.
+
+**Leaves deliberately stay opaque (`is_transparent = false`) - not
+touched this phase.** The brief's own Phase 61 wording explicitly
+offers "entscheiden ob transparent (Alpha-Test) oder opak" for
+leaves, naming it as a real, open choice rather than a requirement.
+Phase 61 is titled and scoped to water specifically; folding leaves in
+too would have doubled the real scope (leaves need a genuinely
+different transparency mode - alpha-TEST/cutout, not alpha-BLEND,
+since real Minecraft leaves are either fully opaque or fully
+transparent per texel, never partially blended) for a phase whose own
+name only promises water.
+
+**No back-to-front sort exists between separate water chunks' draw
+calls - they render in whatever order `gpu_water_meshes` iterates.**
+Real sorted transparency would need either per-triangle/per-quad
+sorting inside each chunk mesh or at minimum a camera-distance sort
+across chunks, both real additional complexity with no way to visually
+verify the improvement in this headless, no-GPU-display sandbox
+regardless. A single contiguous water body (the overwhelmingly common
+real case - lakes, rivers, oceans) renders identically regardless of
+inter-chunk draw order, since its own internal opaque-water-against-
+air faces are unaffected by which OTHER chunk's water happens to draw
+before or after it; only adjacent/overlapping SEPARATE transparent
+volumes could show minor sorting artifacts, accepted as a real,
+documented, low-risk limitation.
+
+**Water reuses bgfx view 0 rather than gaining a dedicated transparency
+view.** A second Vhw would need real `setViewOrder`/`setViewClear`/
+resize-handling plumbing changes throughout `VoxelClient` for a
+render-order guarantee already achieved more simply by just issuing
+the water draw calls AFTER the opaque ones within the same view (bgfx
+executes submitted draws within a view in submission order for a fixed
+depth-test state) - the opaque-then-transparent split needed here is a
+draw-CALL-order property, not a view-order property.
+
+**Alternatives considered:** a new dedicated `render_layer`/
+`is_water` field on `BlockDefinition` instead of reusing
+`is_transparent` - rejected as duplicate data for the one real block
+that needs it today; a second lighting-only opacity flag to keep light
+stopping at water's surface - rejected as unjustified complexity for a
+side effect that is itself directionally realistic; extending Phase 61
+to leaves too - rejected as doubling scope for a mode (alpha-test) this
+phase's alpha-BLEND plumbing doesn't serve; per-chunk or per-camera
+back-to-front water sorting - rejected as real, unverifiable-in-sandbox
+complexity for a limitation that doesn't affect the common single-body
+case; a dedicated bgfx transparency view - rejected as more plumbing
+than the draw-call-ordering approach already achieves for real.

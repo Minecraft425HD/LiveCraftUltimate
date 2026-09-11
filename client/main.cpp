@@ -962,17 +962,16 @@ int main() {
     // own.
     //
     // Deliberately `is_transparent = false` (a solid glowing cube, not
-    // a wall/floor-mounted cross/billboard shape): mesh_chunk_greedy
-    // only ever meshes the *opaque* layer into real geometry today
-    // (engine/voxel::ChunkMesh::transparent/water exist structurally
-    // but stay empty - see DECISIONS.md "no transparent block
-    // registered anywhere" from Phase 26, now literally not true, but
-    // no transparent-layer *meshing* exists to make one visible yet).
-    // A `true` here would make this block real, correctly-lit, and
-    // completely invisible - exactly the kind of half-working gap
-    // brief section 96's "no fake features" exists to catch. Solid and
-    // collidable like every other block here until a real cross-shaped
-    // block-rendering path exists to justify the visual difference.
+    // a wall/floor-mounted cross/billboard shape): a torch is a real
+    // opaque solid in this project's own model, unrelated to whether
+    // real transparent-layer meshing exists (it does now, Phase 61 -
+    // see `game:water`'s own real `is_transparent = true` below). A
+    // `true` here would route it into the alpha-blended water layer as
+    // a solid orange-tinted cube, which is simply the wrong real
+    // material category for it, not a visibility bug to avoid. Solid
+    // and collidable like every other block here until a real cross-
+    // shaped block-rendering path exists to justify the visual
+    // difference.
     // Warm orange-yellow tint (no flame animation/particle - see Known
     // Limitations).
     lcu::voxel::BlockDefinition torch_def;
@@ -992,20 +991,26 @@ int main() {
     // is now centered on lcu::world::worldgen::kSeaLevel (world Y 0)
     // instead of always positive, so some columns' terrain genuinely
     // dips below it - generate_terrain_chunk (below) fills that gap
-    // with this block up to sea level. Same "solid, not fake-invisible"
-    // reasoning the torch block above already established: no
-    // transparent-layer *meshing* exists yet (see DECISIONS.md), so
-    // `is_transparent = true` here would make water correctly placed
-    // by worldgen but completely invisible - exactly the trap Phase 34
-    // caught for the torch. `has_collision = false` is the real,
-    // honest difference from every solid block registered so far - a
-    // player can walk/swim straight through it, using the same is_solid
-    // predicate (BlockDefinition::has_collision) every other block's
-    // collision already goes through, not a new physics special case.
+    // with this block up to sea level. `is_transparent = true` (Phase
+    // 61, flipped from `false` since Phase 37 - see that phase's own
+    // comment history) now means something real: `mesh_chunk_greedy`
+    // routes every one of water's own faces into `ChunkMesh::water`
+    // (a real, separate, alpha-blended draw call - see Renderer::
+    // submit_chunk_mesh's own `alpha_blend` parameter), not the
+    // completely-invisible trap the same flag would have been before
+    // real transparent-layer meshing existed. This also means light now
+    // propagates THROUGH water (the lighting system reads the same
+    // `is_transparent` bit - see DECISIONS.md), a real, accepted change
+    // in behavior, not an oversight. `has_collision = false` is the
+    // real, honest difference from every solid block registered so far
+    // - a player can walk/swim straight through it, using the same
+    // is_solid predicate (BlockDefinition::has_collision) every other
+    // block's collision already goes through, not a new physics
+    // special case.
     lcu::voxel::BlockDefinition water_def;
     water_def.namespaced_id = "game:water";
     water_def.display_name = "Water";
-    water_def.is_transparent = false;
+    water_def.is_transparent = true;
     water_def.has_collision = false;
     // No hardness override needed (Phase 48, "Wasser unendlich (nicht
     // abbaubar)"): the DDA raycast (see is_solid below) only ever stops
@@ -1379,6 +1384,13 @@ int main() {
 
 #if defined(LCU_ENABLE_BGFX)
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_meshes;
+    // Real transparent/water GPU mesh map (Phase 61) - a chunk's own
+    // `ChunkMesh::water` layer gets its own separate GPU buffer and its
+    // own separate `submit_chunk_mesh` call (real alpha blending), so it
+    // needs its own real per-chunk map, mirroring `gpu_meshes` exactly
+    // (see remesh_and_upload/unload_far_chunks/shutdown below for the
+    // 3 real places this mirrors the opaque map's own lifecycle).
+    std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_water_meshes;
 #endif
 
     // Per-chunk light data (brief section 24), fed into meshing since
@@ -1539,6 +1551,20 @@ int main() {
         lcu::rendering::GpuChunkMesh gpu_mesh = lcu::rendering::upload_chunk_mesh_layer(mesh.opaque);
         if (gpu_mesh.is_valid()) {
             gpu_meshes.emplace(coord, gpu_mesh);
+        }
+        // Real transparent/water layer upload (Phase 61) - mirrors the
+        // opaque upload immediately above exactly, just for
+        // `mesh.water`/`gpu_water_meshes` instead. `upload_chunk_mesh_
+        // layer` already takes a plain `ChunkMeshLayer` with no opaque-
+        // specific assumption, so it needed no change at all to serve
+        // this second real call site.
+        if (auto it = gpu_water_meshes.find(coord); it != gpu_water_meshes.end()) {
+            lcu::rendering::destroy_gpu_chunk_mesh(it->second);
+            gpu_water_meshes.erase(it);
+        }
+        lcu::rendering::GpuChunkMesh gpu_water_mesh = lcu::rendering::upload_chunk_mesh_layer(mesh.water);
+        if (gpu_water_mesh.is_valid()) {
+            gpu_water_meshes.emplace(coord, gpu_water_mesh);
         }
 #else
         (void)mesh;
@@ -1922,6 +1948,10 @@ int main() {
             if (auto it = gpu_meshes.find(coord); it != gpu_meshes.end()) {
                 lcu::rendering::destroy_gpu_chunk_mesh(it->second);
                 gpu_meshes.erase(it);
+            }
+            if (auto it = gpu_water_meshes.find(coord); it != gpu_water_meshes.end()) {
+                lcu::rendering::destroy_gpu_chunk_mesh(it->second);
+                gpu_water_meshes.erase(it);
             }
 #endif
             // Real map hygiene (WorldLight::remove_chunk_light's own
@@ -4195,6 +4225,29 @@ int main() {
             }
         }
 
+        // Real transparent/water pass (Phase 61) - submitted as a real
+        // SEPARATE draw call per chunk, AFTER every opaque chunk above,
+        // so translucent water always composites over already-drawn
+        // solid terrain (real depth TESTING still applies within this
+        // pass too, so water correctly hides behind a solid wall it's
+        // on the far side of). `alpha_blend=true` is the one real
+        // difference from the opaque loop above - see Renderer::
+        // submit_chunk_mesh's own doc comment. No real back-to-front
+        // sorting between different water chunks (`gpu_water_meshes` is
+        // iterated in arbitrary `unordered_map` order, same as
+        // `gpu_meshes` above) - a real, accepted limitation for large
+        // adjacent water bodies, see DECISIONS.md.
+        for (const auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
+            const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
+                                                                         static_cast<lcu::f32>(coord.y * kEdge),
+                                                                         static_cast<lcu::f32>(coord.z * kEdge)});
+            renderer.submit_chunk_mesh(gpu_water_mesh, chunk_program, model, view, proj,
+                                        day_night_cycle.sky_light_scale(), atlas_texture, /*alpha_blend=*/true);
+            if (gpu_water_mesh.is_valid() && bgfx::isValid(chunk_program)) {
+                ++draw_calls;
+            }
+        }
+
         // Entity rendering (Phase 36 debug boxes, real visible NPC
         // models since Phase 59) - `entity_count` itself (fed to the
         // debug overlay's own stats) is always accurate regardless of
@@ -4671,6 +4724,9 @@ int main() {
     }
     for (auto& [coord, gpu_mesh] : gpu_meshes) {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
+    }
+    for (auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
+        lcu::rendering::destroy_gpu_chunk_mesh(gpu_water_mesh);
     }
     renderer.destroy_texture(atlas_texture);
     renderer.destroy_texture(font_atlas_texture);

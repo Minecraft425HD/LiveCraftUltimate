@@ -97,9 +97,21 @@ class Renderer : public NonCopyable {
     // source of truth: no atlas bound genuinely means no atlas to
     // sample, not a caller-managed toggle that could drift out of sync
     // with what's actually bound).
+    // `alpha_blend` (Phase 61, defaulted false so every existing opaque
+    // call site is unaffected): when true, real `BGFX_STATE_BLEND_ALPHA`
+    // replaces the opaque depth-writing state, and depth WRITE is turned
+    // off (real per-frame translucent geometry shouldn't leave a lasting
+    // mark in the depth buffer, the same reasoning every other real
+    // alpha-blended primitive in this class already gives) - the one
+    // real caller this exists for is a chunk's own `ChunkMesh::water`
+    // layer (see lcu::voxel::mesh_chunk_greedy's real transparent-layer
+    // routing), submitted as a SEPARATE `submit_chunk_mesh` call from
+    // the opaque layer, after it, so translucent water composites over
+    // already-drawn solid terrain (see client/main.cpp's own real
+    // per-frame two-pass draw loop).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
                             const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
-                            bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE);
+                            bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, bool alpha_blend = false);
 
     // Real GPU texture upload (Phase 53) - `pixels` is a tightly packed
     // RGBA8 buffer, `width*height*4` bytes, row-major top-to-bottom (the
