@@ -2,7 +2,93 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35
+
+### Phase 35
+
+- **`reseed_light_for_newly_loaded_chunk`** (`engine/lighting/propagation.h`):
+  closes the two "arrived too late" cross-chunk lighting gaps every
+  prior phase honestly documented rather than guessed at. Call once,
+  right after a chunk's own initial light is computed:
+  - Block light (Phase 31's gap): an already-loaded neighbor's
+    existing light never crossed into a chunk that loaded afterward,
+    and symmetrically a newly-loaded chunk's own near-boundary emitter
+    never reached an already-loaded neighbor either. Fixed by
+    reseeding - walking every already-loaded neighbor's shared
+    boundary face once, collecting every currently-lit cell on *both*
+    sides into one queue, then re-flooding via the existing
+    `flood_block_light_cross_chunk` (which only ever raises a value,
+    never lowers one - safe and idempotent; an already-correct cell
+    contributes nothing).
+  - Sky light (Phase 30's gap): a chunk loading *above* an
+    already-loaded, already-lit chunk below left that neighbor stale
+    (computed assuming open sky, since nothing was there yet). Fixed
+    by recomputing every already-loaded chunk below, cascading through
+    however many happen to be stacked.
+  - Returns every chunk this call's light actually touched, for the
+    caller to remesh.
+- 4 new unit tests (`ReseedLightForNewlyLoadedChunk.*`): late-arriving
+  block light in both directions, sky-light cascade through two
+  stacked already-lit chunks (hand-verified), and the no-already-
+  loaded-neighbors no-op case.
+- **VoxelClient wiring**: called after every chunk load (the initial
+  spawn-area load, per-movement streaming, and the networked
+  `ChunkDataFragment` receipt path - closing the exact gap that
+  handler's own code comment named this phase for), remeshing whatever
+  it reports touched.
+- **Real client-side chunk unloading** (the literal "chunk unload"
+  half of this phase's name): before this phase the client's `World`
+  only ever grew for the process's whole lifetime, even as the player
+  walked away, holding every chunk's mesh/GPU buffers/light data
+  forever (`WorldLight::remove_chunk_light` has named this phase as
+  its real caller since Phase 29). Now a distance-gated unload sweep
+  (the client's own counterpart to `VoxelServer`'s Phase 20
+  interest-scoped unloading) runs on every streaming-center change:
+  saves the chunk to a new `client_world/chunks/` directory first
+  (mirroring `VoxelServer`'s own save-before-unload exactly, so a
+  single-player edit doesn't silently revert to regenerated terrain
+  the moment the player wanders back), destroys its GPU mesh, removes
+  its light data, then unloads it from `World`. Loading (both the
+  initial spawn area and per-movement streaming) now checks that same
+  directory before falling back to regenerating.
+- Two new log lines (`"Streaming center moved to ..."`,
+  `"Unloaded N chunk(s) beyond streaming range ..."`) plus a
+  single-player `"Player position: ..."` shutdown line for parity with
+  the existing networked-mode one - all real diagnostics that proved
+  useful while verifying this phase's own behavior, not left in as
+  debug noise.
+- **A real, pre-existing (not introduced by this phase) finding made
+  while verifying it**: `LCU_VERIFY_MOVE_SECONDS` moves in a straight
+  line and never jumps, so it can get legitimately blocked by terrain
+  taller than the player's auto-step height - confirmed byte-identical
+  against the pre-Phase-35 build under the same test, so this is a
+  limitation of that one verification hook's simplicity, not a physics
+  bug. Documented in DECISIONS.md; not fixed here (out of this phase's
+  scope) - unblocked for this phase's own real-run verification by
+  temporarily also holding Jump.
+- Verified via a real, longer-distance single-player run (Jump added
+  temporarily to clear the terrain obstacle above): repeated
+  `"Streaming center moved to ..."`/`"Unloaded 12 chunk(s) ..."` pairs
+  firing correctly as the player crossed multiple chunk boundaries,
+  loaded chunk count staying steady at 48 (load/unload balance
+  correct), and 60 real `.chunk` save files written to
+  `client_world/chunks/`. Also verified via the full existing
+  regression set with zero changes needed: `LCU_VERIFY_TORCH`,
+  `LCU_VERIFY_BREAK_PLACE`, `LCU_VERIFY_CRAFT` (byte-identical to
+  Phase 34) and a real two-process networked run (`VoxelServer` +
+  `VoxelClient`, loopback UDP, 600 server ticks, 36 chunks streamed,
+  zero warnings/errors).
+- `ctest` 389/389 (bgfx, up from 385) / 386/386 (non-bgfx, up from
+  382).
+- Honestly scoped: **what any of this looks like on a real GPU/display
+  is still NOT VERIFIED — ENVIRONMENT LIMITATION**; the reload-from-
+  disk half of client-side persistence wasn't separately re-verified
+  end-to-end in this run (the verify hook only moves one direction) -
+  the save-on-unload half is proven by 60 real files written this run,
+  and the load-from-disk half reuses the exact same `chunk_serializer`
+  API `VoxelServer` already proves correct (round-trip/corruption
+  tests since Phase 3); lateral sky light bleed under overhangs
+  remains unmodeled (documented since Phase 6).
 
 ### Phase 34
 

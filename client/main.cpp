@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -729,6 +730,64 @@ int main() {
         }
     };
 
+    // Client-side chunk persistence (Phase 35): mirrors VoxelServer's
+    // own chunk_save_dir/chunk_file_path exactly (see DECISIONS.md) -
+    // needed so the real client-side chunk unloading this phase adds
+    // (see unload_far_chunks below) doesn't silently discard
+    // single-player edits the moment the player wanders far enough
+    // away and back. Deliberately a separate directory from any
+    // VoxelServer instance's own "<world>/chunks" (a plain
+    // "client_world" next to the executable, the same relative-to-cwd
+    // convention "shaders/chunk" already uses) - a networked client's
+    // local copy is never authoritative anyway (server ChunkData
+    // always wins on arrival, see the ChunkDataFragment handler
+    // below), so there's no need for it to share a server's actual
+    // save directory even when both processes happen to run from the
+    // same working directory.
+    const std::filesystem::path chunk_save_dir = std::filesystem::path("client_world") / "chunks";
+    std::filesystem::create_directories(chunk_save_dir);
+    const auto chunk_file_path = [&](lcu::voxel::ChunkCoord coord) {
+        return (chunk_save_dir / fmt::format("{}_{}_{}.chunk", coord.x, coord.y, coord.z)).string();
+    };
+
+    // Loads `coord` (placeholder terrain via world.load_chunk), then
+    // overwrites it with a real save from disk if one exists - same
+    // "regenerate first, then overwrite if a save exists" sequencing
+    // VoxelServer's own per-movement streaming already uses. Callers
+    // that already know `coord` isn't Unloaded (idempotent re-checks)
+    // should keep calling world.load_chunk directly instead - this is
+    // specifically for a coordinate about to be loaded for real.
+    const auto load_chunk_checking_disk = [&](lcu::voxel::ChunkCoord coord) {
+        world.load_chunk(coord);
+        lcu::voxel::Chunk loaded_from_disk;
+        const auto load_result = lcu::serialization::load_chunk_from_file(chunk_file_path(coord), loaded_from_disk);
+        if (load_result == lcu::serialization::ChunkLoadResult::Ok) {
+            *world.chunk_at_mutable(coord) = loaded_from_disk;
+        } else if (load_result != lcu::serialization::ChunkLoadResult::FileNotFound) {
+            LCU_LOG_WARN(
+                "Chunk ({},{},{}) has a local save file that failed to load, using regenerated terrain instead",
+                coord.x, coord.y, coord.z);
+        }
+    };
+
+    // Phase 35's actual "neighbor dirtying": call once, right after
+    // `coord`'s own initial light (block + sky) has just been
+    // computed, for any freshly-loaded chunk - reseeds light across
+    // every already-loaded neighbor face (closing the Phase 30/31
+    // "arrived too late" gaps - see reseed_light_for_newly_loaded_
+    // chunk's own doc comment in propagation.h) and remeshes whatever
+    // it reports touched. `coord` itself is remeshed separately by
+    // every call site below regardless of what this reports (see that
+    // function's doc comment on why `coord` may or may not appear in
+    // its own result).
+    const auto reseed_and_remesh_after_load = [&](lcu::voxel::ChunkCoord coord) {
+        const auto touched = lcu::lighting::reseed_light_for_newly_loaded_chunk(world, block_registry, world_light,
+                                                                                 coord);
+        for (const lcu::voxel::ChunkCoord& neighbor : touched) {
+            remesh_and_upload(neighbor);
+        }
+    };
+
     const lcu::core::ChunkLoadSettings load_settings = load_settings_from_env();
     LCU_LOG_INFO("Loading world (seed={}) around spawn (radius_xz={}, chunk_y=[{},{}])...", kWorldSeed,
                  load_settings.radius_xz, load_settings.min_chunk_y, load_settings.max_chunk_y);
@@ -746,13 +805,20 @@ int main() {
             // world_light for a chunk.
             for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
                 const lcu::voxel::ChunkCoord coord{cx, cy, cz};
-                world.load_chunk(coord);
+                load_chunk_checking_disk(coord);
                 compute_initial_block_light(coord);
             }
             for (lcu::i32 cy = load_settings.max_chunk_y; cy >= load_settings.min_chunk_y; --cy) {
                 compute_initial_sky_light({cx, cy, cz});
             }
             for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                // Reseeds against whatever earlier column in this same
+                // spawn-area load already finished (Phase 35) - real
+                // even on the very first load, not just later
+                // streaming: this loop's own earlier iterations are
+                // "already-loaded neighbors" by the time a later one
+                // runs.
+                reseed_and_remesh_after_load({cx, cy, cz});
                 remesh_and_upload({cx, cy, cz});
             }
         }
@@ -829,7 +895,7 @@ int main() {
                     if (world.state_of(coord) != lcu::world::ChunkLifecycleState::Unloaded) {
                         continue;
                     }
-                    world.load_chunk(coord);
+                    load_chunk_checking_disk(coord);
                     compute_initial_block_light(coord);
                     newly_loaded.push_back(coord);
                 }
@@ -837,6 +903,13 @@ int main() {
                     compute_initial_sky_light(*it);
                 }
                 for (const lcu::voxel::ChunkCoord& coord : newly_loaded) {
+                    // Phase 35: reseeds against every already-loaded
+                    // neighbor (including ones outside this same
+                    // streaming batch) before this chunk's own mesh
+                    // upload, so a torch already lit just across the
+                    // boundary shows up correctly the moment this
+                    // chunk first appears, not one edit later.
+                    reseed_and_remesh_after_load(coord);
                     remesh_and_upload(coord);
                 }
             }
@@ -848,6 +921,61 @@ int main() {
                                                  static_cast<lcu::i64>(std::floor(pos.z))};
         return lcu::voxel::world_to_chunk_and_local(block, lcu::voxel::Chunk::kEdgeLength).chunk;
     };
+
+    // Client-side chunk unloading (Phase 35, "chunk unload marks
+    // neighbors dirty"'s literal half): before this phase the
+    // client's World only ever grew for the process's whole lifetime
+    // (deliberately - see Phase 16's DECISIONS.md entry), even as the
+    // player walked far away, holding every chunk's mesh/GPU buffers/
+    // light data forever. This is the client's own counterpart to
+    // VoxelServer's Phase 20 interest-scoped unloading: only X/Z
+    // distance-gated (the vertical range is always the same fixed
+    // [min_chunk_y, max_chunk_y] band, never trimmed), with a margin
+    // beyond load_settings.radius_xz so a chunk just past the load
+    // radius doesn't immediately reload next frame (the same
+    // load/unload-radius hysteresis World::update_streaming's own doc
+    // comment describes, applied manually here since this client
+    // drives loading itself rather than through that function). Saves
+    // to chunk_save_dir first - without that, any single-player edit
+    // in the chunk would silently revert to pristine regenerated
+    // terrain the moment the player wandered back into range.
+    constexpr lcu::i32 kUnloadRadiusMargin = 1;
+    const auto unload_far_chunks = [&](lcu::voxel::ChunkCoord center) {
+        std::vector<lcu::voxel::ChunkCoord> to_unload;
+        for (const lcu::voxel::ChunkCoord& coord : world.loaded_chunk_coords()) {
+            const lcu::i32 chebyshev_xz = std::max(std::abs(coord.x - center.x), std::abs(coord.z - center.z));
+            if (chebyshev_xz > load_settings.radius_xz + kUnloadRadiusMargin) {
+                to_unload.push_back(coord);
+            }
+        }
+        for (const lcu::voxel::ChunkCoord& coord : to_unload) {
+            if (const lcu::voxel::Chunk* chunk_to_save = world.chunk_at(coord)) {
+                if (!lcu::serialization::save_chunk_to_file(*chunk_to_save, chunk_file_path(coord))) {
+                    LCU_LOG_WARN(
+                        "Failed to save chunk ({},{},{}) before unloading - any local edits in it will be lost",
+                        coord.x, coord.y, coord.z);
+                }
+            }
+#if defined(LCU_ENABLE_BGFX)
+            if (auto it = gpu_meshes.find(coord); it != gpu_meshes.end()) {
+                lcu::rendering::destroy_gpu_chunk_mesh(it->second);
+                gpu_meshes.erase(it);
+            }
+#endif
+            // Real map hygiene (WorldLight::remove_chunk_light's own
+            // doc comment has named this phase as its real caller
+            // since Phase 29) - without this, world_light would keep
+            // accumulating light data for chunks nothing can see or
+            // mesh anymore, forever, for the lifetime of the process.
+            world_light.remove_chunk_light(coord);
+            world.unload_chunk(coord);
+        }
+        if (!to_unload.empty()) {
+            LCU_LOG_INFO("Unloaded {} chunk(s) beyond streaming range (total {} loaded)", to_unload.size(),
+                         world.loaded_chunk_count());
+        }
+    };
+
     lcu::voxel::ChunkCoord last_streamed_center = chunk_coord_of_position(player.aabb.center());
 
     const auto is_solid = [&](lcu::voxel::BlockId id) { return block_registry.definition_of(id).has_collision; };
@@ -1163,17 +1291,27 @@ int main() {
                                 // comment asks for - a networked
                                 // ChunkData can arrive in any vertical
                                 // order relative to its own neighbors.
-                                // Real, but not yet fully cross-chunk-
-                                // correct for this specific call site
-                                // (a chunk streamed in below an
-                                // already-loaded, already-lit neighbor
-                                // above it self-corrects; the reverse
-                                // order doesn't retroactively relight
-                                // what was already computed) - closing
-                                // that gap needs the neighbor-dirtying
-                                // Phase 35 is chartered for.
+                                // No longer an open gap as of Phase 35:
+                                // reseed_and_remesh_after_load below
+                                // retroactively recomputes/remeshes
+                                // every already-loaded chunk this
+                                // arrival's light should have reached
+                                // (both directions - a roof arriving
+                                // above an already-lit chunk below now
+                                // correctly darkens it too, not just
+                                // the historically-self-correcting
+                                // reverse order).
                                 compute_initial_sky_light(coord);
                                 remesh_and_upload(coord);
+                                reseed_and_remesh_after_load(coord);
+                                // Still unioned with the plain
+                                // geometric 6-neighbor remesh: a full
+                                // chunk overwrite (unlike a single
+                                // block edit) can uncover/hide a
+                                // neighbor's boundary faces purely by
+                                // opacity, independent of any light
+                                // value ever changing - reseed's
+                                // touched set only reports the latter.
                                 for (const lcu::voxel::ChunkCoord& neighbor :
                                      {lcu::voxel::ChunkCoord{coord.x - 1, coord.y, coord.z},
                                       lcu::voxel::ChunkCoord{coord.x + 1, coord.y, coord.z},
@@ -1269,6 +1407,9 @@ int main() {
         const lcu::voxel::ChunkCoord current_center = chunk_coord_of_position(player.aabb.center());
         if (current_center != last_streamed_center) {
             stream_chunks_around(current_center);
+            unload_far_chunks(current_center);
+            LCU_LOG_INFO("Streaming center moved to ({},{},{}) - {} chunk(s) loaded", current_center.x,
+                         current_center.y, current_center.z, world.loaded_chunk_count());
             last_streamed_center = current_center;
         }
 
@@ -1537,6 +1678,8 @@ int main() {
                          pos.x, pos.y, pos.z);
         }
     } else {
+        LCU_LOG_INFO("Player position: ({:.2f}, {:.2f}, {:.2f})", player.aabb.center().x, player.aabb.center().y,
+                     player.aabb.center().z);
         for (const lcu::ecs::EntityId& entity :
              entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
             const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;

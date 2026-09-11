@@ -2233,3 +2233,145 @@ map to, and whether/how to add a real opt-in `Release` preset) is a
 build-system-wide decision outside this phase's torch/benchmark scope
 - flagged here for a dedicated future pass, not silently left
 undocumented.
+
+## 2026-09-11 — Cross-chunk light reseeding walks both boundary faces and re-floods, rather than a new BFS variant (Phase 35)
+
+**Context:** Phase 30/31's cross-chunk BFS functions honestly document
+two related "arrived too late" gaps: an already-loaded neighbor's
+existing light never reaches a chunk that loads afterward, and
+(symmetrically) a newly-loaded chunk's own near-boundary light source
+never reaches an already-loaded neighbor either, because each chunk's
+own initial light computation only ever floods within its own extent
+at the moment it runs. `WorldLight::remove_chunk_light`'s doc comment
+has named "Phase 35" as the real fix for this since Phase 29.
+
+**Decision:** `reseed_light_for_newly_loaded_chunk` doesn't add a new
+BFS algorithm - it re-uses `detail::flood_block_light_cross_chunk`
+exactly as-is, just seeded differently. For every already-loaded
+neighbor face, it walks the shared `EdgeLength x EdgeLength` boundary
+once, collecting every currently-lit (`> 1`) cell on *both* sides of
+that boundary into one queue, then floods. This is safe specifically
+because the flood function only ever *raises* a light value, never
+lowers one (`if (next_level > current) { set; push; }`) - re-seeding
+with cells that are already at their correct value costs a queue pop
+and an immediate no-op, not a wrong answer. The real cost is
+proportional to how much light genuinely still needs to cross, not to
+the boundary's full 256-cell size, since a fully-settled boundary
+contributes nothing.
+
+**A deliberate difference from Phase 33's `touched_chunks` contract,
+documented rather than silently different:** Phase 33's single-source
+propagate/unpropagate functions always seed their BFS from a point
+inside `coord`, so `coord` structurally can't reappear in their own
+`touched_chunks` result. This function seeds from *both* sides of a
+boundary, so `coord` legitimately CAN appear in its result (an
+already-loaded neighbor's light flowing back into the chunk that just
+loaded). Not special-cased away, since every real call site already
+unconditionally remeshes `coord` right after calling this regardless
+of what it reports - a possible duplicate entry costs one harmless
+redundant remesh, never a missed one.
+
+**Sky light's cascade is unconditional, not change-detected:** rather
+than comparing before/after values to decide whether to keep
+cascading downward or to report a chunk touched, the function just
+recomputes and reports every already-loaded chunk in the vertical run
+below `coord`. The currently-loaded vertical extent is small (a
+handful of chunks at most, `load_settings.min_chunk_y`..`max_chunk_y`),
+so the wasted work from an unconditional recompute is negligible, and
+it avoids a whole extra class of "did anything actually change" bugs
+for a real gain that doesn't matter at this scale.
+
+**Alternatives considered:** a dedicated "boundary diff" structure
+that only reseeds what's provably different since last time (rejected
+- meaningfully more state and complexity for a gain the reseed's own
+natural early-termination already captures for free, since an
+unchanged boundary cell is a no-op in the flood anyway); reusing
+Phase 32's "boundary buffer" idea from the (skipped) optional
+concurrency phase (rejected - that phase was about deferring writes
+across threads, a different problem; this one is single-threaded,
+synchronous, and about *when* a reseed happens, not *how* concurrent
+writers coordinate).
+
+## 2026-09-11 — Client-side chunk unloading persists to disk first, mirroring VoxelServer exactly (Phase 35)
+
+**Context:** Before this phase, `VoxelClient`'s own `World` only ever
+grew for the process's entire lifetime (a deliberate simplification
+recorded in Phase 16's DECISIONS.md entry) - even as the player walked
+far from the spawn area, every chunk's mesh, GPU buffers, and light
+data stayed resident forever. `VoxelServer` closed the equivalent gap
+back in Phase 20 with interest-scoped unloading; the client never got
+its own counterpart.
+
+**Decision:** add real distance-gated client-side unloading
+(`unload_far_chunks`, triggered on every streaming-center change,
+Chebyshev XZ distance beyond `load_settings.radius_xz + 1`), but
+critically: save the chunk to disk (`client_world/chunks/`, a
+`lcu::serialization::save_chunk_to_file` call identical to
+`VoxelServer`'s own `chunk_file_path`/save pattern) *before* unloading
+it, and check that same directory before regenerating on a later load.
+Without this, a single-player edit (the only case where the client's
+own chunk data is ever the sole copy of the truth) would silently
+revert to pristine regenerated terrain the instant the player wandered
+back into range - a real regression `VoxelServer`'s own Phase 20 entry
+already flagged as the reason unloading needs persistence, not just
+memory reclaim.
+
+**Deliberately a separate directory from any `VoxelServer` instance's
+own `<world>/chunks`:** a networked client's local chunk copy is never
+authoritative anyway (server `ChunkData` always wins on arrival, see
+the Phase 13 "no client-side speculative block edits" decision), so
+there's no reason for it to share - or need to avoid colliding with -
+a server's actual save directory, even when both processes happen to
+run from the same working directory in a local test. `client_world` is
+a plain, obviously-client-owned name next to the executable, the same
+relative-to-cwd convention `shaders/chunk` and mods already use.
+
+**Alternatives considered:** no persistence at all, memory-reclaim-only
+unloading (rejected - a real, silent edit-loss regression the moment
+someone actually plays single-player and walks around); a shared save
+directory with `VoxelServer` via a new CLI flag (rejected - adds
+argument parsing plumbing this client has never needed, for a benefit
+that doesn't actually apply given the server is always authoritative
+in networked mode anyway).
+
+## 2026-09-11 — `LCU_VERIFY_MOVE_SECONDS` can get legitimately blocked by terrain (found, not fixed, during Phase 35 verification)
+
+**Context:** Verifying this phase's chunk-unload/reseed logic needed
+real movement across a longer distance than any previous phase's
+`LCU_VERIFY_MOVE_SECONDS` run had exercised (previous documented runs
+used 6s; this phase needed enough distance to clear `load_radius +
+margin` chunks). A 20-second run consistently stalled at the exact
+same world position (`(0.00, 28.90, -15.70)`) regardless of whether
+`LCU_VERIFY_MOVE_SECONDS` was set to 6 or 20 - suspicious enough to
+investigate rather than assume a Phase 35 bug.
+
+**Finding:** reproduced byte-identical (same final position, same
+total frame count) against a `git stash`-isolated pre-Phase-35 build
+under the same test - proving this is pre-existing, unrelated to any
+change in this phase. Confirmed the real cause by temporarily also
+holding `Jump` for the same test duration: movement immediately
+continued past the stall point and crossed six more chunk boundaries
+cleanly. This means the player hit a real terrain feature taller than
+`integrate_player`'s auto-step height, straight-line into it with no
+jump input - `LCU_VERIFY_MOVE_SECONDS` was never designed to jump (see
+its own doc comment, brief section 16's straight-line verification
+need), so getting stopped by a real obstacle is that hook's own
+honestly-scoped limitation, not a physics bug.
+
+**Decision: not fixed here.** `LCU_VERIFY_MOVE_SECONDS`'s existing
+documented behavior (Phase 16 - a plain, predictable straight-line
+hold, matching real runs already recorded in BUILD_STATUS.md) stays
+exactly as it is; permanently adding Jump to it would be an undocumented
+behavior change to an existing, relied-upon verification hook for a
+problem specific to this one longer-distance test. This phase's own
+real verification run used a *temporary* local modification (reverted
+before commit) to clear the obstacle and prove the real unload/reseed
+code path executes correctly - see CHANGELOG.md's Phase 35 entry for
+the actual real output that produced (repeated stream/unload cycles,
+60 real chunk save files written).
+
+**Left for whoever picks it up:** a dedicated jump-capable movement
+verification hook (or a spawn/route guaranteed obstacle-free) would be
+the honest way to make long-distance streaming/unloading verification
+reproducible without a manual workaround - not built here, since it's
+tooling, not a product feature, and out of this phase's own scope.

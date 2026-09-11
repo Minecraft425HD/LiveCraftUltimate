@@ -550,4 +550,128 @@ void compute_sky_light(const voxel::ChunkStorage<EdgeLength>& chunk, const voxel
     }
 }
 
+// Phase 35 ("chunk unload marks neighbors dirty" - the neighbor-
+// dirtying half of that charter; see DECISIONS.md for the literal
+// unload half): closes the two "arrived too late" gaps every prior
+// cross-chunk lighting phase honestly left open rather than guessed
+// at. Call this once, after `coord`'s own light has just been
+// computed (a fresh chunk load, or a networked ChunkData overwrite) -
+// `coord` must already have real light data in `world_light`
+// (get_or_create'd by whichever compute_*_light call the caller just
+// made), or this is a no-op.
+//
+//   - Block light (Phase 31's gap): flood_block_light_cross_chunk
+//     never crosses into a neighbor that wasn't loaded *at the time*
+//     a source's BFS ran - a chunk loading afterward doesn't
+//     retroactively receive light an already-loaded neighbor's torch
+//     could have reached, and symmetrically, a newly-loaded chunk's
+//     own near-boundary emitter never reaches an already-loaded
+//     neighbor either (compute_initial_block_light-style calls only
+//     ever flood within their own chunk). Fixed here by reseeding:
+//     every already-loaded neighbor's shared boundary face is walked
+//     once, collecting every currently-lit (>1) cell on *both* sides
+//     into one queue, then re-flooding. flood_block_light_cross_chunk
+//     only ever raises a value, never lowers one, so this is safe and
+//     idempotent - a cell that already has its correct value
+//     contributes nothing (next_level > current fails immediately),
+//     so the real cost is proportional to what was actually still
+//     dark, not to the full boundary face.
+//   - Sky light (Phase 30's gap): compute_sky_light_column_cross_chunk
+//     seeds a column from the chunk *above* it - a chunk streamed in
+//     below an already-lit neighbor above self-corrects for free
+//     (the neighbor already has the right seed by the time the
+//     column below computes), but the reverse order (a chunk loading
+//     *above* an already-loaded, already-lit chunk below) leaves that
+//     neighbor stale - it was computed assuming open sky above, since
+//     there was nothing there yet. Fixed by recomputing every already-
+//     loaded chunk directly below `coord`, cascading further down
+//     through however many chunks happen to be stacked (bounded by
+//     the currently-loaded vertical extent, a handful of chunks in
+//     practice) so a multi-link chain corrects all the way down, not
+//     just the first link.
+//
+// Returns every chunk whose light this call actually changed, for the
+// caller to remesh - the same touched_chunks idea Phase 33 established
+// for the single-block-edit path, with one honest difference: Phase
+// 33's propagate/unpropagate always seed their BFS from a point inside
+// `coord` itself, so `coord` structurally never reappears in their
+// result. This function seeds from *both* sides of every shared
+// boundary (an already-loaded neighbor's existing light can legally
+// flow back into `coord`), so `coord` MAY appear here too when that
+// happens - callers don't need to special-case it, since they already
+// unconditionally remesh `coord` right after calling this (a possible
+// duplicate entry costs one harmless redundant remesh, never a missed
+// one). The sky-light half reports every already-loaded chunk it
+// walked below `coord` regardless of whether that specific chunk's
+// column values happened to change (cheap either way - the loaded
+// vertical extent is small).
+template <u32 EdgeLength, typename ChunkProviderT>
+std::unordered_set<voxel::ChunkCoord> reseed_light_for_newly_loaded_chunk(const ChunkProviderT& chunks,
+                                                                           const voxel::BlockRegistry& registry,
+                                                                           WorldLight<EdgeLength>& world_light,
+                                                                           voxel::ChunkCoord coord) {
+    std::unordered_set<voxel::ChunkCoord> touched;
+
+    LightStorage<EdgeLength>* this_light = world_light.find_chunk_light_mutable(coord);
+    if (!this_light) {
+        return touched;  // coord has no light data yet - nothing to reseed from/into.
+    }
+
+    // --- Block light: reseed across every already-loaded, already-lit face.
+    std::queue<detail::WorldVoxelPos> seeds;
+    for (const auto& offset : detail::kNeighborOffsets) {
+        const voxel::ChunkCoord neighbor{coord.x + offset[0], coord.y + offset[1], coord.z + offset[2]};
+        if (!chunks.chunk_at(neighbor)) {
+            continue;  // not loaded - nothing to reseed against yet.
+        }
+        LightStorage<EdgeLength>* neighbor_light = world_light.find_chunk_light_mutable(neighbor);
+        if (!neighbor_light) {
+            continue;  // loaded but not lit yet - its own load will reseed against `coord` in turn.
+        }
+
+        const bool along_x = offset[0] != 0;
+        const bool along_y = offset[1] != 0;
+        const u32 this_edge = (offset[0] > 0 || offset[1] > 0 || offset[2] > 0) ? (EdgeLength - 1) : 0;
+        const u32 neighbor_edge = EdgeLength - 1 - this_edge;
+
+        for (u32 a = 0; a < EdgeLength; ++a) {
+            for (u32 b = 0; b < EdgeLength; ++b) {
+                u32 tx, ty, tz, nx, ny, nz;
+                if (along_x) {
+                    tx = this_edge, ty = a, tz = b;
+                    nx = neighbor_edge, ny = a, nz = b;
+                } else if (along_y) {
+                    tx = a, ty = this_edge, tz = b;
+                    nx = a, ny = neighbor_edge, nz = b;
+                } else {
+                    tx = a, ty = b, tz = this_edge;
+                    nx = a, ny = b, nz = neighbor_edge;
+                }
+                if (this_light->block_light(tx, ty, tz) > 1) {
+                    seeds.push({coord, tx, ty, tz});
+                }
+                if (neighbor_light->block_light(nx, ny, nz) > 1) {
+                    seeds.push({neighbor, nx, ny, nz});
+                }
+            }
+        }
+    }
+    if (!seeds.empty()) {
+        detail::flood_block_light_cross_chunk(chunks, registry, world_light, std::move(seeds), &touched);
+    }
+
+    // --- Sky light: cascade recompute downward through the loaded stack.
+    voxel::ChunkCoord below{coord.x, coord.y - 1, coord.z};
+    while (const voxel::ChunkStorage<EdgeLength>* below_storage = chunks.chunk_at(below)) {
+        if (!world_light.has_chunk_light(below)) {
+            break;  // not lit yet - its own load path computes it (and will itself reseed from `coord`).
+        }
+        compute_sky_light_cross_chunk(*below_storage, registry, world_light, below);
+        touched.insert(below);
+        below = voxel::ChunkCoord{below.x, below.y - 1, below.z};
+    }
+
+    return touched;
+}
+
 }  // namespace lcu::lighting

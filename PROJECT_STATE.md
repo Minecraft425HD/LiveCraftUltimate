@@ -31,8 +31,9 @@ sun/moon)**, **Phase 28 (renderer consumes real per-voxel light)**,
 **Phase 29 (WorldLight data structure)**, **Phase 30 (sky-light
 cross-chunk propagation)**, **Phase 31 (block-light cross-chunk
 propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
-**Phase 33 (VoxelClient integration + smooth lighting)**, and
-**Phase 34 (torch block + lighting benchmarks)** are done; see
+**Phase 33 (VoxelClient integration + smooth lighting)**,
+**Phase 34 (torch block + lighting benchmarks)**, and **Phase 35
+(chunk unload marks neighbors dirty)** are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1146,6 +1147,53 @@ real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; the
 wide outside `build/bench-release`; a chunk loading after a nearby
 source's BFS already finished still isn't retroactively relit or
 remeshed (Phase 35's job, next).
+
+**Phase 35 (chunk unload marks neighbors dirty)**: closes the two
+Phase 30/31 "arrived too late" lighting gaps, plus the literal "chunk
+unload" this phase is named for. `reseed_light_for_newly_loaded_chunk`
+reuses the existing `flood_block_light_cross_chunk` unchanged, just
+seeded differently - every already-loaded neighbor's shared boundary
+face is walked once, collecting every currently-lit cell on both sides
+into one queue and re-flooding (safe since that function only ever
+raises a value, never lowers one); sky light cascades a recompute down
+through every already-loaded chunk stacked below a newly-loaded roof.
+Wired into `VoxelClient`'s initial load, per-movement streaming, and
+the networked `ChunkDataFragment` path (closing that handler's own
+long-standing code-comment gap). Real client-side chunk unloading was
+also added (the client's own counterpart to `VoxelServer`'s Phase 20
+interest-scoped unloading, saving to `client_world/chunks/` first so a
+single-player edit survives a wander-away-and-back, then destroying
+the GPU mesh and calling `WorldLight::remove_chunk_light` - that
+function's own doc comment named this phase as its real caller since
+Phase 29).
+
+A real, pre-existing (not introduced by this phase) finding made while
+verifying it: `LCU_VERIFY_MOVE_SECONDS` moves in a straight line and
+never jumps, so it stalled at the same world position regardless of
+whether it ran for 6s or 20s - confirmed via a `git stash`-isolated
+pre-Phase-35 build reproducing byte-identically that this is a real
+terrain obstacle taller than the auto-step height, not a Phase 35 bug
+(holding Jump for the same duration cleared it immediately). Not fixed
+(that hook's existing documented straight-line behavior stays as-is,
+see DECISIONS.md) - this phase's own real verification temporarily
+held Jump to clear the obstacle.
+
+4 new unit tests. Verified via a real longer-distance single-player
+run (repeated `"Streaming center moved to ..."`/`"Unloaded 12
+chunk(s) ..."` pairs, loaded count steady at 48, 60 real `.chunk`
+files written) plus byte-identical `LCU_VERIFY_TORCH`/`LCU_VERIFY_
+BREAK_PLACE`/`LCU_VERIFY_CRAFT` runs and a real two-process networked
+run (600 ticks, 36 chunks streamed, zero warnings). `ctest` 389/389
+(bgfx, up from 385) / 386/386 (non-bgfx, up from 382).
+
+Honestly scoped: **what any of this looks like on a real GPU/display
+is still NOT VERIFIED — ENVIRONMENT LIMITATION**; the reload-from-disk
+half of client persistence wasn't separately re-exercised end-to-end
+in this run (the verify hook only moves one direction) - save-on-
+unload is proven by the 60 real files written, and load-from-disk
+reuses the exact same `chunk_serializer` API `VoxelServer` already
+round-trip-tests; lateral sky light bleed under overhangs remains
+unmodeled (documented since Phase 6).
 
 ## Build Status
 
