@@ -35,8 +35,8 @@ propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 **Phase 34 (torch block + lighting benchmarks)**, **Phase 35
 (chunk unload marks neighbors dirty)**, **Phase 36 (entity boxes +
 extended debug overlay)**, **Phase 37 (sea level at y=0 + water
-block/rendering)**, and **Phase 38 (continental/mountain terrain)**
-are done; see
+block/rendering)**, **Phase 38 (continental/mountain terrain)**, and
+**Phase 39 (biomes)** are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1308,6 +1308,39 @@ ENVIRONMENT LIMITATION**; no ridged-multifractal/erosion mountain
 shaping (a deliberately scoped, honest simplification, not a shortcut
 hiding a gap - see DECISIONS.md); still no climate/biome/caves/ores/
 structures/vegetation stages (Phases 39-41).
+
+**Phase 39 (biomes)**: real climate/biome pipeline stage - a new
+`Biome` enum (`Snowy`/`Plains`/`Desert`) and `biome_at(seed, x, z)`, a
+genuinely independent low-frequency noise field (own
+`kClimateSeedOffset`, own threshold split, Plains deliberately the
+widest band at 50% since it was every column's only behavior before
+this phase). `generate_terrain_chunk`'s signature changed to take a
+`BiomeBlocks` struct (each biome's own surface/subsurface block ids)
+instead of flat parameters; stone/water stay biome-independent on
+purpose. Two new real blocks: `game:sand` (Desert surface+subsurface)
+and `game:snow` (Snowy surface, dirt subsurface), registered
+identically on `VoxelClient`/`VoxelServer` in the same sequence
+position (BlockId alignment for replication). New spawn-log biome name
+- real, observable confirmation the climate stage ran.
+
+2 new worldgen tests (incl. a real sweep confirming all three biome
+categories genuinely occur), 5 existing tests rewritten to compute
+expected blocks from the actual biome at each test coordinate via
+`biome_at` rather than assuming Plains. Verified via a real
+`LCU_BUILD_SHADER_TOOLS=ON` run (spawn column (-84,-84), `biome=
+Plains`, confirmed by breaking the spawn block and picking up
+`game:grass`), real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/
+`LCU_VERIFY_CRAFT` runs, and a real two-process networked run with
+matching independently-computed spawn columns, zero warnings/errors.
+`ctest` 396/396 (bgfx, up from 394) / 393/393 (non-bgfx, up from 391).
+
+Honestly scoped: **what sand/snow/biome transitions actually look
+like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION**; a temperature-only climate model, no humidity axis, no
+Whittaker-diagram-style biome table (see DECISIONS.md for why this
+scope, not more); no elevation-climate coupling; no item mapping for
+sand/snow yet; no caves/ores/structures/vegetation stages yet (Phases
+40-41).
 
 ## Build Status
 

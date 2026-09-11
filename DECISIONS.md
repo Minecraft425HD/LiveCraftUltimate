@@ -2629,3 +2629,72 @@ introduced without immediately re-deriving the dependent constant.
 Caught here by actually running the client after the worldgen change,
 not by code review alone; a reminder for any future phase that touches
 `kContinentalNoiseScale` again to re-check this radius against it.
+
+## 2026-09-11 — Biomes: a temperature-only climate model, three real categories, not a full Whittaker table (Phase 39)
+
+**Context:** Phase 39's brief item is "climate/biome" - the pipeline
+stage brief section 21 lists right after continental/terrain. Real
+biome systems (Minecraft's own included) typically use at least two
+climate axes (temperature and humidity/precipitation) mapped through a
+Whittaker-diagram-style table into a dozen-plus distinct biomes, each
+with its own terrain-height modifier, block palette, mob spawns, and
+decoration rules.
+
+**Decision:** implement a deliberately smaller, honest version: one
+climate axis (temperature-like, `biome_at`'s single noise sample), three
+categories (`Snowy`/`Plains`/`Desert`), each mapping to a real,
+distinct surface/subsurface block pair - not a stub, not a single
+biome pretending to be several, but genuinely three different, chosen,
+tested outcomes. Chosen over the full multi-axis system because this
+phase's honest scope is "close the climate/biome gap that exists
+today" (zero biome variation, every column identical), not "build the
+final biome system a shipped game would ship with" - a real three-way
+split is a substantial, verifiable step from that zero baseline,
+while a full Whittaker table is enough additional surface area (a
+second noise axis, a lookup table, many more block registrations,
+biome-specific terrain-height modifiers) to deserve its own dedicated
+phase if ever prioritized, not squeezed into this one alongside
+everything else Phase 39 already touches (BiomeBlocks, two new
+blocks, spawn-log wiring, test rewrites).
+
+**Plains is deliberately the widest band (50%), not an equal three-way
+split (33% each):** every column was Plains-equivalent (grass/dirt)
+before this phase - keeping it the majority outcome after biomes exist
+means the common case players actually experience (temperate,
+grass-covered terrain) doesn't regress into a minority one just
+because two new categories were added. A first attempt at unequal-but-
+not-deliberately-so thresholds (0.35/0.65, an editing mistake caught
+before verification) would have made Plains the *narrowest* band (30%)
+instead - fixed to 0.25/0.75 (50% Plains) before any test run, not
+after a wrong number shipped.
+
+**Deliberately no elevation-climate coupling:** real mountains are
+colder at altitude than the valley floor beside them; this phase's
+`biome_at` is a function of `(x, z)` alone, completely independent of
+`terrain_height`'s own elevation at that column (itself a real, tested
+independence - see the "two genuinely separate noise stages" Phase 38
+entry, which this phase's climate stage extends the same reasoning to
+as a *third* independent field). A snow-capped highland peak sitting
+directly beside a sandy desert basin is a real, current possibility in
+this build - visually odd, not physically motivated, but an honest
+consequence of keeping the pipeline stages independent as scoped,
+not a hidden coupling assumed to already exist.
+
+**Water stays biome-independent on purpose:** a below-sea-level column
+fills with the same `game:water` regardless of its biome - no frozen/
+ice-cap variant for Snowy coastlines, no distinction for Desert oases.
+Real, further scope (a `Biome`-parameterized water/ice choice would be
+a small, natural extension of `BiomeBlocks`) deliberately deferred
+rather than added speculatively without this phase's brief item asking
+for it.
+
+**Alternatives considered:** an equal three-way split (33/33/33
+- rejected, see the "Plains stays the majority" reasoning above);
+biome affecting terrain height directly (e.g. deserts flatter, snowy
+peaks taller - rejected for this phase, conflates the climate stage
+with the continental/terrain stage Phase 38 just finished separating
+out, and needs real tuning against the existing amplitude model to
+avoid fighting it); a data-driven biome registry mods could extend
+(rejected - `engine/modding`'s Lua bindings don't expose worldgen at
+all yet, and building that binding surface is real, separate work
+outside this phase's scope).

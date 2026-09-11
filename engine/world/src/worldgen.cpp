@@ -114,6 +114,25 @@ constexpr f32 kNoiseScale = 0.01f;
 // it against.
 constexpr i32 kSubsurfaceDepth = 3;
 
+// Climate/biome stage (Phase 39): a genuinely separate, independent
+// noise field from both continental and terrain-detail above (its own
+// seed offset, same reasoning as kContinentalSeedOffset - without it,
+// "which biome" and "how mountainous"/"the terrain shape" would
+// visibly correlate through the same lattice). Frequency similar to
+// the continental layer (biomes are large regions, not block-by-block
+// noise) but not identical, so biome boundaries and coastlines don't
+// trace the same curve.
+constexpr f32 kClimateNoiseScale = 0.0012f;
+constexpr u32 kClimateSeedOffset = 2246822519u;
+// Thresholds splitting the climate value's [0,1) range into three
+// bands - Snowy below kSnowyThreshold, Desert above kDesertThreshold,
+// Plains (the pre-Phase-39 default) in between. Plains deliberately
+// the widest band (50% of the range vs. 25% each for Snowy/Desert) -
+// it was every column's behavior before this phase and should stay
+// the common case, not become a minority one.
+constexpr f32 kSnowyThreshold = 0.25f;
+constexpr f32 kDesertThreshold = 0.75f;
+
 }  // namespace
 
 i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
@@ -136,9 +155,44 @@ i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
     return static_cast<i32>(base_elevation + (detail - 0.5f) * 2.0f * mountain_amplitude);
 }
 
-void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, voxel::BlockId surface_block,
-                             voxel::BlockId subsurface_block, voxel::BlockId stone_block,
-                             voxel::BlockId water_block) {
+Biome biome_at(u32 seed, i32 world_x, i32 world_z) {
+    const f32 climate = fractal_noise(seed + kClimateSeedOffset, static_cast<f32>(world_x) * kClimateNoiseScale,
+                                       static_cast<f32>(world_z) * kClimateNoiseScale);
+    if (climate < kSnowyThreshold) {
+        return Biome::Snowy;
+    }
+    if (climate > kDesertThreshold) {
+        return Biome::Desert;
+    }
+    return Biome::Plains;
+}
+
+namespace {
+
+// Which land block ids a column's own biome maps to (Phase 39) -
+// resolved once per column, not once per cell, since it's the same
+// answer for every Y in that column.
+struct SurfaceBlocks {
+    voxel::BlockId surface;
+    voxel::BlockId subsurface;
+};
+
+SurfaceBlocks surface_blocks_for(Biome biome, const BiomeBlocks& biome_blocks) {
+    switch (biome) {
+        case Biome::Snowy:
+            return {biome_blocks.snowy_surface, biome_blocks.snowy_subsurface};
+        case Biome::Desert:
+            return {biome_blocks.desert_surface, biome_blocks.desert_subsurface};
+        case Biome::Plains:
+            return {biome_blocks.plains_surface, biome_blocks.plains_subsurface};
+    }
+    return {biome_blocks.plains_surface, biome_blocks.plains_subsurface};
+}
+
+}  // namespace
+
+void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, const BiomeBlocks& biome_blocks,
+                             voxel::BlockId stone_block, voxel::BlockId water_block) {
     constexpr u32 kEdge = voxel::Chunk::kEdgeLength;
 
     for (u32 lz = 0; lz < kEdge; ++lz) {
@@ -146,6 +200,7 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
         for (u32 lx = 0; lx < kEdge; ++lx) {
             const i32 world_x = coord.x * static_cast<i32>(kEdge) + static_cast<i32>(lx);
             const i32 height = terrain_height(seed, world_x, world_z);
+            const SurfaceBlocks surface_blocks = surface_blocks_for(biome_at(seed, world_x, world_z), biome_blocks);
 
             for (u32 ly = 0; ly < kEdge; ++ly) {
                 const i32 world_y = coord.y * static_cast<i32>(kEdge) + static_cast<i32>(ly);
@@ -156,7 +211,10 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
                     // is already >= kSeaLevel and this branch is never
                     // reached at or below it) stays air - the chunk's
                     // default fill, nothing to set, unchanged from
-                    // before this phase.
+                    // before this phase. Not biome-dependent - a
+                    // below-sea-level column is water regardless of
+                    // climate (no ice-cap-vs-open-water distinction
+                    // yet, an honest scoped gap, not a hidden one).
                     if (world_y <= kSeaLevel) {
                         chunk.set_block(lx, ly, lz, water_block);
                     }
@@ -164,9 +222,9 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
                 }
                 voxel::BlockId block_id = stone_block;
                 if (world_y == height) {
-                    block_id = surface_block;
+                    block_id = surface_blocks.surface;
                 } else if (world_y > height - kSubsurfaceDepth) {
-                    block_id = subsurface_block;
+                    block_id = surface_blocks.subsurface;
                 }
                 chunk.set_block(lx, ly, lz, block_id);
             }

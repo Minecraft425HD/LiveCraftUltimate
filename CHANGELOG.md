@@ -2,7 +2,63 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39
+
+### Phase 39
+
+- **Real climate/biome pipeline stage** (brief section 21): a new
+  `Biome` enum (`Snowy`/`Plains`/`Desert`) and `biome_at(seed, x, z)` -
+  a genuinely independent, low-frequency noise field (its own
+  `kClimateSeedOffset`, so biome boundaries don't visibly correlate
+  with coastlines/ridge lines from the continental/terrain stages).
+  Thresholds split the climate value into three bands, Plains
+  deliberately the widest (50% vs. 25% each for Snowy/Desert), since
+  it was every column's only behavior before this phase and should
+  stay the common case.
+- **New `BiomeBlocks` struct**: `generate_terrain_chunk`'s signature
+  changed from four flat block-id parameters to `(seed, biome_blocks,
+  stone_block, water_block)` - each biome maps to its own real
+  surface/subsurface block ids, caller-supplied the same way
+  surface/subsurface/stone/water already were. Stone and water stay
+  deliberately biome-independent (every biome's land is stone deep
+  down; a below-sea-level column is water regardless of climate - no
+  ice-cap-vs-open-water distinction yet, an honest scoped gap).
+- **Two new real blocks**: `game:sand` (Desert's surface *and*
+  subsurface - a real desert is sandy all the way down, unlike grass-
+  over-dirt) and `game:snow` (Snowy's surface only, subsurface stays
+  dirt - a snow-capped tundra, not snow all the way down). Registered
+  identically, in the same sequence position, on `VoxelClient`/
+  `VoxelServer` (BlockId alignment for replication).
+- New `LCU_LOG_INFO` biome name at the spawn-load log line (`"...
+  biome=Plains)..."`) - real, observable confirmation the climate
+  stage actually ran and produced something concrete for that column,
+  not just a log line claiming it does.
+- 2 new worldgen unit tests (`BiomeAtIsDeterministic`,
+  `BiomeAtProducesAllThreeCategoriesOverARealArea` - a real sweep
+  confirming all three bands genuinely occur, not just the default);
+  5 existing tests rewritten to be biome-aware (computing the expected
+  surface/subsurface block from the actual biome at each test
+  coordinate via `biome_at`, rather than assuming Plains).
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn column
+  (-84,-84), `biome=Plains`, confirmed by breaking the spawn block and
+  picking up `game:grass`), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical behavior),
+  and a real two-process networked run with matching independently-
+  computed spawn columns, zero warnings/errors.
+- `ctest` 396/396 (bgfx, up from 394) / 393/393 (non-bgfx, up from
+  391).
+- Honestly scoped: **what sand/snow/biome transitions actually look
+  like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; a temperature-only climate model, no humidity axis, no
+  Whittaker-diagram-style biome table (three real, distinct categories,
+  not the full variety a shipped game would eventually want - see
+  DECISIONS.md); no elevation-climate coupling (a highland column can
+  be Desert just as easily as a lowland one - real mountains are
+  colder at altitude in reality, not modeled here); no item mapping
+  for sand/snow yet (breaking either currently removes it without
+  granting an item, the same state grass/dirt were in before Phase
+  18/22 added theirs); no caves/ores/structures/vegetation stages yet
+  (Phases 40-41).
 
 ### Phase 38
 

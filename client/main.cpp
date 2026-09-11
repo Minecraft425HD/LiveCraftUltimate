@@ -113,6 +113,21 @@ struct SpawnColumn {
     lcu::i32 z = 0;
 };
 
+// Real, observable confirmation the climate/biome pipeline stage
+// (Phase 39) actually ran and produced something concrete - used in
+// the spawn-load log line below, not just for debugging.
+const char* biome_name(lcu::world::worldgen::Biome biome) {
+    switch (biome) {
+        case lcu::world::worldgen::Biome::Snowy:
+            return "Snowy";
+        case lcu::world::worldgen::Biome::Desert:
+            return "Desert";
+        case lcu::world::worldgen::Biome::Plains:
+            return "Plains";
+    }
+    return "Plains";
+}
+
 SpawnColumn find_dry_spawn_column(lcu::u32 seed) {
     const auto is_dry = [seed](lcu::i32 x, lcu::i32 z) {
         return lcu::world::worldgen::terrain_height(seed, x, z) >= lcu::world::worldgen::kSeaLevel;
@@ -396,6 +411,34 @@ int main() {
     dirt_def.color = {0.4f, 0.25f, 0.1f};
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
+    // Real climate/biome content (Phase 39, brief section 21) - the
+    // Desert and Snowy biomes' own surface/subsurface block, standing
+    // in for grass/dirt the same way those already stand in for
+    // Plains (see worldgen::BiomeBlocks/generate_terrain_chunk below).
+    // Sand doubles as both its own biome's surface and subsurface
+    // (a real desert is sandy all the way down, not just a thin top
+    // layer - unlike grass-over-dirt, there's no second, visually
+    // distinct block a desert column would need underneath).
+    lcu::voxel::BlockDefinition sand_def;
+    sand_def.namespaced_id = "game:sand";
+    sand_def.display_name = "Sand";
+    sand_def.is_transparent = false;
+    sand_def.has_collision = true;
+    sand_def.color = {0.86f, 0.78f, 0.55f};
+    const lcu::voxel::BlockId sand_id = block_registry.register_block(sand_def);
+
+    // Snow is a real surface-only cap - the Snowy biome's subsurface
+    // stays dirt (a snow-covered tundra, not "snow all the way down"),
+    // matching Plains' own grass-over-dirt shape rather than Desert's
+    // sand-all-the-way-down one.
+    lcu::voxel::BlockDefinition snow_def;
+    snow_def.namespaced_id = "game:snow";
+    snow_def.display_name = "Snow";
+    snow_def.is_transparent = false;
+    snow_def.has_collision = true;
+    snow_def.color = {0.95f, 0.97f, 1.0f};
+    const lcu::voxel::BlockId snow_id = block_registry.register_block(snow_def);
+
     // First real light-emitting, player-placeable block (Phase 34,
     // closing the "torch block" half of the brief's own phase): every
     // earlier block in this file is dark (light_emission=0 by
@@ -624,8 +667,13 @@ int main() {
         LCU_LOG_INFO("Connecting to VoxelServer at {}", server_address.to_string());
     }
 
+    const lcu::world::worldgen::BiomeBlocks biome_blocks{
+        /*plains_surface=*/grass_id, /*plains_subsurface=*/dirt_id,
+        /*desert_surface=*/sand_id, /*desert_subsurface=*/sand_id,
+        /*snowy_surface=*/snow_id,  /*snowy_subsurface=*/dirt_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id, water_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id);
     });
 
 #if defined(LCU_ENABLE_BGFX)
@@ -882,9 +930,11 @@ int main() {
     const lcu::voxel::ChunkCoord spawn_chunk =
         lcu::voxel::world_to_chunk_and_local({spawn_column.x, 0, spawn_column.z}, lcu::voxel::Chunk::kEdgeLength)
             .chunk;
-    LCU_LOG_INFO("Loading world (seed={}) around spawn column ({},{}) (radius_xz={}, chunk_y=[{},{}])...",
-                 kWorldSeed, spawn_column.x, spawn_column.z, load_settings.radius_xz, load_settings.min_chunk_y,
-                 load_settings.max_chunk_y);
+    LCU_LOG_INFO(
+        "Loading world (seed={}) around spawn column ({},{}, biome={}) (radius_xz={}, chunk_y=[{},{}])...",
+        kWorldSeed, spawn_column.x, spawn_column.z, biome_name(lcu::world::worldgen::biome_at(
+                                                          kWorldSeed, spawn_column.x, spawn_column.z)),
+        load_settings.radius_xz, load_settings.min_chunk_y, load_settings.max_chunk_y);
     for (lcu::i32 cx = spawn_chunk.x - load_settings.radius_xz; cx <= spawn_chunk.x + load_settings.radius_xz;
          ++cx) {
         for (lcu::i32 cz = spawn_chunk.z - load_settings.radius_xz; cz <= spawn_chunk.z + load_settings.radius_xz;

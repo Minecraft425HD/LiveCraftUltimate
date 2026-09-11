@@ -262,6 +262,24 @@ int main(int argc, char** argv) {
     dirt_def.has_collision = true;
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
 
+    // Mirrors VoxelClient's own registration exactly, same position in
+    // the sequence (Phase 39: real climate/biome content) - BlockId
+    // alignment across both sides depends on registering in the exact
+    // same order, same as every other block here.
+    lcu::voxel::BlockDefinition sand_def;
+    sand_def.namespaced_id = "game:sand";
+    sand_def.display_name = "Sand";
+    sand_def.is_transparent = false;
+    sand_def.has_collision = true;
+    const lcu::voxel::BlockId sand_id = block_registry.register_block(sand_def);
+
+    lcu::voxel::BlockDefinition snow_def;
+    snow_def.namespaced_id = "game:snow";
+    snow_def.display_name = "Snow";
+    snow_def.is_transparent = false;
+    snow_def.has_collision = true;
+    const lcu::voxel::BlockId snow_id = block_registry.register_block(snow_def);
+
     // Mirrors VoxelClient's own registration exactly, same as every
     // other block above (Phase 34) - the server needs its own
     // authoritative copy of game:torch's light_emission/is_transparent/
@@ -354,8 +372,13 @@ int main(int argc, char** argv) {
     mod_loader.load_all("mods");
 #endif
 
+    const lcu::world::worldgen::BiomeBlocks biome_blocks{
+        /*plains_surface=*/grass_id, /*plains_subsurface=*/dirt_id,
+        /*desert_surface=*/sand_id, /*desert_subsurface=*/sand_id,
+        /*snowy_surface=*/snow_id,  /*snowy_subsurface=*/dirt_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, grass_id, dirt_id, stone_id, water_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id);
     });
 
     // Real chunk persistence trigger (Phase 20) - `engine/serialization::

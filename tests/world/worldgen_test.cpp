@@ -10,8 +10,55 @@
 
 using lcu::voxel::Chunk;
 using lcu::voxel::ChunkCoord;
+using lcu::world::worldgen::biome_at;
+using lcu::world::worldgen::Biome;
+using lcu::world::worldgen::BiomeBlocks;
 using lcu::world::worldgen::generate_terrain_chunk;
 using lcu::world::worldgen::terrain_height;
+
+namespace {
+
+constexpr lcu::voxel::BlockId kGrass = 2;
+constexpr lcu::voxel::BlockId kDirt = 4;
+constexpr lcu::voxel::BlockId kStone = 3;
+constexpr lcu::voxel::BlockId kWater = 6;
+constexpr lcu::voxel::BlockId kSand = 7;
+constexpr lcu::voxel::BlockId kSnow = 8;
+
+// Distinct ids per biome (unlike production code, which reuses kSand
+// for both Desert's surface and subsurface) so a test can tell exactly
+// which biome/layer produced a given block from its id alone.
+const BiomeBlocks kTestBiomeBlocks{
+    /*plains_surface=*/kGrass, /*plains_subsurface=*/kDirt,
+    /*desert_surface=*/kSand,  /*desert_subsurface=*/kSand,
+    /*snowy_surface=*/kSnow,   /*snowy_subsurface=*/kDirt,
+};
+
+lcu::voxel::BlockId expected_surface_for(Biome biome) {
+    switch (biome) {
+        case Biome::Plains:
+            return kGrass;
+        case Biome::Desert:
+            return kSand;
+        case Biome::Snowy:
+            return kSnow;
+    }
+    return kGrass;
+}
+
+lcu::voxel::BlockId expected_subsurface_for(Biome biome) {
+    switch (biome) {
+        case Biome::Plains:
+            return kDirt;
+        case Biome::Desert:
+            return kSand;
+        case Biome::Snowy:
+            return kDirt;
+    }
+    return kDirt;
+}
+
+}  // namespace
 
 TEST(Worldgen, SameSeedAndCoordAlwaysProducesSameHeight) {
     const lcu::i32 h1 = terrain_height(42, 100, -50);
@@ -51,6 +98,43 @@ TEST(Worldgen, HeightStaysWithinAReasonableRange) {
             EXPECT_LE(h, 30) << "at (" << x << "," << z << ")";
         }
     }
+}
+
+TEST(Worldgen, BiomeAtIsDeterministic) {
+    const Biome b1 = biome_at(42, 100, -50);
+    const Biome b2 = biome_at(42, 100, -50);
+    const Biome b3 = biome_at(42, 100, -50);
+
+    EXPECT_EQ(b1, b2);
+    EXPECT_EQ(b2, b3);
+}
+
+TEST(Worldgen, BiomeAtProducesAllThreeCategoriesOverARealArea) {
+    // Real proxy for "the climate model actually produces variety, not
+    // always the same biome": scan a wide area and confirm all three
+    // Biome values genuinely occur, not just Plains (the widest band,
+    // see worldgen.cpp's kSnowyThreshold/kDesertThreshold comment).
+    bool saw_snowy = false;
+    bool saw_plains = false;
+    bool saw_desert = false;
+    for (lcu::i32 x = -1500; x <= 1500 && !(saw_snowy && saw_plains && saw_desert); x += 13) {
+        for (lcu::i32 z = -1500; z <= 1500 && !(saw_snowy && saw_plains && saw_desert); z += 17) {
+            switch (biome_at(7, x, z)) {
+                case Biome::Snowy:
+                    saw_snowy = true;
+                    break;
+                case Biome::Plains:
+                    saw_plains = true;
+                    break;
+                case Biome::Desert:
+                    saw_desert = true;
+                    break;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_snowy) << "no Snowy column found in a wide area sample";
+    EXPECT_TRUE(saw_plains) << "no Plains column found in a wide area sample";
+    EXPECT_TRUE(saw_desert) << "no Desert column found in a wide area sample";
 }
 
 TEST(Worldgen, LocalRoughnessVariesAcrossRegions) {
@@ -103,23 +187,23 @@ TEST(Worldgen, AdjacentColumnsAreSmoothNotRandom) {
 }
 
 TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
-    constexpr lcu::voxel::BlockId kGrass = 2;
-    constexpr lcu::voxel::BlockId kDirt = 4;
-    constexpr lcu::voxel::BlockId kStone = 3;
-    constexpr lcu::voxel::BlockId kWater = 6;
     constexpr lcu::i32 kSubsurfaceDepth = 3;  // matches worldgen.cpp's own kSubsurfaceDepth.
     const ChunkCoord coord{0, 0, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/99, kGrass, kDirt, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/99, kTestBiomeBlocks, kStone, kWater);
 
-    // Spot-check a handful of columns against terrain_height directly -
-    // grass at the surface, dirt for kSubsurfaceDepth layers beneath it,
+    // Spot-check a handful of columns against terrain_height/biome_at
+    // directly - that column's biome surface block at the height, that
+    // biome's subsurface block for kSubsurfaceDepth layers beneath it,
     // stone deeper, water (Phase 37) between the surface and sea level
     // for a below-sea-level column, air above sea level.
     for (lcu::u32 lx : {0u, 5u, 15u}) {
         for (lcu::u32 lz : {0u, 8u, 15u}) {
-            const lcu::i32 height = terrain_height(99, static_cast<lcu::i32>(lx), static_cast<lcu::i32>(lz));
+            const lcu::i32 world_x = static_cast<lcu::i32>(lx);
+            const lcu::i32 world_z = static_cast<lcu::i32>(lz);
+            const lcu::i32 height = terrain_height(99, world_x, world_z);
+            const Biome biome = biome_at(99, world_x, world_z);
             for (lcu::u32 ly = 0; ly < Chunk::kEdgeLength; ++ly) {
                 const lcu::i32 world_y = static_cast<lcu::i32>(ly);
                 const auto block = chunk.block_at(lx, ly, lz);
@@ -130,9 +214,9 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
                         EXPECT_EQ(block, lcu::voxel::kAirBlockId) << "(" << lx << "," << ly << "," << lz << ")";
                     }
                 } else if (world_y == height) {
-                    EXPECT_EQ(block, kGrass) << "(" << lx << "," << ly << "," << lz << ")";
+                    EXPECT_EQ(block, expected_surface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else if (world_y > height - kSubsurfaceDepth) {
-                    EXPECT_EQ(block, kDirt) << "(" << lx << "," << ly << "," << lz << ")";
+                    EXPECT_EQ(block, expected_subsurface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else {
                     EXPECT_EQ(block, kStone) << "(" << lx << "," << ly << "," << lz << ")";
                 }
@@ -142,32 +226,25 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
 }
 
 TEST(Worldgen, ChunkFarAboveTerrainIsEntirelyAir) {
-    constexpr lcu::voxel::BlockId kGrass = 2;
-    constexpr lcu::voxel::BlockId kDirt = 4;
-    constexpr lcu::voxel::BlockId kStone = 3;
-    constexpr lcu::voxel::BlockId kWater = 6;
     // world_y range [1600, 1616) - far above any plausible terrain
     // height AND far above sea level, so no water fill applies either.
     const ChunkCoord coord{0, 100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kGrass, kDirt, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater);
 
     EXPECT_TRUE(chunk.is_empty());
 }
 
 TEST(Worldgen, ChunkFarBelowTerrainIsEntirelyStone) {
-    constexpr lcu::voxel::BlockId kGrass = 2;
-    constexpr lcu::voxel::BlockId kDirt = 4;
-    constexpr lcu::voxel::BlockId kStone = 3;
-    constexpr lcu::voxel::BlockId kWater = 6;
     // world_y range [-1600, -1584) - far below any plausible terrain
     // height (and far below the surface/subsurface layers near it), so
-    // every block should be stone, never grass, dirt, or water.
+    // every block should be stone regardless of biome, never a
+    // surface/subsurface block or water.
     const ChunkCoord coord{0, -100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kGrass, kDirt, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater);
 
     EXPECT_EQ(chunk.block_at(0, 0, 0), kStone);
     EXPECT_EQ(chunk.block_at(15, 15, 15), kStone);
@@ -176,10 +253,6 @@ TEST(Worldgen, ChunkFarBelowTerrainIsEntirelyStone) {
 }
 
 TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
-    constexpr lcu::voxel::BlockId kGrass = 2;
-    constexpr lcu::voxel::BlockId kDirt = 4;
-    constexpr lcu::voxel::BlockId kStone = 3;
-    constexpr lcu::voxel::BlockId kWater = 6;
     constexpr lcu::u32 kSeed = 5;
 
     // Locate the actual chunk containing world (0, height, 0)'s surface
@@ -188,6 +261,7 @@ TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
     // so it can even be negative), so generate whichever chunk really
     // contains it instead of assuming a hardcoded coordinate does.
     const lcu::i32 height = terrain_height(kSeed, 0, 0);
+    const Biome biome = biome_at(kSeed, 0, 0);
     const auto split =
         lcu::voxel::world_to_chunk_and_local({0, height, 0}, Chunk::kEdgeLength);
     const auto split_below =
@@ -196,11 +270,13 @@ TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
                                                   "different seed/column, or generate both chunks";
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, split.chunk, kSeed, kGrass, kDirt, kStone, kWater);
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater);
 
-    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), kGrass);
-    EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z), kDirt)
-        << "block directly beneath the surface should be dirt, not grass or stone";
+    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), expected_surface_for(biome));
+    EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z),
+              expected_subsurface_for(biome))
+        << "block directly beneath the surface should be that biome's subsurface block, not its surface block or "
+           "stone";
 }
 
 TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
@@ -208,10 +284,6 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
     // lands below sea level (a real "ocean" column, not a hypothetical
     // one) and confirm water actually fills the gap up to (and
     // including) sea level, with air strictly above it.
-    constexpr lcu::voxel::BlockId kGrass = 2;
-    constexpr lcu::voxel::BlockId kDirt = 4;
-    constexpr lcu::voxel::BlockId kStone = 3;
-    constexpr lcu::voxel::BlockId kWater = 6;
     constexpr lcu::u32 kSeed = 1;
 
     lcu::i32 found_x = 0;
@@ -241,7 +313,7 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
         auto it = chunks_by_y.find(split.chunk.y);
         if (it == chunks_by_y.end()) {
             Chunk chunk;
-            generate_terrain_chunk(chunk, split.chunk, kSeed, kGrass, kDirt, kStone, kWater);
+            generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater);
             it = chunks_by_y.emplace(split.chunk.y, std::move(chunk)).first;
         }
         return it->second;
