@@ -313,6 +313,26 @@ int main(int argc, char** argv) {
     water_def.has_collision = false;
     const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
 
+    // Mirrors VoxelClient's own registration exactly (Phase 40: real
+    // caves/ores pipeline stage) - the server needs its own authoritative
+    // copy so a chunk it generates has the same ore blocks a client
+    // generating the same seed/coord independently would compute, and so
+    // BlockId alignment across both sides holds the same as every block
+    // above.
+    lcu::voxel::BlockDefinition coal_ore_def;
+    coal_ore_def.namespaced_id = "game:coal_ore";
+    coal_ore_def.display_name = "Coal Ore";
+    coal_ore_def.is_transparent = false;
+    coal_ore_def.has_collision = true;
+    const lcu::voxel::BlockId coal_ore_id = block_registry.register_block(coal_ore_def);
+
+    lcu::voxel::BlockDefinition iron_ore_def;
+    iron_ore_def.namespaced_id = "game:iron_ore";
+    iron_ore_def.display_name = "Iron Ore";
+    iron_ore_def.is_transparent = false;
+    iron_ore_def.has_collision = true;
+    const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
+
     // Mirrors VoxelClient's own registration exactly (brief section 20:
     // server-side inventory, Phase 15) - both sides independently
     // register the same one item in the same order, so their ItemIds
@@ -377,8 +397,13 @@ int main(int argc, char** argv) {
         /*desert_surface=*/sand_id, /*desert_subsurface=*/sand_id,
         /*snowy_surface=*/snow_id,  /*snowy_subsurface=*/dirt_id,
     };
+    const lcu::world::worldgen::OreBlocks ore_blocks{
+        /*coal_ore=*/coal_ore_id,
+        /*iron_ore=*/iron_ore_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id,
+                                                       ore_blocks);
     });
 
     // Real chunk persistence trigger (Phase 20) - `engine/serialization::

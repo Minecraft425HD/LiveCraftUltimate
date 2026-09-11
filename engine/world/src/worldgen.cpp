@@ -69,6 +69,79 @@ f32 fractal_noise(u32 seed, f32 x, f32 z) {
     return total / amplitude_sum;
 }
 
+// --- 3D noise (Phase 40: caves need real volumetric noise, not just
+// the 2D column-height noise every stage before this one used) ---
+
+u32 hash3d(u32 seed, i32 x, i32 y, i32 z) {
+    u32 h = seed;
+    h ^= static_cast<u32>(x) * 0x27d4eb2du;
+    h ^= static_cast<u32>(y) * 0x9e3779b1u;
+    h ^= static_cast<u32>(z) * 0x165667b1u;
+    h ^= h >> 15;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h;
+}
+
+f32 lattice_value3d(u32 seed, i32 x, i32 y, i32 z) {
+    return static_cast<f32>(hash3d(seed, x, y, z) & 0x00FFFFFFu) / static_cast<f32>(0x01000000u);
+}
+
+// Trilinearly-interpolated, smoothed value noise in [0, 1) at
+// continuous (x, y, z) - the 3D counterpart to smooth_noise above,
+// same lattice-hash-then-interpolate structure, one more axis.
+f32 smooth_noise3d(u32 seed, f32 x, f32 y, f32 z) {
+    const i32 x0 = static_cast<i32>(std::floor(x));
+    const i32 y0 = static_cast<i32>(std::floor(y));
+    const i32 z0 = static_cast<i32>(std::floor(z));
+    const f32 fx = x - static_cast<f32>(x0);
+    const f32 fy = y - static_cast<f32>(y0);
+    const f32 fz = z - static_cast<f32>(z0);
+
+    const f32 v000 = lattice_value3d(seed, x0, y0, z0);
+    const f32 v100 = lattice_value3d(seed, x0 + 1, y0, z0);
+    const f32 v010 = lattice_value3d(seed, x0, y0 + 1, z0);
+    const f32 v110 = lattice_value3d(seed, x0 + 1, y0 + 1, z0);
+    const f32 v001 = lattice_value3d(seed, x0, y0, z0 + 1);
+    const f32 v101 = lattice_value3d(seed, x0 + 1, y0, z0 + 1);
+    const f32 v011 = lattice_value3d(seed, x0, y0 + 1, z0 + 1);
+    const f32 v111 = lattice_value3d(seed, x0 + 1, y0 + 1, z0 + 1);
+
+    const f32 sx = smoothstep(fx);
+    const f32 sy = smoothstep(fy);
+    const f32 sz = smoothstep(fz);
+
+    const f32 v00 = lerp(v000, v100, sx);
+    const f32 v10 = lerp(v010, v110, sx);
+    const f32 v01 = lerp(v001, v101, sx);
+    const f32 v11 = lerp(v011, v111, sx);
+    const f32 v0 = lerp(v00, v10, sy);
+    const f32 v1 = lerp(v01, v11, sy);
+    return lerp(v0, v1, sz);
+}
+
+// 4-octave 3D fractal sum, normalized back to [0, 1) - same structure
+// as the 2D fractal_noise above.
+f32 fractal_noise3d(u32 seed, f32 x, f32 y, f32 z) {
+    f32 total = 0.0f;
+    f32 amplitude = 1.0f;
+    f32 frequency = 1.0f;
+    f32 amplitude_sum = 0.0f;
+
+    for (int octave = 0; octave < 4; ++octave) {
+        total += smooth_noise3d(seed + static_cast<u32>(octave) * 101u, x * frequency, y * frequency,
+                                 z * frequency) *
+                 amplitude;
+        amplitude_sum += amplitude;
+        amplitude *= 0.5f;
+        frequency *= 2.0f;
+    }
+
+    return total / amplitude_sum;
+}
+
 // Phase 38: two genuinely separate noise stages, matching brief
 // section 21's own pipeline naming ("kontinental -> terrain") for
 // real instead of just as a comment on one combined noise sample.
@@ -133,6 +206,55 @@ constexpr u32 kClimateSeedOffset = 2246822519u;
 constexpr f32 kSnowyThreshold = 0.25f;
 constexpr f32 kDesertThreshold = 0.75f;
 
+// Cave stage (Phase 40): two independent 3D noise fields (own seed
+// offsets, same "different offset = statistically independent"
+// reasoning used everywhere else in this file) sampled at the same
+// point - where their values land close together (kCaveThreshold),
+// the cell is carved into open air. This "noise crevice" difference
+// technique produces winding, connected, tunnel-like voids, unlike a
+// single-field threshold ("cheese caves") which produces isolated
+// round blobs (see DECISIONS.md for the comparison). kCaveNoiseScale
+// is deliberately coarser than the ore scale below - caves should be
+// large connected structures, not block-by-block static.
+constexpr f32 kCaveNoiseScale = 0.05f;
+constexpr u32 kCaveSeedOffsetA = 1013904223u;
+constexpr u32 kCaveSeedOffsetB = 2654435761u;
+constexpr f32 kCaveThreshold = 0.03f;
+// How many blocks below that column's own terrain_height a cave is
+// allowed to start - keeps tunnels from ever punching a hole right at
+// ground level (which would look like a hole in the world, not a
+// cave entrance).
+constexpr i32 kCaveMinDepthBelowSurface = 4;
+
+// Ore stage (Phase 40): each ore its own independent 3D noise field
+// (own seed offset) plus an absolute world-Y range and a rarity
+// threshold on [0,1) - a cell only becomes ore if it is both inside
+// that ore's depth band and its own noise field crosses the
+// threshold. Iron checked before Coal and given a narrower, deeper
+// band and a higher threshold (rarer) - real ore rarity, Coal common
+// and shallow, Iron uncommon and deep - rather than both being
+// equally likely everywhere underground.
+// Threshold values picked from fractal_noise3d's own real, empirically-
+// measured output range at this amplitude/octave configuration (a
+// 4-octave weighted average clusters well inside [0,1) - roughly
+// [0.05, 0.95] in practice, not the full range - see DECISIONS.md for
+// the real sampled data this was tuned against, the same "measure, don't
+// guess" approach Phase 38's spawn-radius fix and Phase 39's biome
+// thresholds already used). kCoalThreshold keeps Coal a real, regularly
+//-findable resource (~3.7% of eligible cells); kIronThreshold is
+// deliberately higher, on top of Iron's own narrower/deeper Y range
+// below, so Iron stays genuinely rarer than Coal (~0.1% of eligible
+// cells) - both still small next to OreType::None's overwhelming share.
+constexpr f32 kOreNoiseScale = 0.08f;
+constexpr u32 kCoalSeedOffset = 374761393u;
+constexpr f32 kCoalThreshold = 0.70f;
+constexpr i32 kCoalMinY = -48;
+constexpr i32 kCoalMaxY = 48;
+constexpr u32 kIronSeedOffset = 3266489917u;
+constexpr f32 kIronThreshold = 0.80f;
+constexpr i32 kIronMinY = -48;
+constexpr i32 kIronMaxY = -4;
+
 }  // namespace
 
 i32 terrain_height(u32 seed, i32 world_x, i32 world_z) {
@@ -167,6 +289,42 @@ Biome biome_at(u32 seed, i32 world_x, i32 world_z) {
     return Biome::Plains;
 }
 
+bool is_cave(u32 seed, i32 world_x, i32 world_y, i32 world_z, i32 surface_height) {
+    if (world_y > surface_height - kCaveMinDepthBelowSurface) {
+        return false;
+    }
+    const f32 x = static_cast<f32>(world_x);
+    const f32 y = static_cast<f32>(world_y);
+    const f32 z = static_cast<f32>(world_z);
+    const f32 field_a =
+        fractal_noise3d(seed + kCaveSeedOffsetA, x * kCaveNoiseScale, y * kCaveNoiseScale, z * kCaveNoiseScale);
+    const f32 field_b =
+        fractal_noise3d(seed + kCaveSeedOffsetB, x * kCaveNoiseScale, y * kCaveNoiseScale, z * kCaveNoiseScale);
+    return std::abs(field_a - field_b) < kCaveThreshold;
+}
+
+OreType ore_at(u32 seed, i32 world_x, i32 world_y, i32 world_z) {
+    const f32 x = static_cast<f32>(world_x);
+    const f32 y = static_cast<f32>(world_y);
+    const f32 z = static_cast<f32>(world_z);
+
+    if (world_y >= kIronMinY && world_y <= kIronMaxY) {
+        const f32 iron_value =
+            fractal_noise3d(seed + kIronSeedOffset, x * kOreNoiseScale, y * kOreNoiseScale, z * kOreNoiseScale);
+        if (iron_value > kIronThreshold) {
+            return OreType::Iron;
+        }
+    }
+    if (world_y >= kCoalMinY && world_y <= kCoalMaxY) {
+        const f32 coal_value =
+            fractal_noise3d(seed + kCoalSeedOffset, x * kOreNoiseScale, y * kOreNoiseScale, z * kOreNoiseScale);
+        if (coal_value > kCoalThreshold) {
+            return OreType::Coal;
+        }
+    }
+    return OreType::None;
+}
+
 namespace {
 
 // Which land block ids a column's own biome maps to (Phase 39) -
@@ -192,7 +350,7 @@ SurfaceBlocks surface_blocks_for(Biome biome, const BiomeBlocks& biome_blocks) {
 }  // namespace
 
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, const BiomeBlocks& biome_blocks,
-                             voxel::BlockId stone_block, voxel::BlockId water_block) {
+                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks) {
     constexpr u32 kEdge = voxel::Chunk::kEdgeLength;
 
     for (u32 lz = 0; lz < kEdge; ++lz) {
@@ -220,11 +378,30 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
                     }
                     continue;
                 }
+                if (is_cave(seed, world_x, world_y, world_z, height)) {
+                    // Carved into open air (Phase 40) - the chunk's
+                    // default fill, nothing to set. kCaveMinDepthBelowSurface
+                    // already keeps this from ever firing within the
+                    // surface/subsurface layers below, so no ordering
+                    // conflict with them.
+                    continue;
+                }
                 voxel::BlockId block_id = stone_block;
                 if (world_y == height) {
                     block_id = surface_blocks.surface;
                 } else if (world_y > height - kSubsurfaceDepth) {
                     block_id = surface_blocks.subsurface;
+                } else {
+                    switch (ore_at(seed, world_x, world_y, world_z)) {
+                        case OreType::Coal:
+                            block_id = ore_blocks.coal_ore;
+                            break;
+                        case OreType::Iron:
+                            block_id = ore_blocks.iron_ore;
+                            break;
+                        case OreType::None:
+                            break;
+                    }
                 }
                 chunk.set_block(lx, ly, lz, block_id);
             }

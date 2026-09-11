@@ -35,8 +35,8 @@ propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 **Phase 34 (torch block + lighting benchmarks)**, **Phase 35
 (chunk unload marks neighbors dirty)**, **Phase 36 (entity boxes +
 extended debug overlay)**, **Phase 37 (sea level at y=0 + water
-block/rendering)**, **Phase 38 (continental/mountain terrain)**, and
-**Phase 39 (biomes)** are done; see
+block/rendering)**, **Phase 38 (continental/mountain terrain)**,
+**Phase 39 (biomes)**, and **Phase 40 (caves + ores)** are done; see
 "Reality Audit" and "Last Completed Task" below for what they cover
 and what's next. A large, user-directed program (Phases 26-42: visible
 terrain colors, skybox, cross-chunk global lighting with real
@@ -1341,6 +1341,49 @@ Whittaker-diagram-style biome table (see DECISIONS.md for why this
 scope, not more); no elevation-climate coupling; no item mapping for
 sand/snow yet; no caves/ores/structures/vegetation stages yet (Phases
 40-41).
+
+**Phase 40 (caves + ores)**: real cave-carving and ore pipeline stages.
+New 3D noise primitives (`hash3d`/`lattice_value3d`/trilinear
+`smooth_noise3d`/4-octave `fractal_noise3d` - every earlier worldgen
+stage only needed 2D column noise). `is_cave(seed, x, y, z,
+surface_height)` samples two independent 3D noise fields and carves
+open air wherever their values land within a small threshold of each
+other - a "noise crevice" that produces real winding tunnels, not
+single-threshold "cheese cave" blobs (see DECISIONS.md); a real minimum
+depth below that column's own `terrain_height()` keeps tunnels from
+ever punching a hole at ground level. `OreType` (`None`/`Coal`/`Iron`)
+and `ore_at(seed, x, y, z)` - each ore its own noise field, absolute Y
+depth band, and rarity threshold, with `None` overwhelmingly common by
+design and Iron genuinely rarer than Coal. New `OreBlocks` struct (same
+pattern as `BiomeBlocks`); two new real blocks `game:coal_ore`/
+`game:iron_ore`, registered identically on `VoxelClient`/`VoxelServer`
+right after `game:water`. `generate_terrain_chunk`'s stone-band branch
+now checks `is_cave` first, then `ore_at`, falling back to plain stone.
+
+Ore thresholds were tuned from a real measured `fractal_noise3d` output
+distribution, not guessed: the first round-number thresholds (0.90/
+0.95) proved nearly unreachable for Iron and too sparse for Coal once a
+real test tried to find them, caught the same way Phase 38's spawn-
+radius bug and Phase 39's biome-threshold bug were - by measuring the
+actual system instead of assuming a shape for it. Fixed to 0.70/0.80
+(Coal ~3.7% of eligible cells, Iron ~0.1%, both still small next to
+`None`'s overwhelming share). 6 new worldgen tests, 2 existing tests
+rewritten (one renamed `ChunkFarBelowTerrainIsStoneCaveOrOre`) since
+their old "always plain stone below the subsurface layer" assumption
+stopped holding once caves/ores could carve or substitute those cells.
+Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run, real
+`LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs
+(byte-identical to Phase 39), and a real two-process networked run with
+matching independently-computed spawn columns, zero warnings/errors/
+rejects. `ctest` 401/401 (bgfx, up from 396) / 398/398 (non-bgfx, up
+from 393).
+
+Honestly scoped: **what carved caves/ore veins actually look like on a
+real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+cave-specific lighting treatment; no ore item drops/mapping yet; no
+structures/vegetation stages yet (Phase 41); caves/ores have no
+artificial depth ceiling (an honest consequence of the noise fields
+having no cutoff of their own, not a hidden gap - see DECISIONS.md).
 
 ## Build Status
 

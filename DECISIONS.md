@@ -2698,3 +2698,84 @@ avoid fighting it); a data-driven biome registry mods could extend
 (rejected - `engine/modding`'s Lua bindings don't expose worldgen at
 all yet, and building that binding surface is real, separate work
 outside this phase's scope).
+
+## 2026-09-11 — Caves: "noise crevice" difference technique, not single-threshold "cheese caves"
+
+**Context:** brief section 21's worldgen pipeline lists "caves/ores" as
+the stage after climate/biome (Phase 39). The straightforward approach -
+one 3D noise field, carve wherever it crosses a single threshold - is
+well known to produce "cheese caves": isolated, round, disconnected
+blobs, because a single field's high (or low) region is naturally
+blob-shaped, not tunnel-shaped.
+
+**Decision:** sample two independent 3D noise fields (own seed offsets)
+at the same point and carve where their values land within a small
+threshold of each other (`|field_a - field_b| < kCaveThreshold`). Two
+continuous fields crossing near-equal values traces a winding, connected
+surface (a "crevice") through 3D space, not a blob - a real, structurally
+different result from single-threshold carving, not a cosmetic tuning
+difference.
+
+**`kCaveMinDepthBelowSurface`:** `is_cave` takes `surface_height` (that
+column's own `terrain_height()`, which the caller - `generate_terrain_
+chunk` - already has, no reason to recompute it) and refuses to carve
+within a fixed minimum depth of it. Without this, a cave that happens to
+reach close to the surface would punch a visible hole at ground level -
+not "cave entrance", just a floating pit with no relationship to the
+terrain above it. A real minimum depth keeps every carved opening
+genuinely underground.
+
+**No depth ceiling:** unlike a hypothetical "caves only exist between Y=
+-40 and Y=10" rule, `is_cave` has no upper/lower Y bound of its own
+beyond the surface-relative minimum depth - the noise fields are sampled
+at whatever `(x, y, z)` is asked, arbitrarily far down. This is an
+honest consequence of not inventing an artificial cutoff with no
+gameplay reason behind it yet (there's no "bedrock" concept, no chunk-
+loading depth limit, nothing this project currently does that would
+make a hard floor meaningful) - documented in CHANGELOG.md and directly
+exercised by the rewritten `ChunkFarBelowTerrainIsStoneCaveOrOre` test
+(which used to assert "always stone" at extreme depth and now computes
+the real expected value instead, precisely because that assumption
+stopped being true).
+
+**Ore thresholds tuned from real measured data, not guessed:** the first
+attempt picked round-looking numbers (0.90 for Coal, 0.95 for Iron)
+against an assumed roughly-uniform [0,1) noise output. A dedicated
+`OreAtProducesBothOreTypesOverARealVolume` test failed - both ores
+came back completely absent from a real, wide scan. Investigation (a
+standalone probe program replicating `fractal_noise3d`'s exact math to
+measure its true output distribution, the same "measure the real system,
+don't assume" approach Phase 38's spawn-radius bug and Phase 39's biome-
+threshold bug were both caught with) showed the actual range: a 4-octave
+weighted average naturally clusters well inside [0,1) - empirically
+~[0.05, 0.95] over a 1.8M-cell sample, not the full range a single
+uncombined lattice sample would span. 0.95 was nearly unreachable;
+0.90 gave a real but too-sparse hit rate for the test's own scan volume.
+Re-derived both thresholds directly from the measured distribution
+(0.70 for Coal, ~3.7% of eligible cells; 0.80 for Iron, ~0.1% - roughly
+30x rarer than Coal, plus its own narrower/deeper Y band) - both still
+small next to `OreType::None`'s overwhelming share, preserving the
+"ore is rare" design intent the first (wrong) numbers were also aiming
+for, just via numbers the real noise actually produces.
+
+**Two ores, not a full mineral progression:** `OreType` is `None`/
+`Coal`/`Iron` - the same "honestly small, not the final variety" scoping
+Phase 39's three biomes and Phase 34's single torch block already
+established for this project. No item drops for either ore yet (breaking
+one currently just removes it, the same gap sand/snow had after Phase 39
+until Phase 18/22-style item wiring is added) - deliberately deferred,
+not a hidden omission.
+
+**Alternatives considered:** single-threshold "cheese caves" (rejected -
+see the crevice-vs-blob reasoning above, this was the primary reason for
+choosing the two-field difference technique); 3D Perlin-worms/path-based
+tunnel carving (rejected - meaningfully more implementation complexity
+for a first cave pass, and the noise-crevice technique already produces
+genuinely connected tunnels without needing an explicit path/graph
+structure); an artificial cave depth ceiling (rejected - no real
+gameplay concept in this project yet that would make one meaningful,
+would just be an unmotivated magic number); guessing ore thresholds from
+an assumed uniform distribution again after the first failure (rejected
+- exactly the mistake that caused the first numbers to fail; measuring
+the real distribution is barely more work and gets a verifiably correct
+answer instead of another guess).

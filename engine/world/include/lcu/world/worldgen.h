@@ -63,18 +63,56 @@ struct BiomeBlocks {
     voxel::BlockId snowy_subsurface;
 };
 
+// Real cave-carving pipeline stage (Phase 40, brief section 21): a
+// genuine 3D noise "tunnel" predicate - true where a solid,
+// underground cell should be carved into open air instead of stone.
+// Built from two independent 3D noise fields whose difference
+// crossing near zero forms winding, tunnel-like voids (the classic
+// "noise crevice" technique) rather than a single-threshold blob
+// ("cheese cave") - a real, deliberately simple choice for a more
+// tunnel-like result (see DECISIONS.md for the alternatives this
+// passed over). `surface_height` is that column's own
+// terrain_height() - the caller already has it (generate_terrain_
+// chunk computes it once per column), no reason to recompute it here
+// - used to keep caves a real minimum depth below the surface so they
+// never punch daylight holes right at ground level.
+bool is_cave(u32 seed, i32 world_x, i32 world_y, i32 world_z, i32 surface_height);
+
+// Real ore pipeline stage (Phase 40): which ore, if any, replaces
+// plain stone at a given world position. Deliberately small - two
+// real, distinct ores, not the full variety a shipped game would
+// eventually want (see DECISIONS.md, the same "honestly scoped, not
+// the final variety" reasoning Phase 39's three biomes already
+// established). `None` (the overwhelmingly common outcome, matching
+// real ore rarity) means "no ore here, this cell stays plain stone".
+enum class OreType {
+    None,
+    Coal,
+    Iron,
+};
+OreType ore_at(u32 seed, i32 world_x, i32 world_y, i32 world_z);
+
+// The real block ids OreType::Coal/Iron map to (Phase 40) - caller-
+// supplied, the same pattern BiomeBlocks already established.
+struct OreBlocks {
+    voxel::BlockId coal_ore;
+    voxel::BlockId iron_ore;
+};
+
 // Fills `chunk` (at chunk coordinate `coord`) from terrain_height()
 // and biome_at(): the biome's own surface block at the topmost solid
 // layer, that biome's subsurface block for the next kSubsurfaceDepth
-// layers beneath it, `stone_block` for everything deeper (stone is
-// deliberately not biome-dependent - every biome's land is stone deep
-// down, a real and honest simplification, not a hidden gap). Above
-// the terrain height: `water_block` for any cell at or below
-// kSeaLevel (Phase 37 - a below-sea-level column's "hole" between its
-// terrain and the sea surface, unaffected by biome), air everywhere
-// else. Still no caves/ores/structures/vegetation (later brief
-// section 21 pipeline stages, not implemented).
+// layers beneath it. Below that: `is_cave` carves real tunnels into
+// open air (Phase 40); a cell that isn't carved and isn't `is_cave`
+// checks `ore_at` next, substituting the matching block from
+// `ore_blocks` for plain stone where an ore vein is present; anything
+// left over is `stone_block`. Above the terrain height: `water_block`
+// for any cell at or below kSeaLevel (Phase 37 - a below-sea-level
+// column's "hole" between its terrain and the sea surface, unaffected
+// by biome/caves/ores), air everywhere else. Still no structures/
+// vegetation (later brief section 21 pipeline stages, not
+// implemented).
 void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 seed, const BiomeBlocks& biome_blocks,
-                             voxel::BlockId stone_block, voxel::BlockId water_block);
+                             voxel::BlockId stone_block, voxel::BlockId water_block, const OreBlocks& ore_blocks);
 
 }  // namespace lcu::world::worldgen

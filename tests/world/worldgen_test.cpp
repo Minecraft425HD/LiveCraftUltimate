@@ -14,6 +14,10 @@ using lcu::world::worldgen::biome_at;
 using lcu::world::worldgen::Biome;
 using lcu::world::worldgen::BiomeBlocks;
 using lcu::world::worldgen::generate_terrain_chunk;
+using lcu::world::worldgen::is_cave;
+using lcu::world::worldgen::ore_at;
+using lcu::world::worldgen::OreBlocks;
+using lcu::world::worldgen::OreType;
 using lcu::world::worldgen::terrain_height;
 
 namespace {
@@ -24,6 +28,8 @@ constexpr lcu::voxel::BlockId kStone = 3;
 constexpr lcu::voxel::BlockId kWater = 6;
 constexpr lcu::voxel::BlockId kSand = 7;
 constexpr lcu::voxel::BlockId kSnow = 8;
+constexpr lcu::voxel::BlockId kCoalOre = 9;
+constexpr lcu::voxel::BlockId kIronOre = 10;
 
 // Distinct ids per biome (unlike production code, which reuses kSand
 // for both Desert's surface and subsurface) so a test can tell exactly
@@ -33,6 +39,34 @@ const BiomeBlocks kTestBiomeBlocks{
     /*desert_surface=*/kSand,  /*desert_subsurface=*/kSand,
     /*snowy_surface=*/kSnow,   /*snowy_subsurface=*/kDirt,
 };
+
+// Distinct ids per ore (Phase 40), same "distinct per category" reasoning
+// as kTestBiomeBlocks above.
+const OreBlocks kTestOreBlocks{
+    /*coal_ore=*/kCoalOre,
+    /*iron_ore=*/kIronOre,
+};
+
+// Mirrors generate_terrain_chunk's own stone-band logic exactly (worldgen.cpp:
+// is_cave carved -> air, else ore_at -> that ore's block, else stone) via
+// the same public is_cave/ore_at functions worldgen.cpp itself calls, so a
+// test can compute the expected block for any cell at or below a column's
+// subsurface layer without duplicating worldgen.cpp's private internals.
+lcu::voxel::BlockId expected_stone_band_block(lcu::u32 seed, lcu::i32 world_x, lcu::i32 world_y, lcu::i32 world_z,
+                                               lcu::i32 surface_height) {
+    if (is_cave(seed, world_x, world_y, world_z, surface_height)) {
+        return lcu::voxel::kAirBlockId;
+    }
+    switch (ore_at(seed, world_x, world_y, world_z)) {
+        case OreType::Coal:
+            return kCoalOre;
+        case OreType::Iron:
+            return kIronOre;
+        case OreType::None:
+            return kStone;
+    }
+    return kStone;
+}
 
 lcu::voxel::BlockId expected_surface_for(Biome biome) {
     switch (biome) {
@@ -191,13 +225,17 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
     const ChunkCoord coord{0, 0, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/99, kTestBiomeBlocks, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/99, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
 
     // Spot-check a handful of columns against terrain_height/biome_at
     // directly - that column's biome surface block at the height, that
     // biome's subsurface block for kSubsurfaceDepth layers beneath it,
-    // stone deeper, water (Phase 37) between the surface and sea level
-    // for a below-sea-level column, air above sea level.
+    // stone/cave/ore deeper (Phase 40 - is_cave/ore_at can turn a stone-
+    // band cell into air or an ore block, so the expected value there is
+    // computed the same way generate_terrain_chunk itself computes it,
+    // not assumed to always be kStone), water (Phase 37) between the
+    // surface and sea level for a below-sea-level column, air above sea
+    // level.
     for (lcu::u32 lx : {0u, 5u, 15u}) {
         for (lcu::u32 lz : {0u, 8u, 15u}) {
             const lcu::i32 world_x = static_cast<lcu::i32>(lx);
@@ -218,7 +256,8 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
                 } else if (world_y > height - kSubsurfaceDepth) {
                     EXPECT_EQ(block, expected_subsurface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else {
-                    EXPECT_EQ(block, kStone) << "(" << lx << "," << ly << "," << lz << ")";
+                    EXPECT_EQ(block, expected_stone_band_block(99, world_x, world_y, world_z, height))
+                        << "(" << lx << "," << ly << "," << lz << ")";
                 }
             }
         }
@@ -231,25 +270,35 @@ TEST(Worldgen, ChunkFarAboveTerrainIsEntirelyAir) {
     const ChunkCoord coord{0, 100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
 
     EXPECT_TRUE(chunk.is_empty());
 }
 
-TEST(Worldgen, ChunkFarBelowTerrainIsEntirelyStone) {
+TEST(Worldgen, ChunkFarBelowTerrainIsStoneCaveOrOre) {
     // world_y range [-1600, -1584) - far below any plausible terrain
     // height (and far below the surface/subsurface layers near it), so
-    // every block should be stone regardless of biome, never a
-    // surface/subsurface block or water.
+    // every block here comes from generate_terrain_chunk's stone-band
+    // branch: real stone, unless is_cave/ore_at (Phase 40 - noise fields
+    // with no artificial depth ceiling) carve it into air or substitute
+    // an ore block, the same as any other stone-band cell. Never a
+    // surface/subsurface block or water either way.
     const ChunkCoord coord{0, -100, 0};
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater);
+    generate_terrain_chunk(chunk, coord, /*seed=*/1, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
 
-    EXPECT_EQ(chunk.block_at(0, 0, 0), kStone);
-    EXPECT_EQ(chunk.block_at(15, 15, 15), kStone);
-    EXPECT_EQ(chunk.block_at(7, 3, 12), kStone);
-    EXPECT_FALSE(chunk.is_empty());
+    const auto check_cell = [&](lcu::u32 lx, lcu::u32 ly, lcu::u32 lz) {
+        const lcu::i32 world_x = coord.x * static_cast<lcu::i32>(Chunk::kEdgeLength) + static_cast<lcu::i32>(lx);
+        const lcu::i32 world_y = coord.y * static_cast<lcu::i32>(Chunk::kEdgeLength) + static_cast<lcu::i32>(ly);
+        const lcu::i32 world_z = coord.z * static_cast<lcu::i32>(Chunk::kEdgeLength) + static_cast<lcu::i32>(lz);
+        const lcu::i32 height = terrain_height(1, world_x, world_z);
+        EXPECT_EQ(chunk.block_at(lx, ly, lz), expected_stone_band_block(1, world_x, world_y, world_z, height))
+            << "(" << lx << "," << ly << "," << lz << ")";
+    };
+    check_cell(0, 0, 0);
+    check_cell(15, 15, 15);
+    check_cell(7, 3, 12);
 }
 
 TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
@@ -270,7 +319,7 @@ TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
                                                   "different seed/column, or generate both chunks";
 
     Chunk chunk;
-    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater);
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
 
     EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), expected_surface_for(biome));
     EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z),
@@ -313,7 +362,7 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
         auto it = chunks_by_y.find(split.chunk.y);
         if (it == chunks_by_y.end()) {
             Chunk chunk;
-            generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater);
+            generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks);
             it = chunks_by_y.emplace(split.chunk.y, std::move(chunk)).first;
         }
         return it->second;
@@ -331,4 +380,82 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
         EXPECT_EQ(chunk.block_at(local.local.x, local.local.y, local.local.z), lcu::voxel::kAirBlockId)
             << "strictly above sea level should be air, not water";
     }
+}
+
+TEST(Worldgen, IsCaveIsDeterministic) {
+    const bool a = is_cave(42, 100, -50, 30, /*surface_height=*/40);
+    const bool b = is_cave(42, 100, -50, 30, /*surface_height=*/40);
+    const bool c = is_cave(42, 100, -50, 30, /*surface_height=*/40);
+
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(b, c);
+}
+
+TEST(Worldgen, IsCaveNeverFiresExactlyAtTheSurface) {
+    // Real proxy for the header's own "keeps tunnels from ever punching
+    // a hole right at ground level" guarantee: at world_y == surface_height
+    // itself, is_cave must always be false, for any minimum depth > 0
+    // worldgen.cpp's own kCaveMinDepthBelowSurface might use.
+    for (lcu::i32 x = -300; x <= 300; x += 23) {
+        for (lcu::i32 z = -300; z <= 300; z += 29) {
+            const lcu::i32 height = terrain_height(11, x, z);
+            EXPECT_FALSE(is_cave(11, x, height, z, height)) << "at (" << x << "," << height << "," << z << ")";
+        }
+    }
+}
+
+TEST(Worldgen, IsCaveProducesSomeCarvedCellsWellBelowTheSurface) {
+    // Real proxy for "actually carves tunnels, not always false": scan a
+    // real, wide, comfortably-deep volume beneath several columns' own
+    // terrain height and confirm at least one cell comes back true.
+    constexpr lcu::u32 kSeed = 21;
+    bool found_cave = false;
+    for (lcu::i32 x = 0; x < 400 && !found_cave; x += 5) {
+        for (lcu::i32 z = 0; z < 400 && !found_cave; z += 5) {
+            const lcu::i32 height = terrain_height(kSeed, x, z);
+            for (lcu::i32 depth = 8; depth < 60 && !found_cave; depth += 2) {
+                if (is_cave(kSeed, x, height - depth, z, height)) {
+                    found_cave = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(found_cave) << "no carved cell found in a real, wide, sufficiently-deep sample";
+}
+
+TEST(Worldgen, OreAtIsDeterministic) {
+    const OreType a = ore_at(42, 100, -20, -50);
+    const OreType b = ore_at(42, 100, -20, -50);
+    const OreType c = ore_at(42, 100, -20, -50);
+
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(b, c);
+}
+
+TEST(Worldgen, OreAtProducesBothOreTypesOverARealVolume) {
+    // Real proxy for "both ores genuinely occur, not just None everywhere
+    // (the overwhelmingly common case by design, see worldgen.h's own
+    // comment) or just one of the two": scan a wide underground volume
+    // and confirm both Coal and Iron occur somewhere in it.
+    constexpr lcu::u32 kSeed = 5;
+    bool saw_coal = false;
+    bool saw_iron = false;
+    for (lcu::i32 x = -160; x <= 160 && !(saw_coal && saw_iron); x += 4) {
+        for (lcu::i32 y = -48; y <= 40 && !(saw_coal && saw_iron); y += 2) {
+            for (lcu::i32 z = -160; z <= 160 && !(saw_coal && saw_iron); z += 4) {
+                switch (ore_at(kSeed, x, y, z)) {
+                    case OreType::Coal:
+                        saw_coal = true;
+                        break;
+                    case OreType::Iron:
+                        saw_iron = true;
+                        break;
+                    case OreType::None:
+                        break;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(saw_coal) << "no Coal found in a wide underground sample";
+    EXPECT_TRUE(saw_iron) << "no Iron found in a wide underground sample";
 }

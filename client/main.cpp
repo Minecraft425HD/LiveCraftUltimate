@@ -493,6 +493,28 @@ int main() {
     water_def.color = {0.15f, 0.35f, 0.85f};
     const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
 
+    // Real ore blocks (Phase 40, brief section 21's "caves/ores" pipeline
+    // stage): solid, collidable, dark like every other stone-family block
+    // registered so far - no new visual/physical mechanic, just a
+    // distinct color so `ore_at`'s substitution is actually visible in
+    // the world. Coal darker/duller (a common, low-value resource),
+    // Iron a warmer tan (rarer, per worldgen.cpp's own noise thresholds).
+    lcu::voxel::BlockDefinition coal_ore_def;
+    coal_ore_def.namespaced_id = "game:coal_ore";
+    coal_ore_def.display_name = "Coal Ore";
+    coal_ore_def.is_transparent = false;
+    coal_ore_def.has_collision = true;
+    coal_ore_def.color = {0.2f, 0.2f, 0.22f};
+    const lcu::voxel::BlockId coal_ore_id = block_registry.register_block(coal_ore_def);
+
+    lcu::voxel::BlockDefinition iron_ore_def;
+    iron_ore_def.namespaced_id = "game:iron_ore";
+    iron_ore_def.display_name = "Iron Ore";
+    iron_ore_def.is_transparent = false;
+    iron_ore_def.has_collision = true;
+    iron_ore_def.color = {0.82f, 0.71f, 0.58f};
+    const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
+
     // Block-break's first real item consumer (brief section 55): the
     // item a broken "game:stone" block hands the player. Item drops go
     // straight into the inventory rather than spawning a physical
@@ -672,8 +694,13 @@ int main() {
         /*desert_surface=*/sand_id, /*desert_subsurface=*/sand_id,
         /*snowy_surface=*/snow_id,  /*snowy_subsurface=*/dirt_id,
     };
+    const lcu::world::worldgen::OreBlocks ore_blocks{
+        /*coal_ore=*/coal_ore_id,
+        /*iron_ore=*/iron_ore_id,
+    };
     lcu::world::World world(kWorldSeed, [&](lcu::voxel::Chunk& chunk, lcu::voxel::ChunkCoord coord) {
-        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id);
+        lcu::world::worldgen::generate_terrain_chunk(chunk, coord, kWorldSeed, biome_blocks, stone_id, water_id,
+                                                       ore_blocks);
     });
 
 #if defined(LCU_ENABLE_BGFX)

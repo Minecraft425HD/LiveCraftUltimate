@@ -1466,6 +1466,74 @@ snow yet (breaking either removes it without granting an item, the
 same state grass/dirt were in before Phase 18/22); no caves/ores/
 structures/vegetation stages yet (Phases 40-41).
 
+## Phase 40 — Caves + ores
+
+Real cave-carving and ore pipeline stages - a "noise crevice" tunnel
+technique and two real, deliberately small ore types.
+
+- [x] **New 3D noise primitives** (`hash3d`, `lattice_value3d`,
+  trilinear `smooth_noise3d`, 4-octave `fractal_noise3d`) - every
+  earlier worldgen stage only ever needed 2D column noise.
+- [x] **`is_cave(seed, x, y, z, surface_height)`**: two independent 3D
+  noise fields (own seed offsets); carves open air wherever their
+  values land within a small threshold of each other - a real winding
+  tunnel technique, not single-threshold "cheese cave" blobs (see
+  DECISIONS.md). A real minimum depth below that column's own
+  `terrain_height()` keeps tunnels from ever punching a hole at ground
+  level.
+- [x] **`OreType`/`ore_at(seed, x, y, z)`**: `None`/`Coal`/`Iron`, each
+  ore its own noise field, absolute Y depth band, and rarity threshold.
+  `None` overwhelmingly common by design; Iron checked first with a
+  narrower/deeper band and a higher threshold, genuinely rarer than
+  Coal. New `OreBlocks` struct (same pattern as `BiomeBlocks`).
+- [x] Two new real blocks: `game:coal_ore`, `game:iron_ore` - solid,
+  collidable, distinct colors only (no new mechanic). Registered
+  identically, same sequence position, on `VoxelClient`/`VoxelServer`
+  right after `game:water`.
+- [x] **`generate_terrain_chunk` extended**: its stone-band branch now
+  checks `is_cave` first (carved cells stay air), then `ore_at` for
+  anything not carved (substituting the matching ore block), falling
+  back to plain stone. New trailing `OreBlocks` parameter on every
+  caller (`VoxelClient`, `VoxelServer`, `tools/benchmark`, worldgen
+  tests).
+- [x] **Ore thresholds tuned from real measured data**: the first
+  round-number thresholds (0.90/0.95) proved nearly unreachable for
+  Iron and too sparse for Coal once a real test tried to find them in a
+  real scan volume - caught the same way Phase 38's spawn-radius bug
+  and Phase 39's biome-threshold bug were, by measuring the actual
+  system instead of assuming its shape. Fixed to 0.70/0.80 from a real
+  measured `fractal_noise3d` output distribution (a standalone probe
+  program, not another guess).
+- [x] 6 new worldgen tests (`IsCaveIsDeterministic`,
+  `IsCaveNeverFiresExactlyAtTheSurface`,
+  `IsCaveProducesSomeCarvedCellsWellBelowTheSurface`,
+  `OreAtIsDeterministic`, `OreAtProducesBothOreTypesOverARealVolume` - a
+  real sweep confirming both ore types genuinely occur); 2 existing
+  tests rewritten (one renamed `ChunkFarBelowTerrainIsStoneCaveOrOre`)
+  since their old "always plain stone below the subsurface layer"
+  assumption stopped holding once caves/ores could carve or substitute
+  those cells - both now compute the expected block via the real
+  `is_cave`/`ore_at` functions instead of a hardcoded constant.
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (spawn
+  column (-84,-84), `biome=Plains`, real shader program validity), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs
+  (byte-identical to Phase 39), and a real two-process networked run
+  with matching independently-computed spawn columns, zero
+  warnings/errors/rejects.
+
+`ctest` 401/401 (bgfx, up from 396) / 398/398 (non-bgfx, up from 393).
+
+Honestly scoped: **what carved caves/ore veins actually look like on a
+real GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; no
+cave-specific lighting treatment (existing sky/block light propagation
+reaches a carved tunnel however it naturally would, no dedicated
+ambient occlusion or "always dark" cave handling); no ore item
+drops/mapping yet (breaking coal/iron ore removes it without granting
+an item, the same state sand/snow were in after Phase 39); no
+structures/vegetation stages yet (Phase 41); caves/ores have no
+artificial depth ceiling (an honest consequence of the noise fields
+having no cutoff of their own, not a hidden gap - see DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
