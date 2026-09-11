@@ -61,6 +61,7 @@
 
 #if defined(LCU_ENABLE_BGFX)
 #include "lcu/math/mat4.h"
+#include "lcu/math/vec4.h"
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/renderer.h"
@@ -190,6 +191,22 @@ constexpr lcu::f32 kLookSpeed = 2.0f;    // radians/s, arrow-key look (see platf
 // setting instead of a fixed constant (see engine/platform/options.h).
 constexpr lcu::f32 kMouseSensitivity = 0.0022f;
 constexpr lcu::f32 kInteractRange = 6.0f;
+
+// Crosshair (Phase 44): the first real consumer of the new 2D UI quad
+// batch (engine/rendering::Renderer::submit_ui_quad/flush_ui_quads) -
+// a genuine, permanent HUD element (every FPS needs one), not a
+// throwaway test rectangle drawn only to prove the pipeline works,
+// even though it does double as exactly that real proof (a real run
+// showing it at screen center, see BUILD_STATUS.md). Two thin bars,
+// centered on the screen regardless of resolution. Gated behind
+// LCU_ENABLE_BGFX (its only use site) for the same real reason every
+// other rendering-only constant in this file is - see the kNightSkyColor
+// block below's own comment on the Phase 43 hygiene fix this matches.
+#if defined(LCU_ENABLE_BGFX)
+constexpr lcu::f32 kCrosshairSize = 16.0f;
+constexpr lcu::f32 kCrosshairThickness = 2.0f;
+constexpr lcu::math::Vec4 kCrosshairColor{1.0f, 1.0f, 1.0f, 0.85f};
+#endif
 
 // Headless verification hook (this sandbox has no real keyboard/mouse
 // input): if LCU_VERIFY_BREAK_PLACE is set, synthesizes an Interact press
@@ -1084,12 +1101,18 @@ int main() {
     // driven by the same LCU_HAS_CHUNK_SHADERS define (client/CMakeLists.txt
     // compiles both shader pairs together under LCU_BUILD_SHADER_TOOLS).
     bgfx::ProgramHandle sky_program = BGFX_INVALID_HANDLE;
+    // 2D UI program (Phase 44) - same on/off-ness as chunk_program/
+    // sky_program, compiled by the same LCU_HAS_CHUNK_SHADERS-gated
+    // block in client/CMakeLists.txt.
+    bgfx::ProgramHandle ui2d_program = BGFX_INVALID_HANDLE;
 #if defined(LCU_HAS_CHUNK_SHADERS)
     chunk_program = lcu::rendering::load_chunk_program(shader_base_path + "shaders/chunk", "chunk");
     sky_program = lcu::rendering::load_chunk_program(shader_base_path + "shaders/sky", "sky");
+    ui2d_program = lcu::rendering::load_chunk_program(shader_base_path + "shaders/ui2d", "ui2d");
 #endif
     LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
     LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
+    LCU_LOG_INFO("UI2D shader program valid={}", bgfx::isValid(ui2d_program));
 #endif
 
     // --- Player: spawns resting on dry land at spawn_column (Phase 37 - see
@@ -2038,6 +2061,25 @@ int main() {
             }
         }
 
+        // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
+        // queued via submit_ui_quad, then one real draw call via
+        // flush_ui_quads (see kCrosshairSize's own doc comment above).
+        {
+            const auto screen_center_x = static_cast<lcu::f32>(renderer_desc.width) / 2.0f;
+            const auto screen_center_y = static_cast<lcu::f32>(renderer_desc.height) / 2.0f;
+            renderer.submit_ui_quad(screen_center_x - kCrosshairSize / 2.0f,
+                                     screen_center_y - kCrosshairThickness / 2.0f, kCrosshairSize,
+                                     kCrosshairThickness, kCrosshairColor);
+            renderer.submit_ui_quad(screen_center_x - kCrosshairThickness / 2.0f,
+                                     screen_center_y - kCrosshairSize / 2.0f, kCrosshairThickness, kCrosshairSize,
+                                     kCrosshairColor);
+            const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
+            renderer.flush_ui_quads(ui2d_program);
+            if (ui_had_quads && bgfx::isValid(ui2d_program)) {
+                ++draw_calls;
+            }
+        }
+
         lcu::ui::draw_debug_overlay(
             renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
             {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
@@ -2066,6 +2108,9 @@ int main() {
     }
     if (bgfx::isValid(sky_program)) {
         bgfx::destroy(sky_program);
+    }
+    if (bgfx::isValid(ui2d_program)) {
+        bgfx::destroy(ui2d_program);
     }
     for (auto& [coord, gpu_mesh] : gpu_meshes) {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);

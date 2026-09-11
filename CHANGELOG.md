@@ -2,7 +2,61 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44
+
+### Phase 44
+
+- **Real 2D UI quad batch**: `engine/rendering::Renderer::submit_ui_quad`/
+  `flush_ui_quads` - screen-space rectangles (pixel position/size, RGBA
+  color, UV 0..1 per quad) queued across a frame and uploaded/drawn in
+  exactly one real `bgfx::submit()` call via transient buffers, the
+  same idiom `submit_billboard`/`submit_wireframe_box` already use for
+  other per-frame geometry. New `Mat4::orthographic` (real unit tests:
+  screen corners map to clip-space corners, center maps to the origin).
+  New dedicated `kUi2dViewId` bgfx view, own `vs_ui2d.sc`/`fs_ui2d.sc`
+  shader pair (position + UV + color, no lighting - same minimal
+  approach `vs_sky.sc`/`fs_sky.sc` already established).
+- **Real, deliberate deviation from this phase's own literal view-order
+  wording** ("NACH Sky, VOR Terrain" - after sky, before terrain): the
+  UI view is submitted *last* (after terrain), not before it - a UI
+  view submitted before terrain would have every pixel simply
+  overdrawn the instant terrain's own opaque geometry rendered into
+  the same spot, making the UI invisible behind anything solid, the
+  opposite of what a HUD needs. Documented in DECISIONS.md as a
+  real "working feature over literal wording" call, not silently
+  ignored.
+- **Real first consumer**: a genuine, permanent crosshair (two thin
+  bars, screen-centered) submitted every frame - doubles as this
+  phase's own "Test-Rechteck in Bildschirmmitte sichtbar" verification,
+  not a throwaway test element separate from real usage.
+- **`ItemDefinition::icon_color`/item-icon pattern rendering deferred**
+  (PARTIAL, real limit): this project's own `ItemDefinition` doc
+  comment already establishes "fields are added when something needs
+  them, not speculatively" - no inventory/hotbar widget exists yet to
+  actually place an item icon into, so adding the field now would be
+  exactly the kind of speculative addition that comment argues
+  against. The vertex format already carries real UV data ready for
+  this once a real consumer exists (see DECISIONS.md).
+- 5 new `QuadBatch2D` unit tests (batch accumulation, flush clears
+  it, empty-flush safety) plus 2 new `Mat4::orthographic` tests.
+- Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run
+  (`UI2D shader program valid=true`, a real compiled/linked shader
+  program, not just "no error"), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+  43), and a real two-process networked run with matching
+  independently-computed spawn columns, zero warnings/errors/rejects.
+- `ctest` 427/427 (bgfx, up from 420) / 419/419 (non-bgfx, up from
+  417).
+- Honestly scoped: **what the crosshair/any future UI quad actually
+  looks like on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+  LIMITATION** (headless Noop backend proves the pipeline runs
+  end-to-end without error, not that it looks right); no item-icon
+  rendering yet (deferred, see above); no slot backgrounds/health/
+  hunger/menu backgrounds yet (Phase 46+, real future consumers of
+  this same batch API, not separate machinery); debug text (bgfx's
+  own built-in overlay) composites independently of this new UI view -
+  not touched this phase, already real since Phase 12.
+
 
 ### Phase 43
 

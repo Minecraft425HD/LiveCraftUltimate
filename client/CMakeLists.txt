@@ -81,8 +81,30 @@ if(LCU_ENABLE_BGFX AND LCU_BUILD_SHADER_TOOLS AND TARGET bgfx::shaderc)
         OUT_FILES_VAR LCU_SKY_FS_OUTPUTS
     )
 
+    # 2D UI shaders (Phase 44) - same compile pattern, own varying def
+    # (2D position + UV + RGBA color, no normal/lighting concept - see
+    # varying_ui2d.def.sc).
+    set(LCU_UI2D_SHADER_OUTPUT_DIR ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/ui2d)
+    set(LCU_UI2D_VARYING_DEF ${CMAKE_CURRENT_SOURCE_DIR}/shaders/varying_ui2d.def.sc)
+
+    bgfx_compile_shaders(
+        TYPE VERTEX
+        SHADERS shaders/vs_ui2d.sc
+        VARYING_DEF ${LCU_UI2D_VARYING_DEF}
+        OUTPUT_DIR ${LCU_UI2D_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_UI2D_VS_OUTPUTS
+    )
+    bgfx_compile_shaders(
+        TYPE FRAGMENT
+        SHADERS shaders/fs_ui2d.sc
+        VARYING_DEF ${LCU_UI2D_VARYING_DEF}
+        OUTPUT_DIR ${LCU_UI2D_SHADER_OUTPUT_DIR}
+        OUT_FILES_VAR LCU_UI2D_FS_OUTPUTS
+    )
+
     add_custom_target(VoxelClientShaders DEPENDS ${LCU_CHUNK_VS_OUTPUTS} ${LCU_CHUNK_FS_OUTPUTS}
-                                                  ${LCU_SKY_VS_OUTPUTS} ${LCU_SKY_FS_OUTPUTS})
+                                                  ${LCU_SKY_VS_OUTPUTS} ${LCU_SKY_FS_OUTPUTS}
+                                                  ${LCU_UI2D_VS_OUTPUTS} ${LCU_UI2D_FS_OUTPUTS})
     add_dependencies(VoxelClient VoxelClientShaders)
     target_compile_definitions(VoxelClient PRIVATE LCU_HAS_CHUNK_SHADERS)
 endif()

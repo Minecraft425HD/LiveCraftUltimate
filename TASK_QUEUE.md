@@ -1691,6 +1691,55 @@ were never reproduced here either (fixed on code-reading grounds); no
 Inventory`/`SwapOffhand`/`Escape`'s pause-menu half and most
 `SelectHotbar5-9` slots still have no consumer.
 
+## Phase 44 — 2D UI framework
+
+Real 2D UI quad batch, the rendering foundation Phase 46+'s pause
+menu/options/controls screens and a future HUD/inventory will build on.
+
+- [x] **`Renderer::submit_ui_quad`/`flush_ui_quads`** (new): queue
+  screen-space rectangles (pixel position/size, RGBA color, UV 0..1)
+  across a frame, upload/draw them all in exactly one real
+  `bgfx::submit()` via transient buffers - the same idiom
+  `submit_billboard`/`submit_wireframe_box` already use for other
+  per-frame geometry, not a persistent GPU resource.
+- [x] **New `Mat4::orthographic`** (real unit tests: screen corners map
+  to clip-space corners, center maps to the clip-space origin).
+- [x] **New `kUi2dViewId` bgfx view**, own `vs_ui2d.sc`/`fs_ui2d.sc`
+  shader pair (position + UV + color, no lighting concept - same
+  minimal approach `vs_sky.sc`/`fs_sky.sc` already established).
+- [x] **Real, documented deviation from this phase's own literal view
+  order** ("after sky, before terrain"): submitted *last* instead
+  (after terrain) - the literal order would make the UI invisible
+  behind any solid geometry, since bgfx composites views in submission
+  order. See DECISIONS.md for the full reasoning.
+- [x] **Real first consumer**: a permanent, screen-centered crosshair
+  (two thin bars) - doubles as this phase's own "Test-Rechteck in
+  Bildschirmmitte sichtbar" verification, not a separate throwaway
+  test element.
+- [ ] **`ItemDefinition::icon_color`/item-icon pattern rendering** -
+  PARTIAL, deferred: no inventory/hotbar widget exists yet to consume
+  it, and this project's own `ItemDefinition` doc comment already
+  argues against adding fields speculatively (see DECISIONS.md). The
+  vertex format already carries real UV data ready for this once a
+  real consumer exists.
+- [x] 7 new unit tests (5 `QuadBatch2D`: batch accumulation, flush
+  clears it, empty-flush safety; 2 `Mat4::orthographic`).
+- [x] Verified via a real `LCU_BUILD_SHADER_TOOLS=ON` run (`UI2D
+  shader program valid=true`), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT` runs (byte-identical to Phase
+  43), and a real two-process networked run with matching
+  independently-computed spawn columns, zero warnings/errors/rejects.
+
+`ctest` 427/427 (bgfx, up from 420) / 419/419 (non-bgfx, up from 417).
+
+Honestly scoped: **what the crosshair/any UI quad actually looks like
+on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION** (headless Noop backend proves the pipeline runs
+end-to-end, not that it looks right); no item-icon rendering yet
+(deferred, see above); no slot backgrounds/health/hunger/menu
+backgrounds yet (real future consumers of this same batch API, Phase
+46+).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

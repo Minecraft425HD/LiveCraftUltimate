@@ -24,6 +24,20 @@ namespace {
 // explicitly has depth test/write off, per the "Tiefentest aus" brief).
 constexpr bgfx::ViewId kSkyViewId = 1;
 
+// Real 2D UI overlay (Phase 44), executed *last* (after terrain) - a
+// deliberate correction of this phase's own literal "NACH Sky, VOR
+// Terrain" (after sky, before terrain) wording: a UI view submitted
+// before the terrain view would have every one of its pixels simply
+// overdrawn the moment terrain's own opaque geometry rendered into the
+// same spot, making the UI invisible wherever anything solid stood
+// behind it - the opposite of what a HUD needs (visible on top of
+// everything, always). "Real UI that actually appears on screen" took
+// priority over the literal phase wording (see DECISIONS.md) - this
+// view clears nothing of its own (BGFX_CLEAR_NONE, see init() below)
+// and draws with depth testing off, so it composites cleanly over
+// whatever the sky/terrain views already drew.
+constexpr bgfx::ViewId kUi2dViewId = 2;
+
 }  // namespace
 
 Renderer::~Renderer() {
@@ -75,8 +89,14 @@ bool Renderer::init(const RendererDesc& desc) {
 
     bgfx::setViewClear(kSkyViewId, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.0f, 0);
     bgfx::setViewRect(kSkyViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
-    const bgfx::ViewId sky_first_order[] = {kSkyViewId, 0};
-    bgfx::setViewOrder(0, 2, sky_first_order);
+
+    // UI view (Phase 44) - no clear of its own (draws over whatever the
+    // sky/terrain views already composited, see kUi2dViewId's comment).
+    bgfx::setViewClear(kUi2dViewId, BGFX_CLEAR_NONE, 0x000000ff, 1.0f, 0);
+    bgfx::setViewRect(kUi2dViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+
+    const bgfx::ViewId view_order[] = {kSkyViewId, 0, kUi2dViewId};
+    bgfx::setViewOrder(0, 3, view_order);
 
     bgfx::setDebug(BGFX_DEBUG_TEXT);
 
@@ -114,6 +134,7 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
     // shader program compiled, or no sun/moon submitted this frame).
     bgfx::touch(kSkyViewId);
     bgfx::touch(0);
+    bgfx::touch(kUi2dViewId);
 }
 
 void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
@@ -263,6 +284,72 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     bgfx::submit(0, program);
 }
 
+void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color) {
+    LCU_ASSERT(initialized_);
+
+    const f32 left = x;
+    const f32 right = x + width;
+    const f32 top = y;
+    const f32 bottom = y + height;
+    const UiVertex2D v0{left, top, 0.0f, 0.0f, color.x, color.y, color.z, color.w};
+    const UiVertex2D v1{right, top, 1.0f, 0.0f, color.x, color.y, color.z, color.w};
+    const UiVertex2D v2{right, bottom, 1.0f, 1.0f, color.x, color.y, color.z, color.w};
+    const UiVertex2D v3{left, bottom, 0.0f, 1.0f, color.x, color.y, color.z, color.w};
+
+    const auto base = static_cast<u16>(ui_vertices_.size());
+    ui_vertices_.push_back(v0);
+    ui_vertices_.push_back(v1);
+    ui_vertices_.push_back(v2);
+    ui_vertices_.push_back(v3);
+    const u16 quad_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                  base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+    ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
+}
+
+void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
+    LCU_ASSERT(initialized_);
+
+    if (bgfx::isValid(program) && !ui_vertices_.empty()) {
+        bgfx::VertexLayout layout;
+        layout.begin()
+            .add(bgfx::Attrib::Position, 2, bgfx::AttribType::Float)
+            .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+            .add(bgfx::Attrib::Color0, 4, bgfx::AttribType::Float)
+            .end();
+
+        const auto vertex_count = static_cast<u32>(ui_vertices_.size());
+        const auto index_count = static_cast<u32>(ui_indices_.size());
+        if (bgfx::getAvailTransientVertexBuffer(vertex_count, layout) >= vertex_count &&
+            bgfx::getAvailTransientIndexBuffer(index_count) >= index_count) {
+            bgfx::TransientVertexBuffer tvb;
+            bgfx::TransientIndexBuffer tib;
+            bgfx::allocTransientVertexBuffer(&tvb, vertex_count, layout);
+            bgfx::allocTransientIndexBuffer(&tib, index_count);
+            std::memcpy(tvb.data, ui_vertices_.data(), ui_vertices_.size() * sizeof(UiVertex2D));
+            std::memcpy(tib.data, ui_indices_.data(), ui_indices_.size() * sizeof(u16));
+
+            // Top-left origin, y increasing downward (screen-space
+            // convention every submit_ui_quad caller already uses) -
+            // see Mat4::orthographic's own doc comment for the mapping.
+            const math::Mat4 proj =
+                math::Mat4::orthographic(0.0f, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, -1.0f, 1.0f);
+            bgfx::setViewTransform(kUi2dViewId, math::Mat4::identity().data(), proj.data());
+            bgfx::setVertexBuffer(0, &tvb);
+            bgfx::setIndexBuffer(&tib);
+            // No depth test/write (2D overlay, always on top - see
+            // kUi2dViewId's own comment), real alpha blending (a menu
+            // background or a semi-transparent slot highlight is real,
+            // near-term future use for this, not speculative - see
+            // TASK_QUEUE.md Phase 46/47+).
+            bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
+            bgfx::submit(kUi2dViewId, program);
+        }
+    }
+
+    ui_vertices_.clear();
+    ui_indices_.clear();
+}
+
 u32 Renderer::end_frame() {
     LCU_ASSERT(initialized_);
     return bgfx::frame();
@@ -291,6 +378,7 @@ void Renderer::resize(u32 width, u32 height) {
         bgfx::reset(BGFX_RESET_VSYNC);
         bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
         bgfx::setViewRect(kSkyViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+        bgfx::setViewRect(kUi2dViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
     }
 }
 

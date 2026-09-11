@@ -56,6 +56,27 @@ struct Mat4 {
         return r;
     }
 
+    // Right-handed orthographic projection, depth range [-1, 1] - same
+    // OpenGL-style convention perspective() above already uses (bgfx
+    // normalizes per-backend internally). Real use (Phase 44): 2D UI
+    // rendering, where `left`/`right`/`bottom`/`top` are screen pixel
+    // bounds (bottom > top for SDL/mouse's own y-increases-downward
+    // convention, not the "bottom < top, y-up" a 3D scene would use) and
+    // `near_z`/`far_z` just need to be a real, non-degenerate range (UI
+    // quads have no meaningful depth of their own - see Renderer::
+    // submit_ui_quad, drawn with depth testing off).
+    static Mat4 orthographic(f32 left, f32 right, f32 bottom, f32 top, f32 near_z, f32 far_z) {
+        Mat4 r{};
+        r.m[0] = 2.0f / (right - left);
+        r.m[5] = 2.0f / (top - bottom);
+        r.m[10] = -2.0f / (far_z - near_z);
+        r.m[12] = -(right + left) / (right - left);
+        r.m[13] = -(top + bottom) / (top - bottom);
+        r.m[14] = -(far_z + near_z) / (far_z - near_z);
+        r.m[15] = 1.0f;
+        return r;
+    }
+
     static Mat4 look_at(const Vec3& eye, const Vec3& target, const Vec3& up) {
         const Vec3 f = normalize(target - eye);
         const Vec3 s = normalize(cross(f, up));

@@ -37,9 +37,10 @@ propagation)**, **Phase 32 (boundary buffer, skipped - see below)**,
 extended debug overlay)**, **Phase 37 (sea level at y=0 + water
 block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 **Phase 39 (biomes)**, **Phase 40 (caves + ores)**, **Phase 41
-(vegetation)**, **Phase 42 (documentation update)**, and **Phase 43
-(input overhaul + mouse look + Minecraft-parity defaults)** are done;
-see "Reality Audit" and "Last Completed Task" below for what they
+(vegetation)**, **Phase 42 (documentation update)**, **Phase 43
+(input overhaul + mouse look + Minecraft-parity defaults)**, and
+**Phase 44 (2D UI framework)** are done; see "Reality Audit" and
+"Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
 cross-chunk global lighting with real performance constraints,
 procedural terrain with sea level at y=0, water, biomes, caves/ores,
@@ -1514,6 +1515,47 @@ UI/menu yet to rebind a key through (Phase 44/46); `Action::
 Inventory`/`SwapOffhand`/`Escape`'s pause-menu half and most
 `SelectHotbar5-9` slots still have no consumer (the real hotbar only
 has 4 items).
+
+**Phase 44 (2D UI framework)**: real 2D UI quad batch -
+`engine/rendering::Renderer::submit_ui_quad`/`flush_ui_quads` queue
+screen-space rectangles (pixel position/size, RGBA color, UV 0..1)
+across a frame and upload/draw them in exactly one real
+`bgfx::submit()` via transient buffers, the same idiom
+`submit_billboard`/`submit_wireframe_box` already use. New
+`Mat4::orthographic` (real unit-tested corner/center mapping). New
+`kUi2dViewId` bgfx view, own `vs_ui2d.sc`/`fs_ui2d.sc` shader pair
+(position + UV + color, no lighting).
+
+Submitted *last* (after terrain), a real, deliberate correction of
+this phase's own literal "after sky, before terrain" view-order
+wording - that ordering would make the UI invisible behind any solid
+geometry, since bgfx composites views in submission order (see
+DECISIONS.md for the full reasoning: this is exactly the class of
+problem this project's "no fake features" discipline exists to
+catch). Real first consumer: a permanent, screen-centered crosshair,
+doubling as this phase's own visual verification element rather than
+a separate throwaway test.
+
+`ItemDefinition::icon_color`/item-icon pattern rendering deferred
+(PARTIAL, a real, documented limit): no inventory/hotbar widget
+exists yet to consume it, and this project's own `ItemDefinition` doc
+comment already argues against adding fields speculatively - the
+vertex format already carries real UV data ready for a future
+consumer. 7 new unit tests. Verified via a real
+`LCU_BUILD_SHADER_TOOLS=ON` run (`UI2D shader program valid=true`),
+real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_TORCH`/`LCU_VERIFY_CRAFT`
+runs (byte-identical to Phase 43), and a real two-process networked
+run with matching independently-computed spawn columns, zero
+warnings/errors/rejects. `ctest` 427/427 (bgfx, up from 420) / 419/419
+(non-bgfx, up from 417).
+
+Honestly scoped: **what the crosshair/any UI quad actually looks like
+on a real GPU/display is still NOT VERIFIED — ENVIRONMENT
+LIMITATION** (headless Noop backend proves the pipeline runs
+end-to-end, not that it looks right); no item-icon rendering yet
+(deferred, see above); no slot backgrounds/health/hunger/menu
+backgrounds yet (real future consumers of this same batch API, Phase
+46+).
 
 ## Build Status
 

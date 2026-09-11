@@ -2921,3 +2921,61 @@ polling for a "wheel state" the way keyboard/mouse buttons are polled
 (rejected - SDL has no such state, only discrete `SDL_EVENT_MOUSE_WHEEL`
 events, so `Window` accumulates them per-frame instead - the one real
 place in this phase event-driven accumulation was unavoidable).
+
+## 2026-09-11 — 2D UI: view order corrected, item-icon rendering deferred
+
+**Context:** Phase 44 asked for a real 2D UI quad-batch renderer, with a
+specific view order: "NACH Sky, VOR Terrain, Depth-Test AUS" (after sky,
+before terrain, depth test off).
+
+**The UI view is submitted *last* (after terrain), not before it, a real
+deviation from that literal wording.** bgfx composites views in
+submission order onto the same backbuffer; a view submitted before
+terrain would have every UI pixel it drew simply overdrawn the instant
+terrain's own opaque geometry rendered into the same screen position on
+the next view - the UI would be invisible everywhere a wall, floor, or
+any other solid block stood behind it, which in a first-person voxel
+game is most of the screen most of the time. A HUD's entire job is
+"visible on top of everything, always" - the opposite of what the
+literal ordering would produce. This project's own repeated "no fake
+features" discipline (brief section 96, invoked throughout this
+session's history - Phase 34's torch-transparency trap, Phase 26's
+"no transparent block registered anywhere" gap, etc.) exists precisely
+to catch exactly this shape of problem: a feature that technically
+exists in code but doesn't actually do the thing it's for. Following
+the literal wording here would have produced real code, a real shader,
+a real draw call - and a UI element a player would never actually see.
+Real, working behavior took priority over literal instruction wording;
+this is documented here specifically so it doesn't read as an
+unexplained silent deviation.
+
+**`ItemDefinition::icon_color` and the fragment shader's optional
+hash-noise pattern (Phase 44's own section 44.2) are deferred, not
+implemented this phase.** `engine/items/item_registry.h`'s own existing
+doc comment on `ItemDefinition` already states the project's standing
+rule: "Fields beyond what Phase 5 actually consumes... are added when
+something needs them, not speculatively." No inventory/hotbar widget
+exists yet that would actually place an item icon anywhere on screen -
+adding a color field and a pattern-rendering code path with zero real
+call site would be exactly the kind of speculative addition that rule
+was written to prevent, and there would be no way to verify the pattern
+actually looks right (no widget to render it into, so no real run could
+ever exercise it). The real groundwork Phase 44 *does* land - UV
+coordinates carried all the way through `UiVertex2D`/`vs_ui2d.sc`/
+`fs_ui2d.sc` - is exactly what a future icon-rendering phase will need,
+so this isn't a gap that requires redoing earlier work, just a real,
+honest "not yet" on the specific field/pattern-shader piece.
+
+**Alternatives considered:** following the literal "before terrain"
+view order and accepting an invisible-behind-geometry UI (rejected -
+see above, this is precisely the class of bug this project's
+verification discipline exists to catch, not something to ship and
+call done); adding `ItemDefinition::icon_color` now with a hardcoded
+default and no real consumer (rejected - contradicts this codebase's
+own already-stated field-addition policy, and couldn't be verified
+against any real rendered result); building a full pattern-shader
+capability now and only wiring it up to a real icon widget later
+(rejected - a fragment-shader code path with no way to visually confirm
+it produces anything sensible is exactly the "wrote code, never really
+verified it" trap this project's discipline argues against, more so
+than deferring the whole feature honestly).
