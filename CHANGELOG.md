@@ -2,7 +2,119 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73 / Phase 74
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73 / Phase 74 / Phase 75
+
+### Phase 75
+
+The next round's own brief was *also* labeled "Phase 73" (a third,
+unrelated collision with both the rollback phase and Phase 74's own
+already-committed names) - this work is Phase 75 here. Top priority per
+the brief: the reported "UV stretching on merged floors" symptom, since
+every other visual bug is unreadable until that one is actually settled
+one way or the other.
+
+#### Bug 1 (priority): UV stretching on merged quads - re-investigated with real captured data
+
+- **Symptom** (new Mac screenshots): merged floors show parallel stripes
+  running to the horizon; a grass floor reads beige instead of green;
+  grass side faces still show diagonal streaks. Reported as "worse" than
+  the prior round, where this was investigated by reading
+  `mesh_chunk_greedy`/`fs_chunk.sc` source and concluding both looked
+  correct - evidently not conclusive enough on its own.
+- **New diagnostic**: `LCU_VERIFY_UV=1`, a headless `VoxelClient` hook
+  (`client/main.cpp`, gated the same way `LCU_DUMP_TEXTURES` already is -
+  `#if defined(LCU_ENABLE_BGFX)`, so it only builds/runs in the bgfx
+  config) that builds one real 16x16 flat grass slab through the exact
+  real production `BlockRegistry` (same `grass_id`/`block_registry`
+  `main()` already constructs), runs it through the real
+  `mesh_chunk_greedy`, and logs every real quad's face normal, merged
+  width/height, `texture_index`, all 4 vertex UVs, and all 4 vertex
+  light bytes straight from the resulting `ChunkMesh` - not a hand-traced
+  expectation. This is real data, not code-reading: exactly the
+  escalation the brief itself demanded before trusting either "the mesher
+  emits real coordinates" or "the shader wraps them" a second time.
+- **Real dumped result** (`SDL_VIDEODRIVER=dummy LCU_VERIFY_UV=1`, bgfx
+  build): 6 quads total, matching a flat 16x1x16 slab's own expected
+  shape (top, bottom, 4 side walls - see `LargeFlatSlabMergesIntoTwo
+  FacesPerAxisPair`). The top face (normal `(0,1,0)`) is `texture_index=0`
+  (`TileId::GrassTop`) with UVs `(0,0),(16,0),(16,16),(0,16)`; the bottom
+  face (normal `(0,-1,0)`) is `texture_index=2` (`TileId::Dirt`, `grass_
+  def.bottom_texture`) with the same real 16x16 UV shape; all 4 side
+  walls are `texture_index=1` (`TileId::GrassSide`) with real 16x1 (or
+  1x16, depending on which local axis that face's own (u,v) basis maps
+  to width vs height - a face-normal-dependent parameterization choice,
+  not a bug, since either way UV space still advances exactly 1 unit per
+  block) UV shapes. Every one of these is the literal "correct" branch of
+  the brief's own diagnostic tree (real block coordinates, real per-face
+  texture assignment, top ≠ bottom ≠ side) - **an initial, wrong read of
+  this same dump (assuming iteration order = face identity, before the
+  `normal` field was added to the log line) briefly suggested top/bottom
+  were swapped; adding real normal vectors to the dump immediately
+  disproved that** - a real example of why this phase logs the actual
+  geometric normal rather than trusting quad ordering.
+- **Shader re-checked against these real numbers**: `fs_chunk.sc`'s
+  `atlas_uv = (tx,ty)*u_tileStep.xy + u_tileInset.xy + fract(v_texcoord0)
+  *u_tileStep.zw` and `Renderer::submit_chunk_mesh`'s real uniform values
+  (`kPitch=1/16`, `kInset=0.5/256` texel, `kInner=15/256`) were re-derived
+  by hand against `lcu::assets::kTilesPerRow`/`kTileInsetTexels` and found
+  numerically consistent - no stale/mismatched constant found. Shaders are
+  compiled fresh from the current `.sc` source at every build
+  (`bgfx_compile_shaders` in `client/CMakeLists.txt`, gated on `LCU_BUILD_
+  SHADER_TOOLS`/`bgfx::shaderc` being available) - no checked-in binary
+  exists to go stale between commits.
+- **Texture content re-checked**: `grass_top.png` (re-dumped via
+  `LCU_DUMP_TEXTURES=1`) is genuinely green (`(93,122,54)`/`(89,114,66)`
+  RGB sampled directly from the PNG) and tiles with zero visible seam
+  when naively repeated in a 4x4 grid - not beige, and not a UV-adjacent
+  artifact either.
+- **Conclusion**: no coordinate, texture-assignment, shader-arithmetic,
+  or shader-staleness bug found - now backed by real captured mesh data
+  in addition to source reading. **Please confirm the Mac test ran
+  against a freshly pulled + freshly rebuilt copy of this exact branch**:
+  Bugs 1/3/4/5/6/8 from the immediately-preceding Phase 74 round (mouse
+  invert, water seams, water depth-darkening, NPC spawn) already have
+  real code fixes pushed in commits before this one, and grass-side/
+  wood-side were already re-confirmed correct via direct pixel dumps
+  there too - if the Mac build that produced these new screenshots
+  predates those commits, every one of these symptoms would still show
+  up unchanged even though the code no longer has them.
+- **New permanent regression test**: `GreedyMesher.MergedQuadVertexUvs
+  AreRealBlockCoordinatesNotNormalized` (`tests/voxel/greedy_mesher_test.
+  cpp`) pins exactly the claim this investigation just verified by hand -
+  a merged 16x16 top quad has UVs `(0,0),(16,0),(16,16),(0,16)`, and a
+  merged 16x1/1x16 side quad has one axis at 16 and the other at 1 - so a
+  future regression here fails in CI, not just in a headless hook run ad
+  hoc.
+- **Verification**: `ctest` 646/646 (non-bgfx, up by 1) / 651/654 (bgfx,
+  up by 1 real pass; the 3 failures are the pre-existing, already-
+  documented `SkinCatalogTest` parallel-race flake - reconfirmed 12/12
+  green on a serial re-run, unrelated to this phase's changes). Real
+  headless `LCU_VERIFY_UV=1` run (bgfx build) dumps the 6 quads above
+  cleanly; `LCU_DUMP_TEXTURES=1` re-confirmed. A genuinely still-unruled-
+  out hypothesis for the visual "stripes to the horizon" symptom, if the
+  Mac test really was against current code: `Renderer::create_texture_
+  from_pixels` builds the atlas with `hasMips=false` and `BGFX_SAMPLER_
+  POINT` (nearest, no mip chain) - a repeating floor texture sampled this
+  way at any real viewing distance/grazing angle is a textbook source of
+  minification aliasing (moire/banding) in any renderer, entirely
+  independent of UV correctness. **NOT VERIFIED — ENVIRONMENT LIMITATION**
+  (no real GPU/rasterizer in this sandbox to render a literal screenshot
+  and check) - flagged as the most likely remaining explanation rather
+  than acted on, per this round's own "kein Fix ohne Reproduktion" rule;
+  real mip generation would be a genuine, non-trivial follow-up (bgfx has
+  no auto-mipmap-from-single-level API - each mip level's box-filtered
+  pixel data would need to be generated on the CPU and packed into the
+  texture's own memory buffer), not a one-line flag flip, so it was not
+  implemented speculatively.
+
+#### Remaining bugs from the brief's own list
+
+Mouse invert, left-click break, water chunk-boundary seams, water depth-
+darkening, and the wood-side texture were all already investigated/fixed
+in the immediately-preceding Phase 74 round (see that section above) -
+the brief's own "(falls nicht in Phase 73 gefixt)" qualifier already
+covers this: nothing further was done for them here pending confirmation
+of a fresh Mac rebuild against this branch's current head.
 
 ### Phase 74
 

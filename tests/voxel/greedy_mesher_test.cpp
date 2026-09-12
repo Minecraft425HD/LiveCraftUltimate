@@ -1,5 +1,6 @@
 #include "lcu/voxel/greedy_mesher.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 
@@ -448,6 +449,69 @@ TEST(GreedyMesher, LargeFlatSlabMergesIntoTwoFacesPerAxisPair) {
     EXPECT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
     EXPECT_EQ(mesh.opaque.indices.size(), 6u * 6u);
     expect_all_triangles_wound_correctly(mesh.opaque);
+}
+
+// Phase 75 - the real regression guard for the reported "UV stretching on
+// merged floors" symptom: a merged N x M quad's vertex UVs must be real
+// block-coordinate values (0,0),(N,0),(N,M),(0,M), NOT normalized
+// (0,0),(1,0),(1,1),(0,1) - the fragment shader's fract(v_texcoord0)
+// (see client/shaders/fs_chunk.sc) relies on exactly this to tile the
+// atlas tile once per block across a merged run instead of stretching one
+// tile across the whole quad. Uses the same 16x16 flat-slab shape the
+// LCU_VERIFY_UV headless hook (client/main.cpp) dumps at runtime against
+// the real production BlockRegistry - this test is the same claim, pinned
+// permanently in CI rather than only checked ad hoc.
+TEST(GreedyMesher, MergedQuadVertexUvsAreRealBlockCoordinatesNotNormalized) {
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+            chunk.set_block(x, 0, z, stone);
+        }
+    }
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    const auto find_quad_with_normal = [&](const lcu::math::Vec3& normal) {
+        for (std::size_t base = 0; base + 3 < mesh.opaque.vertices.size(); base += 4) {
+            if (lcu::math::dot(mesh.opaque.vertices[base].normal, normal) > 0.99f) {
+                return base;
+            }
+        }
+        ADD_FAILURE() << "no quad found with the expected face normal";
+        return static_cast<std::size_t>(0);
+    };
+
+    // Top face: a real 16x16 merged quad (see LargeFlatSlabMergesIntoTwo
+    // FacesPerAxisPair just above) - its 4 vertex UVs must span real block
+    // coordinates (0,0) through (16,16), not the unit square.
+    const std::size_t top_base = find_quad_with_normal({0.0f, 1.0f, 0.0f});
+    const auto& top0 = mesh.opaque.vertices[top_base + 0];
+    const auto& top1 = mesh.opaque.vertices[top_base + 1];
+    const auto& top2 = mesh.opaque.vertices[top_base + 2];
+    const auto& top3 = mesh.opaque.vertices[top_base + 3];
+    EXPECT_FLOAT_EQ(top0.u, 0.0f);
+    EXPECT_FLOAT_EQ(top0.v, 0.0f);
+    EXPECT_FLOAT_EQ(top1.u, 16.0f);
+    EXPECT_FLOAT_EQ(top1.v, 0.0f);
+    EXPECT_FLOAT_EQ(top2.u, 16.0f);
+    EXPECT_FLOAT_EQ(top2.v, 16.0f);
+    EXPECT_FLOAT_EQ(top3.u, 0.0f);
+    EXPECT_FLOAT_EQ(top3.v, 16.0f);
+
+    // One side wall merges along its own 16-long axis into a 16x1 quad
+    // (see LargeFlatSlabMergesIntoTwoFacesPerAxisPair) - its UVs must
+    // likewise span real block coordinates on whichever of its own two
+    // local axes is 16 blocks long, not both axes stuck at 1.
+    const std::size_t side_base = find_quad_with_normal({1.0f, 0.0f, 0.0f});
+    const auto& side0 = mesh.opaque.vertices[side_base + 0];
+    const auto& side1 = mesh.opaque.vertices[side_base + 1];
+    const auto& side3 = mesh.opaque.vertices[side_base + 3];
+    const lcu::f32 side_width = side1.u - side0.u;
+    const lcu::f32 side_height = side3.v - side0.v;
+    EXPECT_FLOAT_EQ(std::max(side_width, side_height), 16.0f);
+    EXPECT_FLOAT_EQ(std::min(side_width, side_height), 1.0f);
 }
 
 TEST(GreedyMesher, NoLightArgumentOverloadProducesFullBrightVertices) {

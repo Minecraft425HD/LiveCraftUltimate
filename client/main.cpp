@@ -2033,6 +2033,52 @@ int main() {
                      dump_dir.string());
     }
 
+    // LCU_VERIFY_UV (Phase 75) - the diagnostic step the reported UV-
+    // stretching bug's own investigation demanded before trusting either
+    // "the mesher already emits real block-coordinate UVs" or "the
+    // shader already wraps them with fract()" from code-reading alone:
+    // build one isolated, real 16x16 flat grass slab (one full Chunk
+    // layer, Phase 66's own edge length), run it through the exact same
+    // mesh_chunk_greedy this game's real chunks use, and log every real
+    // quad's width/height/UVs/texture_index/light straight from the
+    // resulting ChunkMesh - not a hand-traced expectation. All 16x16
+    // top-facing cells share one block_id/state, so the mesher merges
+    // them into exactly one 16x16 quad (its own `merges_with` rule) -
+    // this is the one shape a real greedy-meshed floor actually
+    // produces, unlike a single isolated block's own already-unit-size
+    // quads.
+    if (std::getenv("LCU_VERIFY_UV") != nullptr) {
+        lcu::voxel::Chunk uv_chunk;
+        for (lcu::u32 x = 0; x < lcu::voxel::Chunk::kEdgeLength; ++x) {
+            for (lcu::u32 z = 0; z < lcu::voxel::Chunk::kEdgeLength; ++z) {
+                uv_chunk.set_block(x, 0, z, grass_id);
+            }
+        }
+        const lcu::voxel::ChunkMesh uv_mesh = lcu::voxel::mesh_chunk_greedy(uv_chunk, block_registry);
+        const auto dump_layer = [](const lcu::voxel::ChunkMeshLayer& layer, const char* layer_name, int& quad_index) {
+            for (std::size_t base = 0; base + 3 < layer.vertices.size(); base += 4) {
+                const lcu::voxel::MeshVertex& v0 = layer.vertices[base + 0];
+                const lcu::voxel::MeshVertex& v1 = layer.vertices[base + 1];
+                const lcu::voxel::MeshVertex& v2 = layer.vertices[base + 2];
+                const lcu::voxel::MeshVertex& v3 = layer.vertices[base + 3];
+                ++quad_index;
+                LCU_LOG_INFO(
+                    "[UV-DUMP] Quad {} ({}): normal=({:.0f},{:.0f},{:.0f}), NxM={}x{}, texture_index={}, "
+                    "uvs=[(u={:.3f}, v={:.3f}), (u={:.3f}, "
+                    "v={:.3f}), (u={:.3f}, v={:.3f}), (u={:.3f}, v={:.3f})], lights=[{}, {}, {}, {}]",
+                    quad_index, layer_name, v0.normal.x, v0.normal.y, v0.normal.z, v1.u - v0.u, v3.v - v0.v,
+                    static_cast<unsigned>(v0.texture_index), v0.u, v0.v, v1.u, v1.v, v2.u, v2.v, v3.u, v3.v,
+                    static_cast<unsigned>(v0.light), static_cast<unsigned>(v1.light),
+                    static_cast<unsigned>(v2.light), static_cast<unsigned>(v3.light));
+            }
+        };
+        int quad_index = 0;
+        dump_layer(uv_mesh.opaque, "opaque", quad_index);
+        dump_layer(uv_mesh.transparent, "transparent", quad_index);
+        dump_layer(uv_mesh.water, "water", quad_index);
+        LCU_LOG_INFO("LCU_VERIFY_UV: dumped {} quad(s) from a 16x16 flat grass slab", quad_index);
+    }
+
     // Real player-skin texture is created further below, right after
     // options load (Phase 62 needs the persisted `skin=<name>` choice
     // and the real lcu::assets::SkinCatalog to resolve it against
