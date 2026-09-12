@@ -77,14 +77,21 @@ existing block atlas)**, **Phase 61 (the long-dormant
 alpha-blended, see-through geometry via a new face-visibility branch
 for transparent-vs-transparent boundaries, layer routing that reuses
 the existing `BlockDefinition::is_transparent` flag, and a real
-per-texel-alpha `fs_chunk.sc` change)**, and **Phase 62 (the full skin
+per-texel-alpha `fs_chunk.sc` change)**, **Phase 62 (the full skin
 system: 5 real procedural skins, a real `SkinCatalog` that also
 discovers uploaded PNG files, a real "Skins" menu screen with a real
 "Load own skin..." file-picker button wired to `SDL_ShowOpenFileDialog`,
 real options.txt persistence with startup fallback, real live-reload,
-and real independent per-NPC fixed skins)** are done - see TASK_QUEUE.md
+and real independent per-NPC fixed skins)**, and **Phase 63 (the real
+farming-foundation block-state system: a parallel per-voxel state
+array on `ChunkStorage`, chunk format v2 with real v1-file backward
+compatibility, a network `ChunkData` wire format that needed zero
+changes since it already carries whatever the upgraded serializer
+produces, and real state-awareness in `mesh_chunk_greedy` - no
+merging across different states, plus an opt-in state-to-texture-index
+mechanism no block uses yet)** are done - see TASK_QUEUE.md
 for per-phase detail as each of the remaining
-4 phases lands. See
+3 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2587,6 +2594,12 @@ None currently tracked.
   arm/left-leg pixels are an unmirrored copy of the same file's own
   right-arm/right-leg pixels (real Minecraft flips this copy; a real,
   documented simplification, see DECISIONS.md).
+- Phase 63's block-state system is a real, tested foundation with no
+  real consumer yet - no block actually uses a non-zero state or sets
+  `BlockDefinition::texture_index_offset_by_state` (Phase 64's wheat is
+  the first real one). Farming itself (crops, growth, harvest) still
+  doesn't exist - see the standing "No farming" exclusion below, now
+  narrowed to "no crop CONTENT yet", not "no state mechanism".
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No

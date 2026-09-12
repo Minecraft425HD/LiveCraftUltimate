@@ -4233,3 +4233,87 @@ independent of the player" wording; gating the whole Skins screen
 behind `LCU_ENABLE_BGFX` - rejected as hiding a real gameplay/UI
 feature from the entire non-bgfx build for a limitation that only
 actually touches the one GPU-texture line.
+
+## 2026-09-12 — Phase 63: a parallel state array over widening BlockId, ChunkData needing zero protocol changes, and an opt-in state-to-texture flag instead of new BlockDefinitions per stage
+
+**Context:** Phase 63 is explicitly the farming FOUNDATION - no crop
+block exists yet (Phase 64), just the real, generic per-voxel state
+mechanism farming (and anything else state-shaped) will build on.
+
+**A second, parallel `std::array<u8, kVolume>` state array, not a
+wider BlockId or bits stolen from it.** `BlockId` is a 16-bit registry
+index (65536 possible block types) with real headroom this project has
+no reason to shrink; packing, say, 4 state bits into it would either
+cut that headroom in half or need real bit-packing/unpacking at every
+single `block_at`/`set_block` call site that exists today, all for a
+feature (state) most blocks will never use. A second flat array costs
+a real, fixed, accepted ~4KB per 16³ chunk (one byte per voxel) and
+touches zero existing `BlockId`-typed code - every serialized chunk,
+every network `BlockId`, every mod-registered block id keeps meaning
+exactly what it already meant.
+
+**`set_block` itself now also resets state to 0, rather than leaving
+whatever state happened to be there.** A freshly placed block has no
+real state history - Minecraft's own farmland doesn't stay "fully
+grown" if you dig it up and place plain dirt there instead. Making
+`set_block` do this automatically (instead of requiring every one of
+its many existing call sites to remember to also clear state) is both
+the more correct default and the reason v1-chunk loading needed zero
+special-case code (see below) - `unflatten_chunk`'s existing loop
+already calls `set_block` per voxel, so it already produces the right
+"every legacy voxel's state is 0" result for free.
+
+**A real v1 chunk file loads cleanly, with every voxel's state reading
+back as 0, rather than being rejected as an unsupported version.**
+Every real player's existing saved world is a v1 file; treating that
+as "unsupported" would mean Phase 63 silently corrupts or discards
+real save data the moment it ships. `deserialize_chunk_from_bytes`
+accepts both the current version and the literal legacy value 1,
+sizing its own unflatten step off the real header-declared uncompressed
+size for whichever version it saw - a real, minimal compatibility path
+(not a general migration framework, since there is exactly one legacy
+version to support and its own shape - blocks only, no state array -
+is simple enough not to need one).
+
+**`ChunkData`'s own wire format needed zero changes to carry states.**
+The brief's own Phase 63 wording asks for the network format to be
+"extended" - but `ChunkData::compressed_bytes` was already, and still
+is, nothing but `serialize_chunk_to_bytes`'s real output byte-for-byte
+(see `server/main.cpp`'s two real call sites, unchanged by this
+phase). Upgrading that one function's own payload shape already
+extends every real consumer of it - file save/load AND the network
+path - simultaneously, for free; a real, verified two-process server/
+client run round-trips a chunk with real per-voxel states with zero
+`ChunkData`/`encode_chunk_data`/`decode_chunk_data` changes. Writing a
+new, parallel state-carrying network message (or growing `ChunkData`
+with a second `compressed_state_bytes` field) would have duplicated
+work `serialize_chunk_to_bytes` already does for both real consumers.
+
+**`mesh_chunk_greedy` gets one opt-in `BlockDefinition::texture_index_
+offset_by_state` flag (default false) rather than a new per-state
+BlockDefinition or a callback/lookup table.** The real, concrete need
+this phase can already see (documented, not yet used) is Phase 64's
+wheat: 8 growth stages that should sample 8 sequential atlas tiles
+without registering 8 separate `BlockDefinition`s (which would also
+need 8 separate `BlockId`s, defeating the point of a single "wheat"
+block with sub-state). A single boolean plus "add state to whichever
+texture index the existing top/side/bottom fallback chain already
+resolved" is the minimal real mechanism that satisfies that concrete
+need; a more general per-state lookup table/callback would be real
+speculative complexity for a requirement this phase can't yet fully
+specify (Phase 64 hasn't registered wheat yet) - added now only to the
+extent a real, testable behavior exists today (the flag, and
+`merges_with`'s own state-awareness), not further.
+
+**Alternatives considered:** widening `BlockId` or bit-packing state
+into it - rejected as touching every existing `BlockId` call site for
+a feature most blocks won't use; rejecting v1 files as unsupported -
+rejected as real, unacceptable data loss for every existing save;
+inventing a full legacy-migration framework - rejected as
+disproportionate for exactly one real legacy version with a trivially
+simple shape; a new/extended network message for states - rejected as
+duplicate work once `ChunkData` was confirmed to already carry
+whatever `serialize_chunk_to_bytes` produces; a general per-state
+texture lookup table or callback on `BlockDefinition` - rejected as
+speculative complexity ahead of Phase 64 actually specifying what it
+needs.

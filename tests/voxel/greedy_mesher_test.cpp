@@ -232,6 +232,87 @@ TEST(GreedyMesher, AdjacentDifferentTypeBlocksDoNotMerge) {
     expect_all_triangles_wound_correctly(mesh.opaque);
 }
 
+TEST(GreedyMesher, AdjacentSameTypeDifferentStateBlocksDoNotMerge) {
+    // Phase 63 farming foundation: two same-BlockId blocks in different
+    // real states (e.g. two wheat blocks at different growth stages)
+    // must NOT merge into one quad - they need to show different
+    // texture content, so merging them would visually lose that real
+    // difference.
+    BlockRegistry registry;
+    const auto wheat_like = register_opaque(registry, "test:wheat_like");
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, wheat_like, 0);
+    chunk.set_block_with_state(6, 5, 5, wheat_like, 3);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    // Same real face count as two different BlockIds (see
+    // AdjacentDifferentTypeBlocksDoNotMerge above) - state is a real,
+    // independent part of the merge identity, not merely "same as
+    // block_id happening to differ".
+    EXPECT_EQ(mesh.opaque.vertices.size(), 10u * 4u);
+    EXPECT_EQ(mesh.opaque.indices.size(), 10u * 6u);
+    expect_all_triangles_wound_correctly(mesh.opaque);
+}
+
+TEST(GreedyMesher, AdjacentSameTypeSameStateBlocksStillMerge) {
+    // A real regression guard the other direction: adding state
+    // tracking must not accidentally break merging for the ordinary
+    // "both state 0" case (every pre-Phase-63 block, forever).
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, stone, 2);
+    chunk.set_block_with_state(6, 5, 5, stone, 2);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    EXPECT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+    EXPECT_EQ(mesh.opaque.indices.size(), 6u * 6u);
+}
+
+TEST(GreedyMesher, TextureIndexOffsetByStateShiftsTheAtlasSlot) {
+    // Phase 63's own real state-to-texture mechanism: a block opted
+    // into `texture_index_offset_by_state` samples `top_texture +
+    // state` instead of a flat `top_texture` - the real foundation
+    // Phase 64's 8-stage wheat growth will actually use.
+    BlockRegistry registry;
+    BlockDefinition wheat_like;
+    wheat_like.namespaced_id = "test:wheat_like";
+    wheat_like.top_texture = 100;
+    wheat_like.texture_index_offset_by_state = true;
+    const auto wheat_id = registry.register_block(wheat_like);
+
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, wheat_id, 3);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_FALSE(mesh.opaque.vertices.empty());
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 103u);
+    }
+}
+
+TEST(GreedyMesher, TextureIndexUnaffectedByStateWhenFlagIsUnset) {
+    // Every existing block (the flag defaults false) must keep
+    // resolving a flat, state-independent texture index exactly like
+    // before Phase 63 - a real, explicit no-regression check next to
+    // the opt-in test above.
+    BlockRegistry registry;
+    BlockDefinition stone;
+    stone.namespaced_id = "test:stone";
+    stone.top_texture = 7;
+    const auto stone_id = registry.register_block(stone);
+
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, stone_id, 9);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_FALSE(mesh.opaque.vertices.empty());
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 7u);
+    }
+}
+
 TEST(GreedyMesher, TransparentNeighborDoesNotCullOpaqueBlockFace) {
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");

@@ -111,12 +111,33 @@ BlockId block_or_air(const ChunkStorage<EdgeLength>& chunk, i32 x, i32 y, i32 z)
     return chunk.block_at(static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z));
 }
 
+// Real state counterpart to block_or_air above (Phase 63) - an
+// out-of-chunk cell has no real state to read (it's treated as air,
+// which itself is always state 0), so this returns 0 for the exact
+// same out-of-bounds case block_or_air does, rather than duplicating
+// its own bounds check with different behavior.
+template <u32 EdgeLength>
+u8 state_or_zero(const ChunkStorage<EdgeLength>& chunk, i32 x, i32 y, i32 z) {
+    constexpr i32 kEdge = static_cast<i32>(EdgeLength);
+    if (x < 0 || y < 0 || z < 0 || x >= kEdge || y >= kEdge || z >= kEdge) {
+        return 0;
+    }
+    return chunk.state_at(static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z));
+}
+
 inline bool is_opaque_block(BlockId id, const BlockRegistry& registry) {
     return !registry.definition_of(id).is_transparent;
 }
 
 struct MaskCell {
     BlockId block_id = kAirBlockId;
+    // Real per-voxel block state (Phase 63) of whichever side actually
+    // draws this cell's face - part of the real merge identity below,
+    // exactly like block_id: two otherwise-identical neighboring blocks
+    // in different states (Phase 64's own wheat growth stages) must
+    // never merge into one quad, since they need to show different
+    // texture content.
+    u8 state = 0;
     bool positive_facing = false;
     bool has_face = false;
     // Packed light (Phase 28, same nibble layout as MeshVertex::light) of
@@ -137,7 +158,8 @@ struct MaskCell {
     // purely geometric/material now, exactly like Phase 26's original
     // rule, and lighting looks smooth instead of flat either way.
     bool merges_with(const MaskCell& other) const {
-        return has_face && other.has_face && block_id == other.block_id && positive_facing == other.positive_facing;
+        return has_face && other.has_face && block_id == other.block_id && state == other.state &&
+               positive_facing == other.positive_facing;
     }
 };
 
@@ -275,9 +297,11 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                             // Solid is on the negative side: the visible
                             // face points away from it, along +d.
                             cell.block_id = neg_id;
+                            cell.state = detail::state_or_zero(chunk, neg_pos[0], neg_pos[1], neg_pos[2]);
                             cell.positive_facing = true;
                         } else {
                             cell.block_id = pos_id;
+                            cell.state = detail::state_or_zero(chunk, pos_pos[0], pos_pos[1], pos_pos[2]);
                             cell.positive_facing = false;
                         }
 
@@ -394,6 +418,17 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     } else if (d != 1) {
                         quad_color = def.side_color.value_or(def.color);
                         quad_texture_index = def.side_texture.value_or(def.top_texture);
+                    }
+                    // Real state-to-texture offset (Phase 63 farming
+                    // foundation): opt-in per BlockDefinition (see its
+                    // own doc comment) - every current cell in this
+                    // merged run shares the same real state (merges_with
+                    // already refused to merge cells with different
+                    // states above), so this is exactly one real,
+                    // uniform offset for the whole quad, not a per-pixel
+                    // concern.
+                    if (def.texture_index_offset_by_state) {
+                        quad_texture_index += current.state;
                     }
                     // Smooth per-vertex light (Phase 33): one sample per
                     // geometric grid CORNER of this merged quad (A=c0's

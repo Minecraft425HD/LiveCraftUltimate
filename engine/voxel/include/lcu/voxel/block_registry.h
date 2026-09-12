@@ -64,6 +64,19 @@ struct BlockDefinition {
     u32 top_texture = 0;
     std::optional<u32> side_texture;
     std::optional<u32> bottom_texture;
+
+    // Real block-state-to-texture mechanism (Phase 63, the farming
+    // foundation's own "unterschiedliche Zustände nutzen unterschiedliche
+    // Atlas-Slots" requirement): when true, mesh_chunk_greedy adds the
+    // voxel's own real lcu::voxel::ChunkStorage state (0-255) to whichever
+    // per-face texture index it already resolved (top/side/bottom, same
+    // fallback chain as above) before writing it into the quad - so a
+    // block registered with N sequential growth-stage tiles starting at
+    // `top_texture` (Phase 64's real wheat: 8 states -> 8 consecutive
+    // atlas tiles) needs no new BlockDefinition per stage, just this one
+    // flag. False (the default) for every existing block - state never
+    // changes their texture, matching pre-Phase-63 behavior exactly.
+    bool texture_index_offset_by_state = false;
 };
 
 // Central, namespaced block type registry (brief section 16). Namespacing

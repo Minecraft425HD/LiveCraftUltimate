@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include "lcu/serialization/chunk_serializer.h"
+#include "lcu/voxel/chunk.h"
+
 using namespace game::systems::protocol;
 
 TEST(ReplicationProtocol, PeekTypeReadsTheFirstByte) {
@@ -176,6 +179,38 @@ TEST(ReplicationProtocol, ChunkDataRoundTrips) {
     EXPECT_EQ(decoded->chunk_y, 0);
     EXPECT_EQ(decoded->chunk_z, 7);
     EXPECT_EQ(decoded->compressed_bytes, sent.compressed_bytes);
+}
+
+TEST(ReplicationProtocol, ChunkDataCarriesRealBlockStatesEndToEnd) {
+    // Real Phase 63 network-roundtrip requirement: ChunkData's own
+    // `compressed_bytes` is never anything but lcu::serialization::
+    // serialize_chunk_to_bytes's real output (see server/main.cpp's own
+    // two real call sites) - since that function now includes the real
+    // per-voxel state array (Phase 63), the wire format already carries
+    // states with zero changes needed to ChunkData/encode_chunk_data/
+    // decode_chunk_data themselves. This test proves that real claim
+    // end-to-end: a real chunk with real states -> real compression ->
+    // a real ChunkData envelope -> encode -> decode -> real
+    // decompression -> the same real states on the other side.
+    lcu::voxel::Chunk original;
+    original.set_block_with_state(1, 2, 3, 5, 6);
+    original.set_block_with_state(10, 11, 12, 7, 255);
+
+    const ChunkData sent{4, -1, 9, lcu::serialization::serialize_chunk_to_bytes(original)};
+    const auto decoded = decode_chunk_data(encode_chunk_data(sent));
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->chunk_x, 4);
+    EXPECT_EQ(decoded->chunk_y, -1);
+    EXPECT_EQ(decoded->chunk_z, 9);
+
+    lcu::voxel::Chunk received;
+    ASSERT_EQ(lcu::serialization::deserialize_chunk_from_bytes(decoded->compressed_bytes, received),
+              lcu::serialization::ChunkLoadResult::Ok);
+    EXPECT_EQ(received.block_at(1, 2, 3), 5);
+    EXPECT_EQ(received.state_at(1, 2, 3), 6);
+    EXPECT_EQ(received.block_at(10, 11, 12), 7);
+    EXPECT_EQ(received.state_at(10, 11, 12), 255);
+    EXPECT_EQ(received.state_at(0, 0, 0), 0);
 }
 
 TEST(ReplicationProtocol, ChunkDataRoundTripsWithEmptyCompressedBytes) {

@@ -2,7 +2,49 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63
+
+### Phase 63
+
+- **Real block-state system (farming foundation)**: `lcu::voxel::
+  ChunkStorage` gains a parallel `std::array<u8, kVolume>` state array
+  (~4KB/16³ chunk, a real, accepted memory cost). New `state_at`/
+  `set_block_with_state`/`set_state`/`states`/`set_states` API sits
+  alongside the unchanged `block_at`/`set_block` pair - `set_block`
+  itself now also resets state to 0 (a fresh placement has no state
+  history), so every pre-Phase-63 caller keeps behaving identically.
+- **Real chunk-format v2**: `serialize_chunk_to_bytes`/`deserialize_
+  chunk_from_bytes` now compress the state array alongside the block-id
+  array in one payload. A real v1 file (blocks only) still loads
+  cleanly - every v1 chunk's state reads back as a real, honest 0 (via
+  the same `set_block`-always-resets-state behavior above), no separate
+  migration code needed.
+- **Real network wire-format extension, with zero protocol changes**:
+  `game::systems::protocol::ChunkData::compressed_bytes` is - and
+  always was - exactly `serialize_chunk_to_bytes`'s own output (see
+  `server/main.cpp`'s two real call sites), so upgrading that function
+  already extends the real wire format to carry states; `ChunkData`/
+  `encode_chunk_data`/`decode_chunk_data` needed no changes at all.
+  Verified via a real two-process server/client run.
+- **Real meshing awareness**: `mesh_chunk_greedy`'s `MaskCell` gains a
+  real `state` field, and `merges_with` now also requires equal state -
+  two otherwise-identical neighboring blocks in different real states
+  no longer merge into one quad. New opt-in `BlockDefinition::
+  texture_index_offset_by_state` (default false, no existing block
+  affected) adds the voxel's own real state to its resolved per-face
+  texture index - the real mechanism Phase 64's 8-stage wheat growth
+  will use, with no BlockDefinition-per-stage needed.
+- New unit tests for state persistence (in-memory + file round trip,
+  legacy-v1 compatibility, corrupt-size rejection), a real network
+  round trip (`ChunkDataCarriesRealBlockStatesEndToEnd`), and meshing
+  with states (merge-blocking, texture-offset opt-in and its no-op
+  default). Full regression sweep (`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH`/`HUD`/`BREAK_PLACE`/`SKIN`) plus a real
+  two-process networked run all complete cleanly. `ctest` 629/629
+  (bgfx, up from 614) / 621/621 (non-bgfx, up from 606).
+- Honestly scoped: no real block actually sets `texture_index_offset_
+  by_state` yet (Phase 64's wheat is the first real consumer) - this
+  phase is the foundation only, per its own name.
 
 ### Phase 62
 

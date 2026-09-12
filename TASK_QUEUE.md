@@ -2585,6 +2585,31 @@ for real via `LCU_VERIFY_SKIN`. A legacy 64x32 upload's synthesized
 left-limb pixels are an unmirrored copy of the file's own right-limb
 pixels (a real, documented simplification, see DECISIONS.md).
 
+## Phase 63 — Block-state system (farming foundation)
+
+- [x] `ChunkStorage` gains a parallel `std::array<u8, kVolume>` state
+  array; new `state_at`/`set_block_with_state`/`set_state`/`states`/
+  `set_states` API, `set_block` itself now also resets state to 0.
+- [x] Chunk format v2 - state array compressed alongside the block-id
+  array; a real legacy v1 file still loads with state 0 everywhere.
+- [x] Network `ChunkData` needed zero changes - its `compressed_bytes`
+  is exactly `serialize_chunk_to_bytes`'s own output, verified via a
+  real two-process server/client round trip.
+- [x] `mesh_chunk_greedy`'s `MaskCell` gains a real `state` field;
+  `merges_with` also requires equal state.
+- [x] New opt-in `BlockDefinition::texture_index_offset_by_state` -
+  adds the voxel's real state to its resolved texture index.
+- [x] New unit tests: state persistence (in-memory/file round trip,
+  legacy-v1 compatibility, corrupt-size rejection), a real network
+  round trip, and meshing-with-states (merge-blocking, texture-offset
+  opt-in and its no-op default).
+
+`ctest` 629/629 (bgfx, up from 614) / 621/621 (non-bgfx, up from 606).
+
+Honestly scoped: this phase is the foundation only - no real block
+sets `texture_index_offset_by_state` or uses a non-zero state yet
+(Phase 64's wheat is the first real consumer).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

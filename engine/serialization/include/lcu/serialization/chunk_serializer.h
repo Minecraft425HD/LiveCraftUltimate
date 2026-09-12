@@ -10,7 +10,19 @@ namespace lcu::serialization {
 // Current on-disk/on-wire chunk format version (brief section 86 "World
 // Version"). Bump this and add a migration path if the layout ever
 // changes incompatibly - see DECISIONS.md.
-constexpr u32 kChunkFormatVersion = 1;
+//
+// v2 (Phase 63): appends the real per-voxel block-state array (see
+// voxel::ChunkStorage::states()) after the block-id array in the same
+// compressed payload. v1 files (blocks only) still load cleanly -
+// deserialize_chunk_from_bytes accepts both kChunkFormatVersion and the
+// exact legacy value 1, sizing its own unflatten step off the real
+// uncompressed payload size for whichever version the header names -
+// with every loaded v1 chunk's state implicitly 0 (voxel::ChunkStorage
+// starts state 0 everywhere, and set_block itself always resets state
+// to 0 - see its own doc comment - so the plain block-only unflatten
+// path a v1 load takes already produces the correct, honest "no state
+// history" result with no extra code).
+constexpr u32 kChunkFormatVersion = 2;
 
 enum class ChunkLoadResult {
     Ok,

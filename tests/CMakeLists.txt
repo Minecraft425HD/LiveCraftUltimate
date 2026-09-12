@@ -56,6 +56,11 @@ target_link_libraries(VoxelTests PRIVATE
     Lcu::EngineCore
     Lcu::Game
     GTest::gtest_main
+    # chunk_serializer_test.cpp builds a real, standalone legacy v1
+    # payload by hand (Phase 63's own backward-compatibility test) -
+    # LcuSerialization itself only links zstd PRIVATE, so this needs its
+    # own direct link to reach <zstd.h>.
+    libzstd_static
 )
 
 # InputState is pure data (no SDL needed to test set_down/is_down); only
