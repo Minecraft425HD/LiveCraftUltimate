@@ -2796,6 +2796,40 @@ OcclusionCulling` measured 1.06 ms in this project's own unoptimized
 one-off Release+bgfx build - see DECISIONS.md and PROJECT_STATE.md
 Known Limitations for both.
 
+## Phase 70 — LOD rendering for distant chunks
+
+- [x] New `engine/rendering/lod_mesher.{h,cpp}`: `LodChunkMesh`,
+  `build_lod_chunk` (real per-column top-down average color/height),
+  `submit_lod_chunk` (thin wrapper over a new `Renderer::submit_lod_
+  chunk`).
+- [x] New dedicated bgfx LOD view (`kLodViewId`), inserted into this
+  project's own existing `setViewOrder` array before the near-chunk
+  terrain view - real depth write+test, so near geometry correctly
+  composites against it via the shared depth buffer.
+- [x] New `Options::render_distance` (default 8) / `Options::
+  lod_distance` (default 32), persisted in options.txt.
+- [x] Wired into `client/main.cpp`'s render loop: chunks within
+  `render_distance` (Chebyshev, from the camera's own chunk) render
+  full geometry; beyond it, a real LOD quad instead.
+- [x] `LCU_VERIFY_CULLING`'s own log line gained a real `LOD quads: N`
+  field.
+- [x] 5 new `LodMesher.*` unit tests; new `BM_Render_LODChunks`
+  benchmark (4.49 µs/chunk, under the brief's own "<10µs").
+
+`ctest` 667/667 (bgfx, up from 661) / 639/639 (non-bgfx, up from 638 -
+new `Options` fields/test build in both configs). Full regression sweep
+clean on both configs.
+
+Honestly scoped: this project's own default chunk-load radius never
+actually reaches beyond the default `render_distance`, so the LOD path
+has nothing to render under normal settings today (`LOD quads: 0`) -
+confirmed working anyway via a real headless run with `render_
+distance=0` forced (`LOD quads: 10` appeared) rather than left as an
+unverified claim; a real naturally-occurring demonstration needs Phase
+71's own larger streaming radius. No per-chunk LOD cache exists yet
+either - deferred until Phase 71 makes this a meaningful per-frame cost.
+See DECISIONS.md and PROJECT_STATE.md Known Limitations.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

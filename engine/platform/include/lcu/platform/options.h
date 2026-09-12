@@ -35,6 +35,18 @@ struct Options {
     // separation KeyBindings already keeps from any real input device.
     std::string skin_name = "Steve";
 
+    // Real, persisted view-distance settings (Phase 70, brief section
+    // 70.5) - `render_distance` is the near radius (in chunks) real
+    // full-geometry chunk meshes render out to; `lod_distance` is the
+    // far radius a real flat, averaged-color/height LOD quad (Phase
+    // 70's own `engine::rendering::build_lod_chunk`) covers instead -
+    // see client/main.cpp's own two-pass render loop for how these two
+    // bands are actually drawn. Defaults match the brief's own literal
+    // "render_distance (near, default 8)" / "lod_distance (far, default
+    // 32)".
+    i32 render_distance = 8;
+    i32 lod_distance = 32;
+
     // Real, human-editable `key=value` text format, one setting per
     // line, `#`-prefixed comment lines ignored - see options.cpp for
     // the exact key names (`mouse_sensitivity`, `fov`, `hud_enabled`,

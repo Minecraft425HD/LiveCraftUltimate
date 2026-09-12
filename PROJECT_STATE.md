@@ -128,8 +128,17 @@ a new `LCU_CULLING_SCENARIO=cave` scenario confirms a real sealed room
 renders only its own chunk, and a real, investigated benchmark
 confirmed the algorithm meets the brief's own "<1ms" target once run
 under an optimized build rather than this project's own unoptimized
-default - see DECISIONS.md)** are done - see TASK_QUEUE.md for
-per-phase detail as each of the remaining 3 phases lands. See
+default - see DECISIONS.md)**, and **Phase 70 (real Distant-Horizons-
+style LOD: `build_lod_chunk` averages a chunk's own real topmost-voxel
+color/height per column; a new dedicated bgfx view (reusing this
+project's own existing `setViewOrder` mechanism) renders these flat
+quads before near-chunk terrain, with real depth write+test so they
+correctly composite; new `Options::render_distance`/`lod_distance`;
+confirmed working end to end via a real headless run with `render_
+distance` temporarily forced to 0, since this project's own default
+chunk-load radius never naturally reaches the LOD band until Phase 71 -
+see DECISIONS.md)** are done - see TASK_QUEUE.md for per-phase detail
+as each of the remaining 2 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2729,6 +2738,19 @@ None currently tracked.
   in this project's own unoptimized "Development" build (over the
   brief's own "<1ms" target) but 0.12 ms in a one-off optimized
   Release+bgfx build - see DECISIONS.md for the full investigation.
+- Phase 70's real LOD rendering has nothing to render under this
+  project's own current default settings: the default chunk-load radius
+  (`radius_xz=1`) never places a loaded chunk beyond the default
+  `render_distance=8`, so `LOD quads: 0` is the real, expected steady
+  state today. The whole pipeline (classification, `build_lod_chunk`,
+  the dedicated bgfx view, real depth compositing) was confirmed working
+  by temporarily forcing `render_distance=0` in a real headless run
+  (`LOD quads: 10` appeared) - a real, direct proof, not an assumption -
+  but a real, naturally-occurring demonstration needs Phase 71's own
+  larger streaming radius. No per-chunk LOD mesh cache exists yet either
+  (each visible far chunk rebuilds its own summary every frame it's
+  drawn) - real, deliberately deferred until Phase 71 makes this a
+  meaningful per-frame cost (see DECISIONS.md).
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

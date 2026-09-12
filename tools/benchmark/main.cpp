@@ -39,6 +39,7 @@
 // own CMakeLists.txt conditional link.
 #if defined(LCU_ENABLE_BGFX)
 #include "lcu/rendering/frustum.h"
+#include "lcu/rendering/lod_mesher.h"
 #include "lcu/rendering/occlusion_culler.h"
 #endif
 
@@ -258,6 +259,33 @@ static void BM_Render_OcclusionCulling(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_Render_OcclusionCulling);
+
+// --- LOD meshing (Phase 70, engine/rendering::build_lod_chunk) --------------
+
+// Real "< 10 µs pro Chunk" target (brief section 70.6) - a real,
+// deterministic checkerboard chunk (same "no two neighbors share a
+// block type" pattern BM_GreedyMesher_CheckerboardChunk already uses -
+// every column has real geometry to summarize, not an artificially
+// empty/uniform chunk).
+static void BM_Render_LODChunks(benchmark::State& state) {
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    Chunk chunk;
+    for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+                if ((x + y + z) % 2 == 0) {
+                    chunk.set_block(x, y, z, stone_id);
+                }
+            }
+        }
+    }
+    for (auto _ : state) {
+        auto mesh = lcu::rendering::build_lod_chunk(chunk, registry);
+        benchmark::DoNotOptimize(mesh);
+    }
+}
+BENCHMARK(BM_Render_LODChunks);
 #endif
 
 // --- Lighting (engine/lighting) ---------------------------------------------

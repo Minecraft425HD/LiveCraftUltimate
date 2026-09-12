@@ -4,6 +4,7 @@ add_library(LcuRendering STATIC
     src/shader_program.cpp
     src/frustum.cpp
     src/occlusion_culler.cpp
+    src/lod_mesher.cpp
 )
 add_library(Lcu::Rendering ALIAS LcuRendering)
 

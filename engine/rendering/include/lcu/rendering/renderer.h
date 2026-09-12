@@ -175,6 +175,25 @@ class Renderer : public NonCopyable {
     void submit_solid_box(const math::Vec3& min, const math::Vec3& max, const math::Vec3& color,
                            bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj);
 
+    // Draws one real flat LOD quad (Phase 70, brief section 70.4) - a
+    // whole distant chunk collapsed to a single quad spanning
+    // `chunk_world_min.x/.z` to `+chunk_edge`, at world Y = `chunk_
+    // world_min.y + average_local_height`, tinted `color`. Submitted
+    // into a dedicated LOD view that executes BEFORE the real near-
+    // chunk terrain view (see renderer.cpp's own view-order setup) with
+    // real depth WRITE and TEST both on - so a near-chunk drawn
+    // afterward genuinely occludes/is-occluded-by this quad via the
+    // real depth buffer, not merely by submission order. Same minimal
+    // position+color, unlit `sky_program` pipeline every other flat-
+    // colored primitive in this class already uses. No-op if `program`
+    // is invalid. `lcu::rendering::submit_lod_chunk` (lod_mesher.h) is
+    // the real, higher-level caller most code should use instead of
+    // this directly - it also handles the `LodChunkMesh::has_geometry`
+    // no-op case.
+    void submit_lod_chunk(const math::Vec3& chunk_world_min, f32 chunk_edge, f32 average_local_height,
+                           const math::Vec3& color, bgfx::ProgramHandle program, const math::Mat4& view,
+                           const math::Mat4& proj);
+
     // Draws one camera-facing colored quad into the terrain view (view
     // 0) WITH real depth testing against solid terrain (Phase 50's real
     // item-entity rendering) - the same camera-facing quad math

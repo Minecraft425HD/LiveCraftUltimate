@@ -4798,3 +4798,85 @@ cleanly; accepting the Development-build 1.06 ms benchmark result at
 face value without investigating - rejected as exactly the kind of
 unverified "close enough" claim this project's own brief explicitly
 forbids (section 96).
+
+## 2026-09-12 — Phase 70: reusing bgfx's own view-order remapping for LOD-before-terrain instead of renumbering the terrain view, and an honest note that the LOD path has nothing real to render until Phase 71 widens the streaming radius
+
+**Context:** Phase 70 adds the second-to-last piece of the culling/
+performance cascade: a real, cheap flat-quad LOD stand-in for chunks
+beyond `render_distance`, drawn so it composites correctly with full
+near-chunk geometry via the real depth buffer.
+
+**`bgfx::setViewOrder` (already used by this project since the Phase 27
+sky view) is the real mechanism for "LOD renders before terrain",
+not a numeric view-ID renumbering.** The brief's own wording ("LOD-Pass
+zuerst (View-Order 0)... Near-Pass danach (View-Order 1)") reads as if
+view IDs themselves need reordering, but bgfx view IDs are just integer
+buckets - actual EXECUTION order is controlled separately via `bgfx::
+setViewOrder(0, N, view_order_array)`, already used by this project's
+own `init()` to run the sky view before the terrain view (view 0) and
+the UI view after both. Renumbering the terrain view (already "0"
+throughout this entire project, referenced by many existing `submit_
+chunk_mesh` call sites and tests) to make room for a smaller LOD ID
+would have been a large, real, risky diff for zero actual benefit -
+adding a new `kLodViewId = 3` and inserting it into the EXISTING
+`view_order` array between the sky view and view 0 achieves the exact
+same real execution order with a two-line change to that array.
+
+**A new dedicated LOD view still shares the SAME real depth buffer as
+the terrain view (no separate render target, no clear of its own) -
+this is what actually makes "near chunks correctly overdraw LOD" work,
+not the view ordering by itself.** View ordering alone only controls
+WHEN each view's draw calls execute; it doesn't clip or composite
+anything by itself for views sharing a backbuffer. The real occlusion
+comes from `BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS` on the LOD
+quad (matching the brief's own literal "Depth-Write AN, Depth-Test AN")
+plus the terrain view's own pre-existing `BGFX_STATE_DEFAULT` (already
+includes the same two flags) and its own pre-existing "no clear, sky
+view already cleared" comment - the LOD view is a third participant in
+that same real, shared, already-established depth-buffer contract, not
+a new mechanism.
+
+**`build_lod_chunk` averages over columns that actually have geometry,
+not over all 256 columns unconditionally.** A partially-empty chunk (a
+real, common case - a chunk mostly water/sky with a small island, or a
+chunk that's mostly cave) would otherwise have its real average height
+dragged toward zero by empty columns that never had a "surface" to
+begin with - confirmed by a dedicated unit test (`OnlySomeColumnsHaving
+GeometryStillAveragesCorrectly`) using a single populated column.
+
+**Real, honest scope note: as of this phase, `render_distance`'s own
+default (8) can never actually exceed this project's own existing
+chunk-load radius (`radius_xz=1`), so the LOD path never naturally
+triggers in a real run today.** This isn't a bug in Phase 70's own real
+code - it's the natural, expected consequence of `render_distance`/
+`lod_distance` being genuinely new (this phase's own job per the brief's
+own section 70.5) while the actual chunk-streaming RADIUS remains
+Phase 71's job. Rather than leave this as an unverified claim, the whole
+pipeline was confirmed working end-to-end by temporarily forcing
+`render_distance=0` via a real options.txt edit in a real headless run
+- `LOD quads: 10` appeared (10 of the 11 occlusion-visible chunks, the
+camera's own chunk staying "near" at distance 0), then reverted to
+`LOD quads: 0` at the real default - real, direct evidence the
+classification/rendering logic is correct, not just "should work in
+theory".
+
+**Alternatives considered:** renumbering the terrain view to a higher
+ID so LOD could use ID 0 directly (matching the brief's own literal
+"View-Order 0"/"View-Order 1" as if they were actual view IDs) -
+rejected as a needlessly large, risky diff for a purely cosmetic
+alignment with wording that itself doesn't distinguish "view ID" from
+"execution order" (bgfx does, and this project already had the real
+tool - `setViewOrder` - to honor the intent without the renumbering);
+giving `LodChunkMesh` a real per-chunk cache (mirroring `chunk_aabb_
+cache`/`OcclusionCuller`'s own mask cache) - deferred as real,
+worthwhile future work once Phase 71's larger streaming radius actually
+makes LOD chunks a hot per-frame path; today, with the LOD band
+realistically empty under default settings, a cache would be real
+complexity with nothing yet to cache; averaging over all 256 columns
+regardless of whether they have real geometry - rejected as silently
+wrong for any chunk that isn't fully covered edge-to-edge (confirmed by
+a dedicated unit test); leaving the LOD path entirely unverified until
+Phase 71 lands - rejected as exactly the kind of unearned "should work"
+claim this project's own brief (section 96) forbids; a real
+`render_distance=0` override was cheap and gave real, direct evidence
+instead.

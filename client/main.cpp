@@ -87,6 +87,7 @@
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/frustum.h"
+#include "lcu/rendering/lod_mesher.h"
 #include "lcu/rendering/occlusion_culler.h"
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
@@ -5084,6 +5085,12 @@ int main() {
         // second by the verify_culling hook further down.
         lcu::usize culling_chunks_total = 0;
         lcu::usize culling_visible_after_frustum = 0;
+        // Real per-frame LOD-quad count (Phase 70) - how many of this
+        // frame's occlusion-visible chunks actually had real geometry to
+        // summarize and got a real LOD quad submitted (not just "beyond
+        // render_distance", which build_lod_chunk's own `has_geometry`
+        // can still say no to for an all-air chunk).
+        lcu::usize lod_quads_submitted = 0;
 
         // Real BFS occlusion culling (Phase 69) - see occlusion_culler's
         // own declaration comment for the cache-reuse condition. Reusing
@@ -5185,6 +5192,29 @@ int main() {
         }
 
         constexpr lcu::i32 kEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
+        // Real near/far chunk-coordinate classification (Phase 70, brief
+        // section 70.2's own "Zwei-Ebenen-System"): Chebyshev distance
+        // (in chunks) from the camera's own chunk, against `options.
+        // render_distance` - a chunk within it gets its real full
+        // greedy-meshed geometry (unchanged from every prior phase); a
+        // chunk beyond it (but still loaded/visible) gets a real,
+        // cheaper LOD quad instead (see the dedicated LOD pass further
+        // below). `options.lod_distance` doesn't gate anything
+        // additional here since this only ever iterates chunks already
+        // loaded/visible - it becomes meaningful once Phase 71's own
+        // larger streaming radius actually loads chunks that far out.
+        const auto camera_chunk_for_lod = lcu::voxel::world_to_chunk_and_local(
+                                               lcu::voxel::BlockWorldCoord{static_cast<lcu::i64>(std::floor(camera.position.x)),
+                                                                            static_cast<lcu::i64>(std::floor(camera.position.y)),
+                                                                            static_cast<lcu::i64>(std::floor(camera.position.z))},
+                                               lcu::voxel::Chunk::kEdgeLength)
+                                               .chunk;
+        const auto chunk_is_near = [&](lcu::voxel::ChunkCoord coord) {
+            const lcu::i32 dx = std::abs(coord.x - camera_chunk_for_lod.x);
+            const lcu::i32 dy = std::abs(coord.y - camera_chunk_for_lod.y);
+            const lcu::i32 dz = std::abs(coord.z - camera_chunk_for_lod.z);
+            return std::max({dx, dy, dz}) <= options.render_distance;
+        };
         // Real per-frame frustum visibility set (Phase 68) - decided
         // once per unique chunk coordinate against `chunk_aabb_cache`
         // (which mirrors every currently-loaded, meshed chunk), then
@@ -5199,21 +5229,17 @@ int main() {
                 ++culling_visible_after_frustum;
             }
         }
-        if (verify_culling) {
-            culling_log_accumulator_seconds += delta_seconds;
-            if (culling_log_accumulator_seconds >= 1.0f) {
-                culling_log_accumulator_seconds -= 1.0f;
-                LCU_LOG_INFO("Chunks total: {}, visible after frustum: {}, visible after occlusion: {}",
-                             culling_chunks_total, culling_visible_after_frustum,
-                             chunks_visible_after_occlusion.size());
-            }
-        }
         for (const auto& [coord, gpu_mesh] : gpu_meshes) {
             // Real occlusion-gated render set (Phase 69) - a real
             // SUBSET of chunks_visible_after_frustum (compute() itself
             // never enters a chunk the frustum already rejected), so
             // testing against it alone is both correct and sufficient.
             if (!chunks_visible_after_occlusion.count(coord)) {
+                continue;
+            }
+            if (!chunk_is_near(coord)) {
+                // Beyond render_distance - a real LOD quad covers it
+                // instead (Phase 70's own dedicated pass below).
                 continue;
             }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
@@ -5242,6 +5268,9 @@ int main() {
             if (!chunks_visible_after_occlusion.count(coord)) {
                 continue;
             }
+            if (!chunk_is_near(coord)) {
+                continue;
+            }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
@@ -5249,6 +5278,52 @@ int main() {
                                         day_night_cycle.sky_light_scale(), atlas_texture, /*alpha_blend=*/true);
             if (gpu_water_mesh.is_valid() && bgfx::isValid(chunk_program)) {
                 ++draw_calls;
+            }
+        }
+
+        // Real LOD pass (Phase 70) - every occlusion-visible chunk
+        // OUTSIDE render_distance gets one real flat quad instead of its
+        // full geometry, built fresh from its own actual current block
+        // data (not cached - see build_lod_chunk's own doc comment; a
+        // per-chunk LOD cache would be real, worthwhile future work once
+        // Phase 71's larger streaming radius makes this a hot path, but
+        // isn't needed for this phase's own scope). Submitted into
+        // Renderer's own dedicated LOD view (real depth write+test),
+        // executed BEFORE the near-chunk passes above in bgfx's own real
+        // view order, so a near chunk correctly overdraws/occludes an
+        // LOD quad wherever they'd otherwise overlap.
+        for (const lcu::voxel::ChunkCoord& coord : chunks_visible_after_occlusion) {
+            if (chunk_is_near(coord)) {
+                continue;
+            }
+            const lcu::voxel::Chunk* lod_chunk = world.chunk_at(coord);
+            if (!lod_chunk) {
+                continue;
+            }
+            const lcu::rendering::LodChunkMesh lod_mesh = lcu::rendering::build_lod_chunk(*lod_chunk, block_registry);
+            const lcu::math::Vec3 chunk_world_min{static_cast<lcu::f32>(coord.x * kEdge),
+                                                   static_cast<lcu::f32>(coord.y * kEdge),
+                                                   static_cast<lcu::f32>(coord.z * kEdge)};
+            // sky_program (not chunk_program) - submit_lod_chunk uses the
+            // same minimal position+color, unlit vs_sky.sc/fs_sky.sc
+            // pipeline every other flat-colored primitive in Renderer
+            // already uses (submit_solid_box/submit_wireframe_box/
+            // submit_billboard), not the textured/lit chunk shader.
+            lcu::rendering::submit_lod_chunk(renderer, lod_mesh, chunk_world_min, static_cast<lcu::f32>(kEdge),
+                                              sky_program, view, proj);
+            if (lod_mesh.has_geometry && bgfx::isValid(sky_program)) {
+                ++draw_calls;
+                ++lod_quads_submitted;
+            }
+        }
+        if (verify_culling) {
+            culling_log_accumulator_seconds += delta_seconds;
+            if (culling_log_accumulator_seconds >= 1.0f) {
+                culling_log_accumulator_seconds -= 1.0f;
+                LCU_LOG_INFO(
+                    "Chunks total: {}, visible after frustum: {}, visible after occlusion: {}, LOD quads: {}",
+                    culling_chunks_total, culling_visible_after_frustum, chunks_visible_after_occlusion.size(),
+                    lod_quads_submitted);
             }
         }
 

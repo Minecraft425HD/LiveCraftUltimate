@@ -2,7 +2,48 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69 / Phase 70
+
+### Phase 70
+
+- **Real LOD rendering for distant chunks** (Distant-Horizons-style): new
+  `engine::rendering::build_lod_chunk` - a real per-column top-down scan
+  of a chunk's own actual current blocks, averaging the topmost non-air
+  voxel's real color and local height across every column that has one.
+  New `Renderer::submit_lod_chunk`/`lcu::rendering::submit_lod_chunk`
+  draw one real flat quad at that average height/color, into a new
+  dedicated LOD bgfx view executed BEFORE the near-chunk terrain view
+  (real `bgfx::setViewOrder`, real depth WRITE+TEST) - a near chunk
+  drawn afterward genuinely occludes/is-occluded-by an LOD quad via the
+  shared real depth buffer, not draw order alone.
+- New `Options::render_distance` (default 8) / `Options::lod_distance`
+  (default 32), persisted in options.txt. Wired into `client/main.cpp`'s
+  render loop: every occlusion-visible chunk within `render_distance`
+  (Chebyshev, from the camera's own chunk) renders its real full
+  geometry as before; anything beyond it gets a real LOD quad built
+  fresh from its own actual block data instead. Real, honest
+  consequence: this project's own default chunk-load radius
+  (`radius_xz=1`) never actually puts a loaded chunk beyond the default
+  `render_distance=8`, so the LOD path is real and fully wired but never
+  naturally triggers until Phase 71's own larger streaming radius gives
+  it real distant chunks to act on - confirmed working end-to-end by
+  temporarily forcing `render_distance=0` in a real headless run (`LOD
+  quads: 10` appeared; back at the default, `LOD quads: 0`, exactly as
+  expected).
+- `LCU_VERIFY_CULLING`'s own log line gained a real `LOD quads: N`
+  field.
+- 5 new `LodMesher.*` unit tests (all-air has no geometry, a flat
+  surface gives the exact expected height/color, partial-coverage
+  columns still average correctly, the topmost voxel wins over deeper
+  ones in the same column, differently-colored columns blend).
+- New `BM_Render_LODChunks` benchmark: 4.49 µs/chunk, comfortably under
+  the brief's own "< 10 µs" target (even in this project's own
+  unoptimized "Development" build, unlike Phase 69's occlusion
+  benchmark).
+- `ctest` 667/667 (bgfx, up from 661) / 639/639 (non-bgfx, up from 638 -
+  the new `Options` fields/test build in both configs; `LodMesher`/
+  `build_lod_chunk` only under `LCU_ENABLE_BGFX`). Full regression sweep
+  clean on both configs.
 
 ### Phase 69
 

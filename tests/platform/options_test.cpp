@@ -48,6 +48,8 @@ TEST(Options, SaveThenLoadRoundTripsScalarFields) {
     saved.hud_enabled = false;
     saved.debug_overlay_enabled = true;
     saved.skin_name = "Ninja";
+    saved.render_distance = 6;
+    saved.lod_distance = 48;
     saved.save(path);
 
     Options loaded;
@@ -57,8 +59,16 @@ TEST(Options, SaveThenLoadRoundTripsScalarFields) {
     EXPECT_FALSE(loaded.hud_enabled);
     EXPECT_TRUE(loaded.debug_overlay_enabled);
     EXPECT_EQ(loaded.skin_name, "Ninja");
+    EXPECT_EQ(loaded.render_distance, 6);
+    EXPECT_EQ(loaded.lod_distance, 48);
 
     std::filesystem::remove(path);
+}
+
+TEST(Options, DefaultsIncludeRenderAndLodDistance) {
+    Options options;
+    EXPECT_EQ(options.render_distance, 8);
+    EXPECT_EQ(options.lod_distance, 32);
 }
 
 TEST(Options, LoadIgnoresABlankSkinValueAndKeepsTheDefault) {
