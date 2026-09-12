@@ -58,6 +58,7 @@
 #include "lcu/platform/options.h"
 #include "lcu/platform/window.h"
 #include "lcu/player/camera.h"
+#include "lcu/player/mouse_look.h"
 #include "lcu/player/movement_input.h"
 #include "lcu/replication/position_interpolator.h"
 #include "lcu/replication/prediction_buffer.h"
@@ -4265,8 +4266,13 @@ int main() {
             // back, before the recapture click lands) never spuriously spins
             // the camera from residual/incidental motion.
             if (window.relative_mouse_mode()) {
-                camera.add_yaw_pitch(input.mouse_delta_x() * options.mouse_sensitivity,
-                                     -input.mouse_delta_y() * options.mouse_sensitivity);
+                // Real Bug 1 fix (Phase 74 Mac test): the X axis was
+                // inverted - moving the mouse right visibly turned the
+                // camera left. See mouse_look_delta's own doc comment
+                // for the sign derivation.
+                const lcu::player::MouseLookDelta look_delta =
+                    lcu::player::mouse_look_delta(input.mouse_delta_x(), input.mouse_delta_y(), options.mouse_sensitivity);
+                camera.add_yaw_pitch(look_delta.yaw, look_delta.pitch);
             }
 
             if (input.is_down(lcu::platform::Action::LookLeft)) {

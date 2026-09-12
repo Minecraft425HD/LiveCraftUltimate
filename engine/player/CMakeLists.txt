@@ -4,6 +4,7 @@
 add_library(LcuPlayer STATIC
     src/camera.cpp
     src/movement_input.cpp
+    src/mouse_look.cpp
 )
 add_library(Lcu::Player ALIAS LcuPlayer)
 

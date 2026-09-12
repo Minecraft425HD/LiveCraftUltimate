@@ -76,7 +76,7 @@ endif()
 # Camera/movement-input math; only built alongside engine/platform (see
 # engine/player/CMakeLists.txt).
 if(TARGET Lcu::Player)
-    target_sources(VoxelTests PRIVATE player/camera_test.cpp player/movement_input_test.cpp)
+    target_sources(VoxelTests PRIVATE player/camera_test.cpp player/movement_input_test.cpp player/mouse_look_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Player)
 endif()
 

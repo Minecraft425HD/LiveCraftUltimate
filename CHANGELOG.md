@@ -2,7 +2,40 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73 / Phase 74
+
+### Phase 74
+
+Real bugfixes from a second real Mac test, one bug at a time (build +
+`ctest` green, then commit, after each). No new features - the "Phase
+73" label in this round's own brief collided with the rollback phase
+already committed under that name, so this work is Phase 74 here.
+
+#### Bug 1: inverted mouse X axis
+
+- **Symptom**: moving the mouse right visibly turned the camera left
+  (and vice versa) - every other axis/action was correct.
+- **Root cause**: `client/main.cpp`'s mouse-look block passed
+  `input.mouse_delta_x()` straight into `camera.add_yaw_pitch`'s own
+  yaw parameter with no sign flip. `FirstPersonCamera`'s own, already-
+  tested convention (`YawNinetyDegreesFacesNegativeX` +
+  `DefaultRightIsPositiveX`) is that *increasing* yaw turns the camera
+  toward `-X`, i.e. away from "right" - so a positive (rightward) mouse
+  delta was increasing yaw, turning the camera left.
+- **Fix**: new `lcu::player::mouse_look_delta(mouse_delta_x,
+  mouse_delta_y, sensitivity) -> MouseLookDelta{yaw, pitch}`
+  (`engine/player/{include/lcu/player,src}/mouse_look.{h,cpp}`) -
+  negates `mouse_delta_x` before it becomes a yaw delta (pitch's own
+  sign was already correct and is unchanged). Extracted out of
+  `client/main.cpp`'s inline mouse-look block into a real, independently
+  testable pure function, mirroring `movement_direction_from_input`'s
+  own existing pattern, rather than leaving the sign buried in two
+  minus signs inside a ~6000-line `main()`.
+- **Verification**: 5 new `MouseLook.*` unit tests, including the
+  bug report's own literal check - `mouse_look_delta(10, 0, s).yaw < 0`.
+  `ctest` 652/652 (bgfx) / 644/644 (non-bgfx), up by 5. Full clean
+  rebuild both configs; a real headless `LCU_MAX_FRAMES=60` run clean
+  on both.
 
 ### Phase 73
 
