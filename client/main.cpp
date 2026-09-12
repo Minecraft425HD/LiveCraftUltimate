@@ -531,6 +531,45 @@ constexpr lcu::f32 kVerifyInventoryPlaceInMainAtSeconds = 1.0f;
 constexpr lcu::f32 kVerifyInventoryShiftToHotbarAtSeconds = 1.2f;
 constexpr lcu::f32 kVerifyInventoryCloseAtSeconds = 1.4f;
 
+// An eighth, independent headless hook (LCU_VERIFY_FARMING_CRAFT, Phase
+// 65): proves the two new farming-processing recipes (3x game:wheat ->
+// game:bread, 2x game:planks -> game:wooden_hoe) really work through the
+// real 2x2 inventory-screen crafting grid - not the quick-craft shortcut
+// (see the Action::Craft handler's own doc comment above for why that
+// shortcut structurally can't represent either recipe: it dedupes held
+// items down to one of each distinct type, and both these recipes need
+// more than one of the same item). Grants 3 game:wheat (hotbar slot 0)
+// and 2 game:planks (hotbar slot 1) directly - the same synthetic-setup
+// precedent every prior hook's own item grant already uses. Opens the
+// inventory screen, picks up the whole wheat stack from hotbar slot 0 with
+// a left-click (Interact), then right-clicks (PlaceBlock) three of the
+// 2x2 grid's four cells one at a time - inventory_right_click places
+// exactly 1 item per click, so this really lands 1 wheat per cell, 3
+// separate cells, exactly mirroring how a real player would drag 3
+// individual wheat into 3 individual grid cells (see the result-taking
+// handler's own doc comment: it decrements each non-empty ingredient cell
+// by 1, which is correct precisely because each occurrence sits in its
+// own cell). Takes the result (expects bread), places it into main slot 0
+// to free the cursor, then repeats the same pattern for the 2 planks into
+// 2 grid cells (expects wooden_hoe), placing that into main slot 1, then
+// closes the screen. Logs the final bread/wooden_hoe counts so a failed
+// match (e.g. a wrong ingredient count in the recipe registration) shows
+// up as an observable 0 rather than silently passing.
+constexpr lcu::f32 kVerifyFarmingCraftOpenAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyFarmingCraftPickupWheatAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat1AtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat2AtSeconds = 0.8f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat3AtSeconds = 1.0f;
+constexpr lcu::f32 kVerifyFarmingCraftTakeBreadAtSeconds = 1.2f;
+constexpr lcu::f32 kVerifyFarmingCraftStowBreadAtSeconds = 1.4f;
+constexpr lcu::f32 kVerifyFarmingCraftPickupPlanksAtSeconds = 1.6f;
+constexpr lcu::f32 kVerifyFarmingCraftPlacePlanks1AtSeconds = 1.8f;
+constexpr lcu::f32 kVerifyFarmingCraftPlacePlanks2AtSeconds = 2.0f;
+constexpr lcu::f32 kVerifyFarmingCraftTakeHoeAtSeconds = 2.2f;
+constexpr lcu::f32 kVerifyFarmingCraftStowHoeAtSeconds = 2.4f;
+constexpr lcu::f32 kVerifyFarmingCraftCloseAtSeconds = 2.6f;
+constexpr lcu::f32 kVerifyFarmingCraftLogAtSeconds = 2.8f;
+
 // A sixth, independent headless hook (LCU_VERIFY_WORKBENCH, Phase 50.3):
 // grants the player 1 game:wood directly (same synthetic-setup
 // precedent every prior hook's own item/block seeding already uses),
@@ -1404,6 +1443,24 @@ int main() {
     lcu::items::RecipeRegistry recipe_registry;
     recipe_registry.add_shapeless({{grass_item_id, dirt_item_id}, {compost_item_id, 1}});
     recipe_registry.add_shapeless({{wood_item_id}, {planks_item_id, 4}});
+
+    // Real farming-processing recipes (Phase 65). 3 game:wheat -> 1
+    // game:bread - shapeless (position doesn't matter, matching every
+    // other real recipe here), the brief's own literal "3 Weizen -> 1
+    // Brot" requirement; game:bread has existed since Phase 51 with no
+    // survival obtain path until now.
+    recipe_registry.add_shapeless({{wheat_item_id, wheat_item_id, wheat_item_id}, {bread_item_id, 1}});
+    // A minimal wood-hoe recipe (brief section 65.2's own "minimal,
+    // kein volles Tool-Tier-System noetig") - real Minecraft's own
+    // recipe needs 2 sticks + 2 planks, but no `game:stick` item exists
+    // in this project at all (nothing else has ever needed one - see
+    // DECISIONS.md for why inventing one just for this single recipe
+    // was rejected as real, disproportionate scope). 2 planks alone is
+    // a real, honest, minimal substitute that still uses only real,
+    // already-existing items - no stone-hoe recipe either (the brief's
+    // own "optional", and there's no real tool-tier concept for a
+    // stone-vs-wood hoe to meaningfully differ by yet).
+    recipe_registry.add_shapeless({{planks_item_id, planks_item_id}, {wooden_hoe_item_id, 1}});
 
     // Real Minecraft-style hotbar selection (Phase 49, replacing Phase
     // 21's placeable_items/selected_placeable_index "virtual known-item-
@@ -2466,6 +2523,11 @@ int main() {
     const auto verify_inventory_start = std::chrono::steady_clock::now();
     bool verify_inventory_wood_granted = false;
 
+    const bool verify_farming_craft = std::getenv("LCU_VERIFY_FARMING_CRAFT") != nullptr;
+    const auto verify_farming_craft_start = std::chrono::steady_clock::now();
+    bool verify_farming_craft_granted = false;
+    bool verify_farming_craft_logged = false;
+
     const bool verify_workbench = std::getenv("LCU_VERIFY_WORKBENCH") != nullptr;
     const auto verify_workbench_start = std::chrono::steady_clock::now();
     bool verify_workbench_setup_done = false;
@@ -3056,6 +3118,100 @@ int main() {
             input.set_down(lcu::platform::Action::Interact, interact_now);
             input.set_down(lcu::platform::Action::Crouch, shift_now);
         }
+        if (verify_farming_craft) {
+            if (!verify_farming_craft_granted) {
+                // Synthetic setup (see kVerifyFarmingCraftOpenAtSeconds'
+                // own doc comment above) - lands in real inventory slots 0
+                // and 1 respectively, same "first items added to an empty
+                // inventory" precedent every prior hook's own item grant
+                // already relies on.
+                player_inventory.add_item(item_registry, {wheat_item_id, 3});
+                player_inventory.add_item(item_registry, {planks_item_id, 2});
+                verify_farming_craft_granted = true;
+            }
+            const lcu::f32 elapsed = std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() -
+                                                                      verify_farming_craft_start)
+                                          .count();
+            input.set_down(lcu::platform::Action::Inventory,
+                            (elapsed >= kVerifyFarmingCraftOpenAtSeconds &&
+                             elapsed < kVerifyFarmingCraftOpenAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingCraftCloseAtSeconds &&
+                                 elapsed < kVerifyFarmingCraftCloseAtSeconds + kVerifyEdgePulseSeconds));
+
+            const lcu::ui::InventoryScreenLayout verify_farming_craft_layout = lcu::ui::inventory_screen_layout(
+                static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+            const auto verify_farming_craft_slot_center = [](const lcu::ui::InventorySlotRect& rect) {
+                return lcu::platform::Window::MousePosition{rect.x + rect.size * 0.5f, rect.y + rect.size * 0.5f};
+            };
+
+            bool left_now = false;
+            bool right_now = false;
+            if (elapsed >= kVerifyFarmingCraftPickupWheatAtSeconds &&
+                elapsed < kVerifyFarmingCraftPickupWheatAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.hotbar_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat1AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat1AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat2AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat2AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[1]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat3AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat3AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[2]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftTakeBreadAtSeconds &&
+                       elapsed < kVerifyFarmingCraftTakeBreadAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_result);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftStowBreadAtSeconds &&
+                       elapsed < kVerifyFarmingCraftStowBreadAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.main_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPickupPlanksAtSeconds &&
+                       elapsed < kVerifyFarmingCraftPickupPlanksAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.hotbar_slots[1]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlacePlanks1AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlacePlanks1AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlacePlanks2AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlacePlanks2AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[1]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftTakeHoeAtSeconds &&
+                       elapsed < kVerifyFarmingCraftTakeHoeAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_result);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftStowHoeAtSeconds &&
+                       elapsed < kVerifyFarmingCraftStowHoeAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.main_slots[1]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            }
+            input.set_down(lcu::platform::Action::Interact, left_now);
+            input.set_down(lcu::platform::Action::PlaceBlock, right_now);
+
+            if (!verify_farming_craft_logged && elapsed >= kVerifyFarmingCraftLogAtSeconds) {
+                LCU_LOG_INFO(
+                    "LCU_VERIFY_FARMING_CRAFT: bread={} wooden_hoe={} (expected 1 and 1)",
+                    player_inventory.count_item(bread_item_id), player_inventory.count_item(wooden_hoe_item_id));
+                verify_farming_craft_logged = true;
+            }
+        }
         if (verify_workbench) {
             if (!verify_workbench_setup_done) {
                 // Synthetic setup (see kVerifyWorkbenchOpenAtSeconds' own
@@ -3297,16 +3453,18 @@ int main() {
                                                ? result
                                                : lcu::items::ItemStack{cursor_stack.item, cursor_stack.count + result.count};
                             // Consumes exactly 1 of each non-empty
-                            // ingredient slot - correct for every real
-                            // shapeless recipe registered so far (each
-                            // lists each ingredient once - see
-                            // recipe_registry.add_shapeless above); a
-                            // recipe needing >1 of the same ingredient in
-                            // one cell would need per-recipe ingredient
-                            // counts this simple "decrement by 1" doesn't
-                            // model - a real, documented limit, not
-                            // silently wrong for anything actually
-                            // registered.
+                            // ingredient slot. This is correct even for
+                            // the Phase 65 recipes that need >1 of the
+                            // same item (3x game:wheat, 2x game:planks -
+                            // see recipe_registry.add_shapeless above), as
+                            // long as each occurrence sits in its own
+                            // grid cell (real Minecraft's own crafting
+                            // grid works the same way - a real recipe
+                            // needing 2 sticks is placed as 2 separate
+                            // stick cells, never 1 cell holding a stack of
+                            // 2). What this can't model is >1 of the same
+                            // ingredient stacked into a *single* cell -
+                            // not needed by anything registered so far.
                             for (lcu::usize i = 0; i < kCraftGridInputSlotCount; ++i) {
                                 const lcu::items::ItemStack ingredient = craft_grid_inventory.slot_at(i);
                                 if (!ingredient.is_empty()) {
@@ -4332,9 +4490,17 @@ int main() {
                 // not a graphical crafting-grid UI (no way to arrange items
                 // into specific cells exists yet - see DECISIONS.md). This
                 // only correctly represents a recipe needing exactly one of
-                // each distinct ingredient type (true of the one recipe
-                // registered above); it isn't a stand-in for a real grid
-                // that could hold >1 of the same item in different cells.
+                // each distinct ingredient type (true of the compost/planks
+                // recipes registered above); it isn't a stand-in for a real
+                // grid that could hold >1 of the same item in different
+                // cells. Real, documented limitation as of Phase 65: the
+                // two new recipes there (3x game:wheat -> bread, 2x
+                // game:planks -> wooden_hoe) need >1 of the same item, so
+                // this dedup-to-1 shortcut can never match them no matter
+                // how much wheat/planks are held - only the real 2x2
+                // inventory-screen grid or the 3x3 workbench grid (which
+                // query actual per-cell contents, not a deduped list) can
+                // craft them. See DECISIONS.md.
                 std::vector<lcu::items::ItemId> craft_grid;
                 for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
                     const lcu::items::ItemId slot_item = player_inventory.slot_at(slot).item;

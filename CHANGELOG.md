@@ -2,7 +2,52 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65
+
+### Phase 65
+
+- **Real farming-processing recipes**: two new `ShapelessRecipe`s in the
+  existing `RecipeRegistry` - 3x `game:wheat` -> 1x `game:bread` (the
+  brief's own literal "3 Weizen -> 1 Brot"; `game:bread` has existed
+  since Phase 51 with no real survival obtain path until now) and 2x
+  `game:planks` -> 1x `game:wooden_hoe`. The hoe recipe is a real,
+  documented simplification of Minecraft's own 2 sticks + 2 planks: no
+  `game:stick` item exists anywhere in this project, and inventing one
+  solely for this single recipe was rejected as disproportionate new
+  scope (see DECISIONS.md) - 2 planks alone is an honest substitute
+  using only already-existing items. No stone-hoe recipe either (the
+  brief's own "optional", and there is no real tool-tier concept yet for
+  a stone vs. wood hoe to meaningfully differ by).
+- **Real, documented limitation discovered while wiring this up**: the
+  Phase 23 "quick-craft" shortcut (`Action::Craft`) can never match
+  either new recipe, no matter how much wheat/planks are held - it
+  dedupes held items down to one of each *distinct* type before querying
+  `RecipeRegistry`, so it structurally cannot represent "needs 3 of the
+  same item". Both new recipes work correctly through the real,
+  already-existing 2x2 inventory-screen grid and 3x3 workbench grid
+  instead (Phase 49/50): those query actual per-cell contents, so
+  placing each wheat/plank into its own cell (exactly how a real player
+  would drag them) produces a correct multiset match, and the existing
+  take-result handler's "consume 1 per non-empty ingredient cell" logic
+  is already exactly correct for this case - it just had a stale doc
+  comment (now corrected) claiming this only worked for 1-of-each
+  recipes.
+- New `LCU_VERIFY_FARMING_CRAFT` headless hook: grants 3 wheat + 2
+  planks directly, drives the real 2x2 grid through real mouse-click
+  simulation (left-click pickup, right-click "place 1 per cell" x3 then
+  x2, take result, stow) for both recipes back to back in one run, then
+  logs the final bread/wooden_hoe counts - confirmed via a real headless
+  run: `bread=1 wooden_hoe=1` on both dev-bgfx and dev-nobgfx builds
+  (needs `LCU_MAX_FRAMES>=1000000` in this sandbox to reliably cover its
+  ~2.8 real elapsed seconds - see DECISIONS.md's Phase 64 entry on this
+  convention's own real timing variance run to run).
+  Full regression sweep (all prior `LCU_VERIFY_*` hooks, including
+  `LCU_VERIFY_FARMING`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`/
+  `LCU_VERIFY_CRAFT`) stays clean. `ctest` 646/646 (bgfx) / 638/638
+  (non-bgfx) - no new tests needed since `RecipeRegistry` and the real
+  click-handling code were already fully unit/integration tested; this
+  phase only adds data (recipe registrations) exercised by the new
+  headless hook.
 
 ### Phase 64
 

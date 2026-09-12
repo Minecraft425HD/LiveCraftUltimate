@@ -4411,3 +4411,101 @@ ask for; silently raising every existing verify hook's own `LCU_MAX_
 FRAMES` to "fix" the newly-discovered timing gap - rejected as a large,
 unbounded retroactive change outside this phase's own real scope,
 better addressed as its own deliberate pass if/when it matters.
+
+## 2026-09-12 — Phase 65: real farming-processing recipes work through the existing 2x2/3x3 grid, not the quick-craft shortcut, plus a real per-build-config timing data point
+
+**Context:** Phase 65 is the brief's own "farming processing": 3 wheat
+-> 1 bread, and a minimal hoe recipe. `game:bread` has existed as an
+item since Phase 51 with no real survival obtain path until now;
+`RecipeRegistry` has supported `ShapelessRecipe`s needing more than one
+of the same ingredient since Phase 55 (`ingredients` is a plain
+`std::vector<ItemId>` that may repeat an id), but nothing registered
+before this phase had ever actually needed more than one of the same
+item, so this is the first real exercise of that path.
+
+**The 2 recipes needed genuinely required checking, not assuming, how
+this project's two different crafting mechanisms consume ingredients.**
+There are two independent, real ways to trigger a craft in this
+project: the Phase 23 "quick-craft" shortcut bound to `Action::Craft`,
+and the real 2x2 inventory-screen / 3x3 workbench grids (Phase 49/50)
+driven by actual mouse clicks. Reading both consumption paths before
+writing the recipes revealed they behave very differently for a
+multi-of-the-same-ingredient recipe:
+- **Quick-craft** builds its query grid by scanning the player's whole
+  inventory and keeping only one entry per *distinct* item type (`std::
+  find` dedup). This was already documented as "only correctly
+  represents a recipe needing exactly one of each distinct ingredient
+  type" back when it was written - a real, existing limitation, not one
+  introduced here - but until this phase every registered recipe
+  (compost, planks) only ever needed one of each ingredient, so the
+  limitation had never actually mattered. Both new recipes need >1 of
+  the same item (3 wheat, 2 planks), so quick-craft can now never match
+  either one, regardless of how much wheat or planks the player holds.
+  Fixing this would mean quick-craft tracking real per-item *counts*
+  instead of a deduped type list - but that would silently break every
+  existing 1-of-each recipe the moment a player holds more than one of
+  an ingredient (e.g. 2 grass + 1 dirt would no longer match compost,
+  since the exact-multiset match in `RecipeRegistry::matches_shapeless`
+  would then see 2 grass instead of 1). Real, disproportionate scope
+  and real regression risk for a shortcut that was always documented as
+  a simplification - left as-is, now with its own doc comment updated
+  to name this specific new limitation honestly rather than leaving the
+  stale "true of the one recipe registered above" text uncorrected.
+- **The real 2x2/3x3 grids** query actual per-cell contents (`craft_
+  grid_inventory.slot_at(i).item`, one cell per array index) - not a
+  deduped list - so placing 3 wheat into 3 separate grid cells (exactly
+  how a real player would drag them one at a time) produces a genuine
+  3-wheat multiset match. The existing take-result handler already
+  consumes "1 item per non-empty ingredient cell", which is exactly
+  correct here precisely because each occurrence occupies its own cell
+  - its own doc comment claimed this only worked for "every real
+  shapeless recipe registered so far (each lists each ingredient
+  once)", which Phase 65 makes no longer true; corrected that comment
+  rather than leaving stale, now-false reasoning in the code. No
+  `RecipeRegistry` or grid-handling code changes were needed at all -
+  both mechanisms already had the exact behavior this phase needed,
+  once actually read rather than assumed.
+
+**Verified via a new `LCU_VERIFY_FARMING_CRAFT` headless hook that
+drives real mouse clicks into the real 2x2 grid, not a shortcut around
+it.** Grants 3 wheat + 2 planks directly (same synthetic-item-grant
+precedent every prior hook already uses), opens the inventory screen,
+left-clicks to pick up each stack, right-clicks (which places exactly 1
+item per click - confirmed by reading `inventory_right_click`) into 3
+then 2 separate grid cells, takes each result, and logs the final
+counts. A real headless run confirmed `bread=1 wooden_hoe=1` on both
+`dev-bgfx` and `dev-nobgfx`.
+
+**Real, newly-confirmed data point extending Phase 64's own timing
+caveat: the two build configs run frames at dramatically different
+real-world rates.** Verifying this hook meant re-measuring real
+wall-clock frame rate rather than reusing Phase 64's numbers blind,
+since a stale assumption here would have silently produced a hook that
+times out before its own milestones fire. `dev-nobgfx` ran this
+specific scene at roughly 100,000-250,000 fps; `dev-bgfx` (Noop
+backend, but still doing real per-frame chunk-mesh/texture work
+`dev-nobgfx`'s code path skips) ran the same scene at roughly 5,000-
+5,500 fps - a real ~20-40x difference discovered while calibrating this
+hook's own `LCU_MAX_FRAMES`, not previously documented anywhere broken
+out by build config. `LCU_MAX_FRAMES=1,000,000` reliably covers this
+hook's ~2.8 real elapsed seconds on both configs (confirmed by direct
+runs) and is the number recorded in BUILD_STATUS.md; a smaller count
+tuned to `dev-bgfx`'s own real rate would work too, but one shared,
+generously-sized number that works on both configs is simpler to
+document and re-run than two separate ones.
+
+**Alternatives considered:** making quick-craft track real per-item
+counts instead of a deduped type list - rejected above as real
+regression risk to already-working recipes for a mechanism that was
+always documented as a 1-of-each-only simplification; inventing a
+`game:stick` item purely to make the hoe recipe match real Minecraft's
+own 2-stick-2-plank shape - rejected as real, disproportionate scope
+for a single recipe when nothing else in the project has ever needed a
+stick; a stone-hoe recipe - rejected as the brief's own "optional", and
+there's no real tool-tier concept yet for a stone vs. wood hoe to
+meaningfully differ by; testing the new recipes only via a targeted
+unit test against `RecipeRegistry` directly (bypassing the real UI
+click path) - rejected as weaker evidence than driving the actual
+player-facing interaction, and this project's own established pattern
+(`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`) already favors real
+click-driven headless verification for grid crafting.

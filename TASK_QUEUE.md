@@ -2642,6 +2642,43 @@ dedicated `LCU_MAX_FRAMES=100000` run (not the standard 60-frame
 sweep) - see DECISIONS.md for the real, newly-discovered timing
 caveat this uncovered about the project's own established convention.
 
+## Phase 65 — Farming processing (bread, hoe recipes)
+
+- [x] Real `ShapelessRecipe`: 3x `game:wheat` -> 1x `game:bread` (the
+  brief's own literal "3 Weizen -> 1 Brot"; `game:bread` has existed
+  since Phase 51 with no real survival obtain path until now).
+- [x] Real, minimal `ShapelessRecipe`: 2x `game:planks` -> 1x `game:
+  wooden_hoe` (documented simplification of real Minecraft's own
+  2-stick-2-plank shape - no `game:stick` item exists in this project;
+  see DECISIONS.md for why inventing one for a single recipe was
+  rejected). No stone-hoe recipe (brief's own "optional", no real
+  tool-tier concept yet).
+- [x] Real, documented discovery: the Phase 23 quick-craft shortcut
+  (`Action::Craft`) cannot match either new recipe (it dedupes held
+  items to one of each distinct type); both recipes work correctly
+  through the real, already-existing 2x2 inventory-screen and 3x3
+  workbench grids instead, once each ingredient occupies its own cell.
+  Corrected two stale doc comments that no longer matched real
+  behavior once these recipes existed.
+- [x] New `LCU_VERIFY_FARMING_CRAFT` headless hook: grants 3 wheat + 2
+  planks, drives real mouse clicks (pickup, place-1-per-cell x3 then
+  x2, take result, stow) through both recipes back to back, logs final
+  counts - confirmed `bread=1 wooden_hoe=1` on both build configs.
+
+`ctest` 646/646 (bgfx) / 638/638 (non-bgfx) - unchanged from Phase 64;
+no new unit tests needed since `RecipeRegistry` and the real click-
+handling code were already fully tested, and this phase only adds data
+(recipe registrations) exercised by the new headless hook.
+
+Honestly scoped: quick-craft still can't reach either new recipe (see
+above and DECISIONS.md) - a real, accepted limitation of that
+Phase-23-era shortcut, not fixed here to avoid regressing the existing
+1-of-each recipes it already correctly serves. Calibrating the new
+verify hook's own `LCU_MAX_FRAMES` also newly confirmed a real ~20-40x
+per-frame wall-clock cost difference between `dev-bgfx` and `dev-
+nobgfx` on this specific scene - see DECISIONS.md and PROJECT_STATE.md
+Known Limitations.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

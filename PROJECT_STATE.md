@@ -93,9 +93,14 @@ mechanism no block uses yet)**, and **Phase 64 (real farming: `game:
 farmland`/`game:wheat` with 8 real growth stages, real procedural
 growth-stage textures, a real per-random-tick growth system gated on
 light and calibrated to +1 stage per real in-game day, real till/
-plant/harvest interactions, and real harvest drops)** are done - see
-TASK_QUEUE.md for per-phase detail as each of the remaining
-2 phases lands. See
+plant/harvest interactions, and real harvest drops)**, and **Phase 65
+(real farming-processing recipes: 3x `game:wheat` -> `game:bread` and
+2x `game:planks` -> a minimal `game:wooden_hoe`, both verified through
+the real 2x2/3x3 crafting grid via a new click-driven headless hook,
+plus the real discovery and documentation that the older Phase-23
+quick-craft shortcut structurally can't represent either recipe)** are
+done - see TASK_QUEUE.md for per-phase detail as each of the remaining
+1 phase lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2636,6 +2641,27 @@ None currently tracked.
   see DECISIONS.md). `LCU_VERIFY_FARMING` itself was confirmed for real
   with a dedicated, much higher frame count instead (see BUILD_STATUS.
   md for the exact command).
+- Phase 65's two new recipes (3 wheat -> bread, 2 planks -> wooden_hoe)
+  **cannot be crafted via the Phase 23 "quick-craft" shortcut**
+  (`Action::Craft`) — that shortcut dedupes held items down to one of
+  each distinct type before querying `RecipeRegistry`, so it
+  structurally cannot represent a recipe needing more than one of the
+  same item, no matter how much wheat/planks are held. Both recipes
+  work correctly through the real 2x2 inventory-screen grid and 3x3
+  workbench grid instead (place each unit into its own cell, same as a
+  real player would) — confirmed via a new `LCU_VERIFY_FARMING_CRAFT`
+  headless hook driving real mouse clicks. See DECISIONS.md for the
+  full reasoning. The wooden-hoe recipe is also a real, documented
+  simplification of Minecraft's own 2-stick-2-plank shape (2 planks
+  alone) since no `game:stick` item exists anywhere in this project.
+  Separately, re-measuring real per-frame wall-clock cost while
+  calibrating this hook's own `LCU_MAX_FRAMES` found the `dev-bgfx` and
+  `dev-nobgfx` build configs run the same scene at roughly a 20-40x
+  different real fps (bgfx much slower, even against the Noop backend,
+  since it still does real per-frame chunk-mesh/texture work the
+  non-bgfx path skips) — a real, newly-confirmed data point extending
+  Phase 64's own timing caveat above, not previously broken out by
+  build config anywhere in this project's docs.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment
