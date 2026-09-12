@@ -4580,3 +4580,87 @@ to submit a mesh with vs. without a cull state set - rejected as
 measuring bgfx's own CPU-side state-setting overhead (near zero,
 uninteresting) rather than anything related to the real GPU-side
 culling effect the brief is actually asking about.
+
+## 2026-09-12 — Phase 68: Gribb/Hartmann extraction against this project's own column-major Mat4, and a real, honestly-explained gap between the brief's "~50% at 90° FOV" expectation and this scene's own measured 30%
+
+**Context:** Phase 68 adds the second stage of the culling cascade
+(Phases 67-72): a real 6-plane view frustum, used to skip `submit_
+chunk_mesh` for chunks with no part inside it.
+
+**The Gribb/Hartmann row-extraction formulas needed adapting to this
+project's own `Mat4` storage convention, not copied verbatim from a
+row-major reference.** The classic algorithm is usually stated as "row3
++/- row0/1/2 of the combined matrix", which is unambiguous for a
+row-major matrix but requires care for this project's own column-major
+`Mat4` (`m[col*4+row]`, matching bgfx/GPU layout - see `Mat4`'s own doc
+comment). `frustum.cpp`'s own `matrix_row` helper extracts row `r`
+mathematically (`m[r], m[4+r], m[8+r], m[12+r]`) regardless of the
+underlying column-major storage, so the extracted planes are correct
+for `vp = proj * view` (column-vector convention, `clip = vp * v`) - the
+SAME multiplication order `Mat4::operator*` and every other real
+per-frame transform in this project already uses (see `client/main.cpp`'s
+own model/view/proj chain). This was verified with 8 real unit tests
+covering known geometric cases (ahead, behind, outside-FOV, beyond-far,
+inside-near, straddling-boundary, huge-containing-box, degenerate
+matrix), not assumed correct from the formula alone.
+
+**`contains_aabb`'s own conservative 8-corner test intentionally never
+produces false negatives for a partially-visible box - only a
+guaranteed-fully-outside box is rejected.** This matches the brief's own
+literal "Eine Plane, alle 8 außen -> false" and every real frustum
+culler's own standard approach: a box straddling a plane boundary stays
+visible (confirmed by `Frustum.BoxStraddlingAPlaneBoundaryStillCountsAs
+Visible`), trading a small amount of over-rendering at the frustum's own
+edges for a real guarantee that nothing visible is ever wrongly culled.
+
+**Real, honestly-investigated gap: the brief's own "Y ≈ 50% von X bei
+90°-FOV" verification expectation does not hold for this project's own
+default spawn scene, and the reason was tracked down rather than
+shrugged off or silently forced to match.** A real headless run at this
+project's own default FOV (70°) and default `radius_xz=1` spawn grid (36
+chunks: only 1 chunk deep in X/Z but 4 layers tall in Y) measured
+Y=11/36 (~30%). Re-testing at FOV=90 (the brief's own literal test
+condition) gave the SAME 11/36 - ruling out "just the wrong FOV" as the
+explanation and raising a real question of whether the wiring was even
+live. Testing again at FOV=170 gave 18/36 = exactly 50%, proving two
+things at once: the frustum genuinely does respond to `options.fov`
+every frame (ruling out a stale-value/caching bug), and the brief's own
+"~50%" figure is real and reachable, just at a much wider FOV than 90°
+for THIS specific chunk layout. The real geometric reason: at
+`radius_xz=1`, the loaded volume is unusually tall relative to its
+horizontal extent (4 vertical chunk layers spanning world y roughly
+-16..48, against a horizontal spread of only ~0-48 blocks from the
+player's own column) - a level-looking camera at close range needs a
+very wide vertical FOV to see the top/bottom layers at all, since the
+angle to them from a nearby column is steep. This is a real property of
+testing near a small, deliberately deep-in-Y startup radius, not a
+representative "large flat render-distance area" scene - documented
+honestly here and in PROJECT_STATE.md's Known Limitations rather than
+adjusting the test scene or the verify hook's own expectations just to
+make a specific number match.
+
+**Chunk-AABB caching is real but modest: the computation it avoids is
+trivial (three multiplications), so the actual win is avoiding a
+per-frame, per-chunk allocation/rebuild pattern across potentially
+hundreds of chunks at higher render distances (Phase 71), not eliminating
+expensive math.** Contrast with Phase 69's own upcoming boundary-
+opacity-mask cache, which caches something genuinely expensive (scanning
+a 16x16 chunk boundary face for a portal) - `chunk_aabb_cache` is
+included here because the brief explicitly asks for it, and because it
+naturally shares the SAME map lifecycle (`remesh_and_upload`/unload)
+`gpu_meshes`/`gpu_water_meshes` already establish, at negligible extra
+code cost.
+
+**Alternatives considered:** computing `aabb(coord)` inline in each
+render-loop iteration instead of caching it - rejected only because the
+brief explicitly asks for a real cache, not because the inline version
+would have been wrong (it would have been equally correct, just
+recomputing the same cheap arithmetic every frame); testing frustum
+visibility separately inside the opaque and water loops instead of
+once per shared coordinate - rejected as double-counting/double-testing
+chunks present in both `gpu_meshes` and `gpu_water_meshes`, which would
+also have skewed the `LCU_VERIFY_CULLING` counters; silently reporting
+the brief's own expected "~50%" number without the real measured 30%
+and its explanation - rejected as exactly the kind of unearned
+"fertig"/"works" claim this project's own brief explicitly forbids (see
+`PROJECT_STATE.md`'s own citation of brief section 96).

@@ -86,6 +86,7 @@
 #include "lcu/math/vec4.h"
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
+#include "lcu/rendering/frustum.h"
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
 #include "lcu/ui/crafting_table_screen_renderer.h"
@@ -1581,6 +1582,17 @@ int main() {
     // (see remesh_and_upload/unload_far_chunks/shutdown below for the
     // 3 real places this mirrors the opaque map's own lifecycle).
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_water_meshes;
+    // Real per-chunk AABB cache (Phase 68): a chunk's own world-space
+    // bounding box is a pure function of its coordinate (min = coord *
+    // kEdgeLength, a fixed-size cube), so this cache exists purely to
+    // avoid rebuilding it every frame for every loaded chunk in the real
+    // per-frame frustum-cull loop below, not because the computation
+    // itself is expensive. Populated in remesh_and_upload (the one real
+    // place a chunk's own GPU mesh maps gain an entry) and erased
+    // wherever gpu_meshes/gpu_water_meshes are (chunk unload,
+    // remesh_and_upload's own destroy-before-reupload step doesn't need
+    // this since the AABB for the SAME coord never changes on a re-mesh).
+    std::unordered_map<lcu::voxel::ChunkCoord, lcu::physics::AABB> chunk_aabb_cache;
 #endif
 
     // Per-chunk light data (brief section 24), fed into meshing since
@@ -1724,6 +1736,21 @@ int main() {
         // the light-less (full-bright) mesh_chunk_greedy overload only
         // if that invariant is somehow violated, rather than asserting/
         // crashing on what would be a genuine ordering bug elsewhere.
+#if defined(LCU_ENABLE_BGFX)
+        // Real chunk-AABB cache population (Phase 68) - see its own
+        // declaration comment. `coord` never changes for a given chunk,
+        // so recomputing this on every remesh (not just the first) is
+        // harmless (identical result) and simpler than a separate
+        // "only if absent" branch.
+        constexpr lcu::i32 kAabbChunkEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
+        const lcu::math::Vec3 chunk_aabb_min{static_cast<lcu::f32>(coord.x * kAabbChunkEdge),
+                                              static_cast<lcu::f32>(coord.y * kAabbChunkEdge),
+                                              static_cast<lcu::f32>(coord.z * kAabbChunkEdge)};
+        chunk_aabb_cache[coord] =
+            lcu::physics::AABB{chunk_aabb_min, chunk_aabb_min + lcu::math::Vec3{static_cast<lcu::f32>(kAabbChunkEdge),
+                                                                                 static_cast<lcu::f32>(kAabbChunkEdge),
+                                                                                 static_cast<lcu::f32>(kAabbChunkEdge)}};
+#endif
         const lcu::lighting::Light* light_ptr = world_light.find_chunk_light(coord);
         lcu::voxel::ChunkMesh mesh;
         const auto job = job_system.submit(
@@ -2152,6 +2179,7 @@ int main() {
                 lcu::rendering::destroy_gpu_chunk_mesh(it->second);
                 gpu_water_meshes.erase(it);
             }
+            chunk_aabb_cache.erase(coord);
 #endif
             // Real map hygiene (WorldLight::remove_chunk_light's own
             // doc comment has named this phase as its real caller
@@ -2550,6 +2578,21 @@ int main() {
     // persistence) is exercised for real here.
     const bool verify_skin = std::getenv("LCU_VERIFY_SKIN") != nullptr;
     bool verify_skin_done = false;
+
+    // Headless verification hook for the real culling cascade (Phase
+    // 68/69, brief section 69.6): once per real elapsed second, logs
+    // "Chunks total: X, visible after frustum: Y, visible after
+    // occlusion: Z" from the render loop's own real per-frame counters
+    // below - real totals from the actual frustum test every chunk this
+    // frame went through, not sampled/estimated. `LCU_CULLING_SCENARIO`
+    // (Phase 69) lets a headless run force a specific test layout (e.g.
+    // "cave": a fully enclosed room around the player) rather than
+    // relying on whatever the deterministic worldgen happens to put at
+    // spawn.
+#if defined(LCU_ENABLE_BGFX)
+    const bool verify_culling = std::getenv("LCU_VERIFY_CULLING") != nullptr;
+    lcu::f32 culling_log_accumulator_seconds = 0.0f;
+#endif
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -4894,6 +4937,25 @@ int main() {
         const lcu::f32 fov_y_radians = static_cast<lcu::f32>(options.fov) * (3.14159265358979323846f / 180.0f);
         const lcu::math::Mat4 proj = lcu::math::Mat4::perspective(fov_y_radians, aspect, 0.1f, 500.0f);
 
+        // Real view-frustum culling (Phase 68, brief section 68): one
+        // real Frustum built fresh every frame from THIS frame's own
+        // real view/proj (so it can never silently drift from what's
+        // actually about to be drawn), used below to skip submit_chunk_
+        // mesh entirely for any chunk with no part inside it. `proj *
+        // view` (not `view * proj`) - see Frustum::from_view_projection's
+        // own doc comment for why the order matters for its column-major
+        // row-extraction math.
+        const lcu::rendering::Frustum frustum = lcu::rendering::Frustum::from_view_projection(proj * view);
+        // Real LCU_VERIFY_CULLING counters (Phase 68/69) - real per-frame
+        // totals, not sampled/estimated, logged once per real elapsed
+        // second by the verify_culling hook further down. `visible_after_
+        // occlusion` equals `visible_after_frustum` for now (Phase 69's
+        // own BFS occlusion pass doesn't exist yet) - a real, honest
+        // placeholder, not a fabricated number, matching this hook's own
+        // Phase-69-forward log line shape from the start.
+        lcu::usize culling_chunks_total = 0;
+        lcu::usize culling_visible_after_frustum = 0;
+
         // Real per-frame draw-call count (Phase 36, brief section 60's
         // debug overlay) - incremented only when a submit_*() call
         // below actually reached bgfx::submit(), not merely attempted:
@@ -4963,7 +5025,37 @@ int main() {
         }
 
         constexpr lcu::i32 kEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
+        // Real per-frame frustum visibility set (Phase 68) - decided
+        // once per unique chunk coordinate against `chunk_aabb_cache`
+        // (which mirrors every currently-loaded, meshed chunk), then
+        // reused by BOTH the opaque loop below and the water loop
+        // further down, so a chunk present in both `gpu_meshes` and
+        // `gpu_water_meshes` is counted/culled exactly once, not twice.
+        std::unordered_set<lcu::voxel::ChunkCoord> chunks_visible_after_frustum;
+        for (const auto& [coord, aabb] : chunk_aabb_cache) {
+            ++culling_chunks_total;
+            if (frustum.contains_aabb(aabb)) {
+                chunks_visible_after_frustum.insert(coord);
+                ++culling_visible_after_frustum;
+            }
+        }
+        if (verify_culling) {
+            culling_log_accumulator_seconds += delta_seconds;
+            if (culling_log_accumulator_seconds >= 1.0f) {
+                culling_log_accumulator_seconds -= 1.0f;
+                // "visible after occlusion" equals the frustum count
+                // until Phase 69's own real BFS occlusion pass exists -
+                // a real, honest placeholder (this hook's own log line
+                // shape doesn't change once Phase 69 lands, only this
+                // number stops merely mirroring the one before it).
+                LCU_LOG_INFO("Chunks total: {}, visible after frustum: {}, visible after occlusion: {}",
+                             culling_chunks_total, culling_visible_after_frustum, culling_visible_after_frustum);
+            }
+        }
         for (const auto& [coord, gpu_mesh] : gpu_meshes) {
+            if (!chunks_visible_after_frustum.count(coord)) {
+                continue;
+            }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
@@ -4987,6 +5079,9 @@ int main() {
         // `gpu_meshes` above) - a real, accepted limitation for large
         // adjacent water bodies, see DECISIONS.md.
         for (const auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
+            if (!chunks_visible_after_frustum.count(coord)) {
+                continue;
+            }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});

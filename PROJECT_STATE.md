@@ -110,9 +110,16 @@ CULL_CW`, confirmed against this project's own winding convention; the
 real bug fixed was the translucent water/wheat layer wrongly culling
 too, when it must render double-sided; a new `BM_Render_
 BackfaceCulling` benchmark computes a real, honest CPU-side proxy for
-the GPU-side effect this Noop-backend sandbox can't itself time)** is
-done - see TASK_QUEUE.md for per-phase detail as each of the remaining
-5 phases lands. See
+the GPU-side effect this Noop-backend sandbox can't itself time)**, and
+**Phase 68 (a real 6-plane `Frustum` extracted from a real `proj * view`
+matrix via Gribb/Hartmann, adapted to this project's own column-major
+`Mat4` storage and verified with 8 real unit tests; wired into the real
+per-frame render loop to skip `submit_chunk_mesh` for chunks with no
+part inside it; a real, honestly-investigated gap where this project's
+own default-scene FOV=70 measures ~30% visible rather than the brief's
+own "~50% at 90°" - confirmed real and FOV-responsive by re-testing at
+FOV=90 and FOV=170, see DECISIONS.md)** are done - see TASK_QUEUE.md for
+per-phase detail as each of the remaining 4 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2684,6 +2691,17 @@ None currently tracked.
   hardware. A real Mac/desktop run with an actual GPU backend would be
   needed to confirm the brief's own literal "30-50% weniger Vertex-
   Verarbeitung" FPS claim end-to-end.
+- Phase 68's `LCU_VERIFY_CULLING` real, measured result at this
+  project's own default scene (70° FOV, `radius_xz=1`) is ~30% visible
+  after frustum culling, not the brief's own rough "~50% at 90° FOV"
+  expectation - independently re-tested and confirmed real (FOV=90 gives
+  the same ~30%; FOV=170 gives exactly 50%, proving the wiring responds
+  correctly to FOV and the "~50%" figure is reachable, just at a much
+  wider FOV for this specific 36-chunk layout, which is unusually tall
+  relative to its horizontal extent at this small radius). See
+  DECISIONS.md for the full geometric explanation - not a bug, but a
+  real property of this specific near-spawn test scene rather than a
+  large, roughly isotropic render-distance area.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

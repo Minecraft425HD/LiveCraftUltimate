@@ -2,7 +2,47 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68
+
+### Phase 68
+
+- **Real view-frustum culling**: new `engine/rendering/frustum.{h,cpp}` -
+  a real 6-plane `Frustum` extracted from a real `proj * view` matrix
+  via the standard Gribb/Hartmann method (row3 +/- row0/1/2, each
+  normalized), with `contains_aabb` doing a real conservative 8-corner-
+  vs-6-plane test (only rejects a box when one plane has ALL 8 corners
+  outside it). Wired into `client/main.cpp`'s real per-frame render
+  loop: a `Frustum` is built fresh every frame from that frame's own
+  real view/proj, and both the opaque and water chunk-submission loops
+  now skip `submit_chunk_mesh` entirely for any chunk with no part
+  inside it (decided once per unique chunk coordinate, shared between
+  both loops so a chunk present in both never gets tested or counted
+  twice).
+- New real per-chunk `chunk_aabb_cache` (a chunk's own bounding box is a
+  pure, cheap function of its coordinate, but real code shouldn't
+  rebuild it every frame for every loaded chunk regardless) - populated
+  in `remesh_and_upload` (the one real place a chunk's GPU mesh maps
+  gain an entry), erased on chunk unload.
+- New `LCU_VERIFY_CULLING=1` headless hook: logs "Chunks total: X,
+  visible after frustum: Y, visible after occlusion: Z" once per real
+  elapsed second (Z mirrors Y until Phase 69's real occlusion pass
+  exists - a real, honest placeholder). Real, measured, honestly-
+  explained result: at this project's own default 70° FOV and the
+  default radius_xz=1 spawn grid (36 chunks, only 1 chunk deep
+  horizontally but 4 layers tall), Y=11/36 (~30%), not the brief's own
+  rough "~50% at 90° FOV" expectation - re-tested at FOV=90 (still
+  11/36, confirming the shortfall isn't simply "wrong FOV") and at
+  FOV=170 (18/36 = exactly 50%, confirming the wiring genuinely
+  responds to FOV and the "~50%" figure is real, just at a much wider
+  FOV for this specific tight/vertically-heavy 36-chunk layout - see
+  DECISIONS.md for the full geometric reasoning).
+- 8 new `Frustum.*` unit tests (ahead/behind/outside-FOV/beyond-far/
+  inside-near/straddling-boundary/huge-containing-box/degenerate-matrix
+  cases) - all passing, confirming the extraction math directly, not
+  just its net effect in a real run.
+- `ctest` 654/654 (bgfx, up from 646) / 638/638 (non-bgfx, unchanged -
+  `engine/rendering` and its new `Frustum` only build under
+  `LCU_ENABLE_BGFX`). Full regression sweep clean on both configs.
 
 ### Phase 67
 

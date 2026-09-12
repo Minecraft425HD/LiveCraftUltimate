@@ -2722,6 +2722,40 @@ literal "30-50% weniger Vertex-Verarbeitung" FPS claim against directly
 sixth user-directed program (Phases 67-72: culling cascade + LOD +
 render distance).
 
+## Phase 68 — Frustum culling
+
+- [x] New `engine/rendering/frustum.{h,cpp}`: `Plane` struct, `Frustum`
+  class with `from_view_projection` (real Gribb/Hartmann row3 +/-
+  row0/1/2 extraction, adapted to this project's own column-major
+  `Mat4` storage) and `contains_aabb` (conservative 8-corner-vs-6-plane
+  test).
+- [x] Wired into `client/main.cpp`'s real per-frame render loop: a
+  `Frustum` built fresh every frame from that frame's own real `proj *
+  view`, both the opaque and water chunk loops now skip a chunk with no
+  part inside it - decided once per unique coordinate, shared between
+  both loops.
+- [x] New real `chunk_aabb_cache` (populated in `remesh_and_upload`,
+  erased on chunk unload) - a chunk's own bounding box is a pure,
+  cheap function of its coordinate, but the brief explicitly asks for a
+  real cache, and it shares the same lifecycle `gpu_meshes` already has.
+- [x] New `LCU_VERIFY_CULLING=1` hook: logs "Chunks total: X, visible
+  after frustum: Y, visible after occlusion: Z" once per real elapsed
+  second (Z mirrors Y until Phase 69's own occlusion pass exists).
+- [x] 8 new `Frustum.*` unit tests on known geometric cases.
+
+`ctest` 654/654 (bgfx, up from 646) / 638/638 (non-bgfx, unchanged -
+`Frustum` only builds under `LCU_ENABLE_BGFX`). Full regression sweep
+(`LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_WORKBENCH`) clean on both configs.
+
+Honestly scoped: a real headless run measured Y=11/36 (~30%) at this
+project's own default 70° FOV and `radius_xz=1` spawn grid, not the
+brief's own rough "~50% at 90° FOV" expectation - investigated, not
+ignored: re-tested at FOV=90 (same ~30%, ruling out "wrong FOV") and
+FOV=170 (exactly 50%, proving the wiring is genuinely live and the
+"~50%" figure is real for a wider FOV on this specific tall/narrow
+36-chunk layout) - see DECISIONS.md for the full geometric reasoning
+and PROJECT_STATE.md Known Limitations.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
