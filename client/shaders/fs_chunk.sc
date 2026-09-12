@@ -39,6 +39,15 @@ uniform vec4 u_tileStep;
 // x,y = the per-tile inset offset itself (half a texel, in normalized
 // UV), added to each tile's own grid origin below.
 uniform vec4 u_tileInset;
+// Phase 76 - LCU_DEBUG_UV diagnostic mode (see Renderer::set_debug_uv's
+// own doc comment): x=1 replaces the real output below with a raw
+// visualization of this fragment's own fract(v_texcoord0) - R=fract(u),
+// G=fract(v), B=0 - so a real screenshot shows directly whether the
+// tiling math below produces the expected once-per-block checker
+// pattern, independent of atlas sampling/lighting/noise. Off (0) unless
+// a caller explicitly turns it on; never affects the real rendering
+// path otherwise.
+uniform vec4 u_debugUv;
 SAMPLER2D(s_atlas, 0);
 
 // A standard cheap 3D hash (Dave Hoskins-style) - deterministic per
@@ -97,5 +106,8 @@ void main()
     // composites see-through instead of being silently discarded.
     float base_alpha = mix(1.0, tex_sample.a, u_useTextures.x);
     vec3 final_color = base_color * light * noise_factor;
-    gl_FragColor = vec4(final_color, base_alpha);
+    // Phase 76 - LCU_DEBUG_UV: local_uv above IS fract(v_texcoord0) (see
+    // its own definition), so this reuses it rather than recomputing.
+    vec4 debug_color = vec4(local_uv, 0.0, 1.0);
+    gl_FragColor = mix(vec4(final_color, base_alpha), debug_color, u_debugUv.x);
 }

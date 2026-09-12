@@ -2,7 +2,140 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73 / Phase 74 / Phase 75
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73 / Phase 74 / Phase 75 / Phase 76
+
+### Phase 76
+
+Pure diagnosis, no fix - this round's own brief is explicit that two
+prior fix attempts on the UV-stretching symptom failed, so the goal here
+is only to isolate WHERE the bug lives, hand the evidence to a second
+opinion, and fix in a later session. This round's own brief was also
+self-labeled "Phase 75", the third collision with an already-used name
+(rollback, Phase 74, Phase 75) - tracked as Phase 76 here.
+
+#### Diagnose-Schritt 1+3: `LCU_VERIFY_MINIMAL_QUAD=1`
+
+A new headless hook (`client/main.cpp`, same `#if defined(LCU_ENABLE_
+BGFX)` gating as `LCU_DUMP_TEXTURES`/`LCU_VERIFY_UV`) that goes one real
+layer deeper than either prior investigation: instead of re-reading
+`MeshVertex` fields through C++ (which could theoretically diverge from
+what the GPU is actually told to fetch), it dumps the literal raw bytes
+of a real vertex buffer alongside the real, currently-registered
+`bgfx::VertexLayout`'s own attribute offsets.
+
+- Exposed `lcu::rendering::chunk_mesh_vertex_layout()` (previously
+  anonymous-namespace-private to `chunk_mesh_upload.cpp`) via `chunk_
+  mesh_upload.h` so the diagnostic hook queries the exact real layout
+  `upload_chunk_mesh_layer` already uses for every GPU buffer, rather
+  than a second hand-written copy that could silently drift out of sync.
+- **Real captured result**: `layout.getStride()=48` matches `sizeof(
+  MeshVertex)=48` exactly, and every one of `getOffset(Position/Normal/
+  TexCoord0/Color0/TexCoord1/Color1)` matches this project's own real,
+  compiler-computed `offsetof(MeshVertex, ...)` byte for byte (0/12/24/
+  32/44/46) - the GPU vertex layout and the C++ struct it's built from
+  are provably in agreement, not just assumed to be.
+- **Real hex-dumped vertex bytes** (single isolated grass block, top
+  face, vertex 0): decoded by hand against the offsets above - position
+  `(5,6,5)` (top of the block at (5,5,5)), normal `(0,1,0)`, UV `(0,0)`,
+  color `(0.3,0.7,0.2)` (`grass_def.color` exactly), `texture_index=0`
+  (`TileId::GrassTop`), `light=0xFF` - every single byte in the real GPU
+  buffer already matches its own expected real value.
+- 2x2 grass field placed directly beside a 2x2 stone field in the same
+  chunk/mesh (different `block_id` already refuses to merge across the
+  boundary - no gap needed): grass's real quad is `texture_index=0`,
+  stone's is `texture_index=3`, each with its own real, non-overlapping
+  `tile_uv_range` (`[0.001953,0.001953]..[0.060547,0.060547]` for grass,
+  `[0.189453,0.001953]..[0.248047,0.060547]` for stone) and a real
+  mid-tile `atlas_uv` computed with the exact same constants `Renderer::
+  submit_chunk_mesh` sets - both land inside their own correct,
+  distinct atlas cell.
+- **Conclusion**: no byte-level, offset, or per-tile atlas-math bug
+  found - the raw GPU buffer contents are correct at every field this
+  hook can observe.
+
+#### Diagnose-Schritt 2: shader review
+
+`client/shaders/vs_chunk.sc`, `fs_chunk.sc`, and `varying.def.sc` read in
+full end to end (all three are already quoted verbatim in this repo's
+own source tree, not reproduced a second time here):
+
+- `vs_chunk.sc`'s `$input` reads `a_position, a_normal, a_texcoord0,
+  a_color0, a_texcoord1, a_color1` - bgfx binds vertex attributes by
+  semantic (`POSITION`/`NORMAL`/`TEXCOORD0`/...), not by textual
+  declaration order, so this doesn't need to match `chunk_mesh_vertex_
+  layout()`'s own `.add()` call order byte-for-byte to be correct - and
+  Diagnose-Schritt 1 above already confirms the real offsets agree
+  regardless.
+- `v_texcoord0` IS declared in `varying.def.sc` (`vec2 v_texcoord0 :
+  TEXCOORD0`), IS set in the vertex shader (`v_texcoord0 = a_texcoord0;`,
+  a pure passthrough), and IS read in the fragment shader.
+- `fract(v_texcoord0)` is exactly what's used (`vec2 local_uv =
+  fract(v_texcoord0);`) - not some other wrapping function.
+- `texture_index` reaches the fragment shader via `v_texindex` (`float v_
+  texindex : TEXCOORD2`, fed from `a_texcoord1`/`MeshVertex::
+  texture_index`) as a normal (non-`flat`) interpolated varying, not a
+  flat one. Noted as imprecise style rather than a functional bug: every
+  one of a quad's 4 vertices already carries the identical texture_index
+  value (`ChunkMeshLayer::add_quad` passes one shared value to all 4),
+  so barycentric interpolation of 4 identical values is exact regardless
+  of the `flat` qualifier - `w0*idx + w1*idx + w2*idx = idx*(w0+w1+w2) =
+  idx` for any real barycentric weights.
+- **One real, specific, unverifiable-here hypothesis worth flagging**:
+  `a_texcoord1`/`a_color1` are Uint16/Uint8 vertex attributes declared
+  non-normalized in `chunk_mesh_vertex_layout()`, but read as plain
+  `float` in `varying.def.sc`. Standard GPU vertex-fetch hardware
+  converts a non-normalized integer attribute to its numeric float value
+  (e.g. raw `3` -> `3.0`) when the shader declares a float input, not a
+  bit-reinterpretation - this is the behavior every backend is expected
+  to implement identically, and it's exactly what the real hex-dumped
+  bytes above already show working correctly for the Noop backend. This
+  sandbox has no real GPU to cross-check a Metal-specific difference in
+  this exact conversion, if one somehow existed - **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**, listed for completeness, not because
+  anything here suggests it's actually the bug.
+
+#### Diagnose-Schritt 4: `LCU_DEBUG_UV=1` shader visualization mode
+
+- New `u_debugUv` uniform (`Renderer::set_debug_uv`, `engine/rendering/
+  {include/lcu/rendering,src}/renderer.{h,cpp}`) and matching branch in
+  `fs_chunk.sc`: when enabled, `gl_FragColor` becomes `vec4(fract(v_
+  texcoord0), 0, 1)` instead of the real textured/lit output - `R=fract(
+  u)`, `G=fract(v)`, `B=0`. A correctly-tiling merged quad should show a
+  real per-block checker/gradient pattern repeating every 16 screen
+  pixels' worth of one block; a broken one would show a single flat
+  color or a gradient stretched across the whole quad instead.
+  `client/main.cpp` wires `LCU_DEBUG_UV=1` to `renderer.set_debug_uv(
+  true)` right after `renderer.init()` succeeds, logging one confirmation
+  line. Off (0) by default, zero effect on the real rendering path
+  otherwise - purely a diagnostic toggle, matching `u_useTextures`'s own
+  existing "uniform costs nothing when off" precedent.
+- **Verification possible in this sandbox**: the mode enables cleanly and
+  runs a real headless loop without error (`SDL_VIDEODRIVER=dummy
+  LCU_DEBUG_UV=1`, 30 frames, clean exit) - bgfx's `Noop` backend never
+  actually rasterizes a fragment, so no pixel can be inspected here.
+  **NOT VERIFIED — ENVIRONMENT LIMITATION** for the actual visual result;
+  this is exactly the real Mac screenshot the brief asks the user to
+  capture next.
+
+#### Abschluss
+
+No fix applied anywhere this phase, per the brief's own explicit "kein
+Fix bis alle drei[/vier] Diagnose-Schritte fertig sind" rule. Every real,
+capturable layer (mesher UVs, per-face texture assignment, raw GPU vertex
+bytes, VertexLayout offsets, per-tile atlas math for two different
+textures in the same draw) has now been checked twice, independently,
+with real captured data both times, and found correct both times. The
+`LCU_DEBUG_UV=1` screenshot is now the one remaining piece of evidence
+this sandbox genuinely cannot produce itself.
+
+- **Verification**: `ctest` 646/646 (non-bgfx) / 653/654 (bgfx; the one
+  failure, `SkinCatalogTest.AddFromFileAcceptsAReal64x64FileAndSelects
+  ItImmediately`, is the same pre-existing parallel-race flake class
+  already documented in Phase 74/75 - reconfirmed 12/12 green on a
+  serial re-run of the whole `SkinCatalogTest` suite, unrelated to this
+  phase's changes, which touch none of `SkinCatalog`'s own code). Real
+  headless runs of both new hooks (`LCU_VERIFY_MINIMAL_QUAD=1`,
+  `LCU_DEBUG_UV=1`) complete cleanly on the bgfx build.
 
 ### Phase 75
 

@@ -4,8 +4,6 @@
 
 namespace lcu::rendering {
 
-namespace {
-
 bgfx::VertexLayout chunk_mesh_vertex_layout() {
     bgfx::VertexLayout layout;
     layout.begin()
@@ -45,8 +43,6 @@ bgfx::VertexLayout chunk_mesh_vertex_layout() {
     LCU_ASSERT(layout.getStride() == sizeof(voxel::MeshVertex));
     return layout;
 }
-
-}  // namespace
 
 GpuChunkMesh upload_chunk_mesh_layer(const voxel::ChunkMeshLayer& layer) {
     GpuChunkMesh result;

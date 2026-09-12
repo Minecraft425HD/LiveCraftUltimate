@@ -7,6 +7,15 @@
 
 namespace lcu::rendering {
 
+// The real bgfx::VertexLayout describing voxel::MeshVertex's exact byte
+// layout - the same one upload_chunk_mesh_layer builds internally (see
+// its own .cpp), exposed here (Phase 76) so a diagnostic caller can query
+// its real, currently-registered attribute offsets/stride (bgfx::
+// VertexLayout::getOffset/getStride) instead of hand-deriving them or
+// duplicating this construction into a second copy that could silently
+// drift out of sync with the one actually used to build GPU buffers.
+bgfx::VertexLayout chunk_mesh_vertex_layout();
+
 // GPU-side vertex/index buffers for one ChunkMeshLayer's worth of
 // geometry. A plain data holder rather than an RAII type: bgfx resource
 // creation/destruction has frame-boundary semantics (destroying a buffer

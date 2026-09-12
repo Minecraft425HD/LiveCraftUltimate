@@ -1,6 +1,9 @@
 #include <chrono>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -921,6 +924,14 @@ int main() {
     if (!renderer.init(renderer_desc)) {
         LCU_LOG_ERROR("Renderer init failed, exiting");
         return 1;
+    }
+    // Phase 76 - LCU_DEBUG_UV=1 turns on fs_chunk.sc's raw fract(v_
+    // texcoord0) visualization (see Renderer::set_debug_uv's own doc
+    // comment) so a real Mac screenshot can show the fragment shader's
+    // own UV-tiling math directly, independent of atlas sampling.
+    if (std::getenv("LCU_DEBUG_UV") != nullptr) {
+        renderer.set_debug_uv(true);
+        LCU_LOG_INFO("LCU_DEBUG_UV: fragment shader now outputs fract(v_texcoord0) as (R=u, G=v, B=0)");
     }
 #endif
 
@@ -2077,6 +2088,136 @@ int main() {
         dump_layer(uv_mesh.transparent, "transparent", quad_index);
         dump_layer(uv_mesh.water, "water", quad_index);
         LCU_LOG_INFO("LCU_VERIFY_UV: dumped {} quad(s) from a 16x16 flat grass slab", quad_index);
+    }
+
+    // LCU_VERIFY_MINIMAL_QUAD (Phase 76) - two prior real-data
+    // investigations (LCU_VERIFY_UV above, plus a from-scratch UV
+    // regression test) already found the mesher's own UVs, per-face
+    // texture assignment, and the shader's atlas math all correct - this
+    // hook goes one real layer deeper than either: it dumps the actual
+    // raw GPU vertex BYTES (not the MeshVertex fields re-read through
+    // C++, which could theoretically diverge from what bgfx::VertexLayout
+    // actually tells the GPU to fetch) alongside that same real,
+    // currently-registered VertexLayout's own attribute offsets, so a
+    // byte-level mismatch between "what MeshVertex contains" and "what
+    // the GPU is told to read" would show up directly instead of being
+    // assumed away. Pure diagnosis - no fix applied this phase.
+    if (std::getenv("LCU_VERIFY_MINIMAL_QUAD") != nullptr) {
+        using lcu::voxel::MeshVertex;
+
+        // Step 1: the real, currently-registered VertexLayout (the exact
+        // same one upload_chunk_mesh_layer uses to build GPU buffers -
+        // see lcu::rendering::chunk_mesh_vertex_layout's own doc comment
+        // on why this is exposed rather than duplicated here) next to
+        // this same struct's own real, compiler-computed field offsets -
+        // if these two ever disagree, that IS a real bug, byte for byte.
+        const bgfx::VertexLayout layout = lcu::rendering::chunk_mesh_vertex_layout();
+        LCU_LOG_INFO(
+            "[MINIMAL-QUAD] VertexLayout stride={} (sizeof(MeshVertex)={}) offsets: Position={} "
+            "(offsetof=0) Normal={} (offsetof={}) TexCoord0/uv={} (offsetof={}) Color0={} (offsetof={}) "
+            "TexCoord1/texture_index={} (offsetof={}) Color1/light={} (offsetof={})",
+            layout.getStride(), sizeof(MeshVertex), layout.getOffset(bgfx::Attrib::Position),
+            layout.getOffset(bgfx::Attrib::Normal), offsetof(MeshVertex, normal),
+            layout.getOffset(bgfx::Attrib::TexCoord0), offsetof(MeshVertex, u), layout.getOffset(bgfx::Attrib::Color0),
+            offsetof(MeshVertex, color), layout.getOffset(bgfx::Attrib::TexCoord1),
+            offsetof(MeshVertex, texture_index), layout.getOffset(bgfx::Attrib::Color1),
+            offsetof(MeshVertex, light));
+
+        const auto hex_dump_vertex = [](const MeshVertex& vertex, const char* label) {
+            const auto* bytes = reinterpret_cast<const lcu::u8*>(&vertex);
+            std::string hex;
+            for (std::size_t i = 0; i < sizeof(MeshVertex); ++i) {
+                char buf[4];
+                std::snprintf(buf, sizeof(buf), "%02x ", bytes[i]);
+                hex += buf;
+            }
+            LCU_LOG_INFO("[MINIMAL-QUAD] {} raw bytes (offset 0..{}): {}", label, sizeof(MeshVertex) - 1, hex);
+        };
+
+        const auto tile_rect_for = [](lcu::u32 texture_index) {
+            const lcu::assets::TileUvRange range = lcu::assets::tile_uv_range(texture_index);
+            return range;
+        };
+
+        // A single isolated grass block: mesh_chunk_greedy produces 6
+        // real unmerged 1x1 faces for this (see the existing
+        // GreedyMesher.SingleIsolatedBlockProducesSixUnmergedFaces unit
+        // test) - the simplest possible real quad, NxM=1x1.
+        {
+            lcu::voxel::Chunk single_chunk;
+            single_chunk.set_block(5, 5, 5, grass_id);
+            const lcu::voxel::ChunkMesh single_mesh = lcu::voxel::mesh_chunk_greedy(single_chunk, block_registry);
+            for (std::size_t base = 0; base + 3 < single_mesh.opaque.vertices.size(); base += 4) {
+                const MeshVertex& v0 = single_mesh.opaque.vertices[base];
+                if (v0.normal.y > 0.99f) {  // the top face only
+                    const MeshVertex& v1 = single_mesh.opaque.vertices[base + 1];
+                    const MeshVertex& v2 = single_mesh.opaque.vertices[base + 2];
+                    const MeshVertex& v3 = single_mesh.opaque.vertices[base + 3];
+                    LCU_LOG_INFO(
+                        "[MINIMAL-QUAD] 1x1 top quad: texture_index={}, uvs=[(u={:.3f},v={:.3f}), "
+                        "(u={:.3f},v={:.3f}), (u={:.3f},v={:.3f}), (u={:.3f},v={:.3f})]",
+                        static_cast<unsigned>(v0.texture_index), v0.u, v0.v, v1.u, v1.v, v2.u, v2.v, v3.u, v3.v);
+                    hex_dump_vertex(v0, "1x1 top quad vertex 0");
+                    hex_dump_vertex(v1, "1x1 top quad vertex 1");
+                    hex_dump_vertex(v2, "1x1 top quad vertex 2");
+                    hex_dump_vertex(v3, "1x1 top quad vertex 3");
+                    const lcu::assets::TileUvRange rect = tile_rect_for(v0.texture_index);
+                    LCU_LOG_INFO(
+                        "[MINIMAL-QUAD] 1x1 top quad real tile_uv_range({}): u0={:.6f} v0={:.6f} u1={:.6f} "
+                        "v1={:.6f}",
+                        static_cast<unsigned>(v0.texture_index), rect.u0, rect.v0, rect.u1, rect.v1);
+                    break;
+                }
+            }
+        }
+
+        // Step 3: a 2x2 grass field directly beside a 2x2 stone field -
+        // different block_id already refuses to merge across the
+        // boundary (merges_with), so this produces one real 2x2 grass
+        // top quad and one real 2x2 stone top quad, each with its own
+        // real texture_index, in the SAME mesh/SAME draw call.
+        {
+            lcu::voxel::Chunk pair_chunk;
+            for (lcu::u32 x = 0; x < 2; ++x) {
+                for (lcu::u32 z = 0; z < 2; ++z) {
+                    pair_chunk.set_block(x, 0, z, grass_id);
+                    pair_chunk.set_block(x + 2, 0, z, stone_id);
+                }
+            }
+            const lcu::voxel::ChunkMesh pair_mesh = lcu::voxel::mesh_chunk_greedy(pair_chunk, block_registry);
+            for (std::size_t base = 0; base + 3 < pair_mesh.opaque.vertices.size(); base += 4) {
+                const MeshVertex& v0 = pair_mesh.opaque.vertices[base];
+                if (v0.normal.y <= 0.99f) {
+                    continue;  // only the two top quads
+                }
+                const MeshVertex& v1 = pair_mesh.opaque.vertices[base + 1];
+                const MeshVertex& v3 = pair_mesh.opaque.vertices[base + 3];
+                const char* which = v0.texture_index == static_cast<lcu::u16>(lcu::assets::TileId::GrassTop)
+                                        ? "grass"
+                                        : "stone";
+                const lcu::assets::TileUvRange rect = tile_rect_for(v0.texture_index);
+                // Middle of one repeated tile (local UV 0.5,0.5 after the
+                // shader's own fract()) - the real atlas_uv the fragment
+                // shader would compute for that point, using the exact
+                // same real constants Renderer::submit_chunk_mesh sets.
+                constexpr lcu::f32 kPitch = 1.0f / static_cast<lcu::f32>(lcu::assets::kTilesPerRow);
+                constexpr lcu::f32 kInset = lcu::assets::kTileInsetTexels / static_cast<lcu::f32>(lcu::assets::kAtlasSize);
+                constexpr lcu::f32 kInner = (static_cast<lcu::f32>(lcu::assets::kTileSize) -
+                                              2.0f * lcu::assets::kTileInsetTexels) /
+                                             static_cast<lcu::f32>(lcu::assets::kAtlasSize);
+                const lcu::f32 tx = static_cast<lcu::f32>(v0.texture_index % lcu::assets::kTilesPerRow);
+                const lcu::f32 ty = static_cast<lcu::f32>(v0.texture_index / lcu::assets::kTilesPerRow);
+                const lcu::f32 atlas_u = tx * kPitch + kInset + 0.5f * kInner;
+                const lcu::f32 atlas_v = ty * kPitch + kInset + 0.5f * kInner;
+                LCU_LOG_INFO(
+                    "[MINIMAL-QUAD] 2x2 {} top quad: texture_index={}, NxM={}x{}, uvs=[(u={:.3f},v={:.3f}) "
+                    ".. (u={:.3f},v={:.3f})], tile_uv_range=[{:.6f},{:.6f}]..[{:.6f},{:.6f}], "
+                    "mid_atlas_uv=({:.6f},{:.6f})",
+                    which, static_cast<unsigned>(v0.texture_index), v1.u - v0.u, v3.v - v0.v, v0.u, v0.v, v1.u, v3.v,
+                    rect.u0, rect.v0, rect.u1, rect.v1, atlas_u, atlas_v);
+            }
+        }
+        LCU_LOG_INFO("LCU_VERIFY_MINIMAL_QUAD: diagnosis dump complete");
     }
 
     // Real player-skin texture is created further below, right after

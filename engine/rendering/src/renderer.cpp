@@ -55,6 +55,9 @@ Renderer::~Renderer() {
         if (bgfx::isValid(tile_inset_uniform_)) {
             bgfx::destroy(tile_inset_uniform_);
         }
+        if (bgfx::isValid(debug_uv_uniform_)) {
+            bgfx::destroy(debug_uv_uniform_);
+        }
         if (bgfx::isValid(atlas_sampler_)) {
             bgfx::destroy(atlas_sampler_);
         }
@@ -132,6 +135,14 @@ bool Renderer::init(const RendererDesc& desc) {
     use_textures_uniform_ = bgfx::createUniform("u_useTextures", bgfx::UniformType::Vec4);
     tile_step_uniform_ = bgfx::createUniform("u_tileStep", bgfx::UniformType::Vec4);
     tile_inset_uniform_ = bgfx::createUniform("u_tileInset", bgfx::UniformType::Vec4);
+    // Phase 76 - LCU_DEBUG_UV diagnostic mode (see set_debug_uv's own doc
+    // comment and fs_chunk.sc's own use of this uniform): x=1 replaces
+    // the real texture/color sample with a raw visualization of
+    // fract(v_texcoord0) so a real screenshot can show whether the
+    // fragment shader's own tiling math produces the expected per-block
+    // checker pattern - not a rendering feature, purely a diagnostic one,
+    // off (0) by default.
+    debug_uv_uniform_ = bgfx::createUniform("u_debugUv", bgfx::UniformType::Vec4);
     atlas_sampler_ = bgfx::createUniform("s_atlas", bgfx::UniformType::Sampler);
 
     // Phase 57 - the font atlas's own separate sampler slot (bound to
@@ -230,6 +241,10 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
         bgfx::setUniform(tile_inset_uniform_, tile_inset_value);
         bgfx::setTexture(0, atlas_sampler_, atlas_texture);
     }
+
+    // Phase 76 - see set_debug_uv's own doc comment.
+    const f32 debug_uv_value[4] = {debug_uv_enabled_ ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    bgfx::setUniform(debug_uv_uniform_, debug_uv_value);
 
     bgfx::submit(0, program);
 }

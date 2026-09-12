@@ -124,6 +124,19 @@ class Renderer : public NonCopyable {
                             const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
                             bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, bool alpha_blend = false);
 
+    // Phase 76 - LCU_DEBUG_UV diagnostic mode: when enabled, every
+    // subsequent submit_chunk_mesh draw replaces its real texture/color
+    // output with vec4(fract(v_texcoord0), 0, 1) (see fs_chunk.sc) - a
+    // raw visualization of the fragment shader's own UV-tiling math, so a
+    // real screenshot can show directly whether merged quads produce the
+    // expected once-per-block checker pattern or something else (a
+    // gradient, a single flat color) without needing to reason about the
+    // real atlas/lighting/noise pipeline at the same time. Purely
+    // diagnostic - never enabled by default, never affects the real
+    // rendering path unless explicitly turned on by a caller (see
+    // client/main.cpp's own LCU_DEBUG_UV env var check).
+    void set_debug_uv(bool enabled) { debug_uv_enabled_ = enabled; }
+
     // Real GPU texture upload (Phase 53) - `pixels` is a tightly packed
     // RGBA8 buffer, `width*height*4` bytes, row-major top-to-bottom (the
     // same layout engine/assets::procedural_textures - Phase 54 - packs
@@ -387,6 +400,9 @@ class Renderer : public NonCopyable {
     bgfx::UniformHandle use_textures_uniform_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle tile_step_uniform_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle tile_inset_uniform_ = BGFX_INVALID_HANDLE;
+    // Phase 76 - see set_debug_uv's own doc comment.
+    bgfx::UniformHandle debug_uv_uniform_ = BGFX_INVALID_HANDLE;
+    bool debug_uv_enabled_ = false;
     bgfx::UniformHandle atlas_sampler_ = BGFX_INVALID_HANDLE;
     // Phase 57 - the font atlas's own separate sampler slot (slot 1,
     // `s_font` - `atlas_sampler_` above stays slot 0, `s_atlas`), same
