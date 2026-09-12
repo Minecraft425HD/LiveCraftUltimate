@@ -4680,3 +4680,89 @@ a real per-second report - rejected, since a one-shot log would miss
 the case where the click never registers at all (nothing to log an
 edge from) and would give strictly less information than the
 continuous per-second state dump.
+
+## 2026-09-12 — Phase 74 Bugs 3+4: water depth-writes instead of camera-distance sorting, and a per-face light rule instead of a per-voxel one
+
+**Context:** a second real Mac test reported two related water-
+rendering symptoms: visible rectangular edges between neighboring water
+chunks (Bug 3), and water looking different (darker, "layered") at
+different depths/locations (Bug 4).
+
+**Bug 3 decision - write depth instead of sorting:** the bug report
+offered two options: sort every water chunk by camera distance every
+frame, or make the water pass write depth (`BGFX_STATE_WRITE_Z`) and
+accept less "correct" transparency. Chose the second: reading `Renderer
+::submit_chunk_mesh` showed the water state never wrote depth at all
+(`BGFX_STATE_WRITE_RGB | WRITE_A | DEPTH_TEST_LESS | CULL_CW |
+BLEND_ALPHA`, no `WRITE_Z`), so two chunks' worth of water, exactly
+coplanar at a flat sea-level surface, blended purely by draw order at
+every shared pixel - whichever chunk's own `submit_chunk_mesh` call
+happened to run later for that frame "won" the pixel outright, a real,
+visible seam at the exact chunk boundary. Adding `WRITE_Z` means the
+shared depth buffer - the same one opaque terrain already relies on for
+correct compositing - now also governs water-vs-water and water-vs-
+terrain ordering, regardless of submission order, with zero new
+per-frame sorting work. A real, accepted trade-off: two OVERLAPPING
+(not just adjacent) translucent water surfaces at different depths
+along the same view ray would now show only the nearer one at full
+depth-tested opacity rather than blending both together - correct for
+this project's own single-depth-of-water-per-column world (no
+underwater-under-more-water compositing exists to lose), and explicitly
+the trade the bug report's own "kein Sortieren nötig, weniger
+transparent" phrasing already anticipated and accepted.
+
+**Real regression found and fixed while touching this same code:** the
+water state still had `BGFX_STATE_CULL_CW` set - literally the same bug
+Phase 67 found and fixed (see that phase's own now-reverted CHANGELOG/
+DECISIONS entries, lost along with the rest of Phases 67-72 by Phase
+73's `git reset --hard`). Not one of this round's 8 reported bugs on
+its own, but directly on the line already being edited for Bug 3 -
+leaving a previously-identified, previously-fixed defect sitting right
+next to a deliberate edit would be an act of active neglect, not
+"staying in scope." Removed again.
+
+**Bug 4 decision - a real per-face-type light rule, not per-voxel
+color:** the bug report offered a fixed-color option ("einen festen
+Farbwert und Alpha ... unabhängig vom Voxel-Licht") and a "only the top
+surface, not every layer" option, plus a specific greedy-mesher
+hypothesis. Investigated the greedy-mesher hypothesis first via direct
+code reading and the existing test suite: `mesh_chunk_greedy` already
+never draws a face between two adjacent water cells of the identical
+type (the `!neg_opaque && !pos_opaque && neg_id != pos_id` branch's own
+`neg_id != pos_id` condition rules this out structurally, independently
+confirmed by the existing `TwoAdjacentTransparentBlocksProduceNoOpaque
+Faces`/`TwoDifferentTransparentBlocksProduceARealFaceBetweenThem`
+tests) - so "faces between every layer" was never actually happening,
+and no mesher change was needed for that specific claim. The REAL cause
+was the OTHER hypothesis: a water face's light came from "the air cell
+it's actually exposed to" (Phase 28's rule, written for opaque terrain
+against air, and never special-cased when Phase 61 gave water its own
+transparent-vs-transparent face-generation branch) - so a water surface
+under open sky and one bordering a dark cave air pocket rendered at
+wildly different brightness, which is what actually reads as "water
+looks different at different depths/locations" across a real scene with
+water in more than one place. Fixed by keeping `MaskCell::light` at its
+own real `0xFF` default for any transparent (water) face instead of
+running the per-voxel sampling - real terrain is completely unaffected,
+since the sampling is skipped only when `registry.definition_of(cell.
+block_id).is_transparent` is true, which is never the case for the
+opaque-vs-air branch's own faces.
+
+**Alternatives considered:** sorting water chunks by camera distance
+every frame (Bug 3) - rejected in favor of the simpler depth-write
+approach per the bug report's own offered fallback, and because
+distance-sorting a growing number of loaded water chunks every frame is
+real, avoidable per-frame CPU cost the depth-write approach doesn't
+need at all; a literal fixed RGB color override for water (Bug 4,
+bypassing the atlas texture/tint entirely) - rejected as unnecessary:
+forcing the LIGHT multiplier to a constant already makes water's own
+existing (textured) appearance uniform everywhere, which is what the
+reported symptom actually needed fixed, without discarding the real
+texture-based look Phase 53-61 already built; changing `smooth_corner_
+light`'s own diagonal-neighbor averaging to also special-case
+transparency at a water surface's own edge (where a water MaskCell's
+fixed 0xFF and a neighboring opaque cell's real sampled light would
+blend at a shared corner) - deferred as a real, but minor, cosmetic
+edge case (only visible at the literal boundary pixel of a water body)
+well outside this bug's own reported symptom, not worth the added
+complexity for an effect nobody reported.

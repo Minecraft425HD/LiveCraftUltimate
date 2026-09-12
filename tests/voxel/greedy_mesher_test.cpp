@@ -499,6 +499,39 @@ TEST(GreedyMesher, FacePicksUpSmoothedLightFromTheExposedAirCellNotTheSolidBlock
     EXPECT_TRUE(found_positive_x_face);
 }
 
+TEST(GreedyMesher, TransparentBlockFaceIgnoresRealPerVoxelLightAndStaysFullBright) {
+    // Real Bug 4 fix (Phase 74 Mac test: "water gets darker with depth /
+    // you can see layers") - unlike the equivalent opaque-block test
+    // above (FacePicksUpSmoothedLightFromTheExposedAirCellNotTheSolid
+    // Block), a transparent (water) face must NOT pick up the real,
+    // possibly very dark, light of whichever air cell it happens to
+    // border - it always renders at MaskCell's own full-bright 0xFF
+    // default, so two water surfaces bordering differently-lit air
+    // pockets (open sky vs. a dark cave) look identical instead of
+    // wildly different.
+    BlockRegistry registry;
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, water);
+
+    lcu::lighting::Light light;
+    // Deliberately very dark - if this leaked into the water face's own
+    // light, it would fail the full-bright expectation below.
+    light.set_sky_light(6, 5, 5, 0);
+    light.set_block_light(6, 5, 5, 0);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry, light);
+
+    bool found_positive_x_face = false;
+    for (const auto& vertex : mesh.water.vertices) {
+        if (lcu::math::dot(vertex.normal, lcu::math::Vec3{1.0f, 0.0f, 0.0f}) > 0.99f) {
+            found_positive_x_face = true;
+            EXPECT_EQ(vertex.light, static_cast<lcu::u8>(0xFF));
+        }
+    }
+    EXPECT_TRUE(found_positive_x_face);
+}
+
 TEST(GreedyMesher, DifferentlyLitCoplanarFacesMergeAndBlendSmoothly) {
     // Phase 33 supersedes Phase 28's merge rule: same block type, same
     // plane, same facing merges regardless of light difference (merging

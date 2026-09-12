@@ -182,14 +182,31 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     bgfx::setTransform(model.data());
     bgfx::setVertexBuffer(0, mesh.vertex_buffer);
     bgfx::setIndexBuffer(mesh.index_buffer);
-    // Real translucent state (Phase 61) - see this function's own doc
-    // comment in renderer.h. BGFX_STATE_DEFAULT (every opaque chunk
-    // draw, unchanged) already includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/
-    // MSAA; the alpha-blended path keeps depth TESTING (so water still
-    // correctly hides behind solid terrain) but drops depth WRITING and
-    // adds real alpha blending instead.
-    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
-                                      BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA)
+    // Real translucent state (Phase 61, real Bug 3 fix - Phase 74 Mac
+    // test: "visible rectangles/edges between neighboring water
+    // chunks") - see this function's own doc comment in renderer.h.
+    // BGFX_STATE_DEFAULT (every opaque chunk draw, unchanged) already
+    // includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/MSAA.
+    //
+    // The alpha-blended path now WRITES depth too (BGFX_STATE_WRITE_Z),
+    // unlike the original Phase 61 version: without it, two neighboring
+    // water chunks' quads blend purely in submission order at any pixel
+    // where they'd otherwise be exactly coplanar (a flat sea-level
+    // surface spanning a chunk boundary is exactly this case) - whichever
+    // chunk's draw call happened to run later "wins" that pixel outright
+    // instead of the two chunks' identical depth values letting the
+    // depth test treat them identically, producing a real, visible seam
+    // at every chunk boundary. Writing depth here means water chunks
+    // submitted in ANY order now composite consistently against each
+    // other and against solid terrain via the same shared depth buffer
+    // the opaque pass already relies on - the real, simpler alternative
+    // to sorting every water chunk by camera distance every frame.
+    //
+    // BGFX_STATE_CULL_CW is deliberately NOT included here (unlike
+    // BGFX_STATE_DEFAULT) - water must render double-sided (looking up
+    // at a water surface from underneath must still show it).
+    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z |
+                                      BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_BLEND_ALPHA)
                                    : BGFX_STATE_DEFAULT;
     bgfx::setState(state);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};

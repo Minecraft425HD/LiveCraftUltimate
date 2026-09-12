@@ -99,16 +99,27 @@ class Renderer : public NonCopyable {
     // with what's actually bound).
     // `alpha_blend` (Phase 61, defaulted false so every existing opaque
     // call site is unaffected): when true, real `BGFX_STATE_BLEND_ALPHA`
-    // replaces the opaque depth-writing state, and depth WRITE is turned
-    // off (real per-frame translucent geometry shouldn't leave a lasting
-    // mark in the depth buffer, the same reasoning every other real
-    // alpha-blended primitive in this class already gives) - the one
-    // real caller this exists for is a chunk's own `ChunkMesh::water`
-    // layer (see lcu::voxel::mesh_chunk_greedy's real transparent-layer
-    // routing), submitted as a SEPARATE `submit_chunk_mesh` call from
-    // the opaque layer, after it, so translucent water composites over
-    // already-drawn solid terrain (see client/main.cpp's own real
-    // per-frame two-pass draw loop).
+    // replaces the opaque depth-writing state - the one real caller this
+    // exists for is a chunk's own `ChunkMesh::water` layer (see
+    // lcu::voxel::mesh_chunk_greedy's real transparent-layer routing),
+    // submitted as a SEPARATE `submit_chunk_mesh` call from the opaque
+    // layer, after it, so translucent water composites over already-
+    // drawn solid terrain (see client/main.cpp's own real per-frame
+    // two-pass draw loop).
+    //
+    // Unlike this function's own original Phase 61 version, this path
+    // DOES write depth (real Phase 74 Bug 3 fix): without it, two
+    // neighboring water chunks' quads (exactly coplanar at a flat sea-
+    // level surface spanning a chunk boundary) blend purely by
+    // submission order at each pixel, producing a real, visible seam at
+    // every chunk boundary - writing depth here lets the shared depth
+    // buffer make water chunks composite consistently regardless of
+    // submission order, the same way opaque terrain already does,
+    // without needing to sort every water chunk by camera distance every
+    // frame. Also unlike `BGFX_STATE_DEFAULT`, `BGFX_STATE_CULL_CW` is
+    // deliberately NOT part of this state - water must render double-
+    // sided (looking up at a surface from underneath must still show
+    // it).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
                             const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
                             bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, bool alpha_blend = false);

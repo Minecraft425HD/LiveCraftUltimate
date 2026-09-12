@@ -305,27 +305,48 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                             cell.positive_facing = false;
                         }
 
-                        // Shade the face by the light in the air cell
-                        // it's actually exposed to (the non-opaque side),
-                        // not the solid block's own cell (light is only
-                        // ever propagated into non-opaque cells - see
-                        // engine/lighting/propagation.h). At plane==0/N
-                        // the air side can fall off this chunk's own
-                        // LightStorage bounds (a genuine chunk-boundary
-                        // face, already rendered "as if air" by
-                        // block_or_air above) - cross-chunk light isn't
-                        // computed yet (Phase 29-31), so this keeps the
-                        // Phase 26/27-era full-bright default rather than
-                        // reading out of bounds or guessing dark.
-                        const i32* air_pos = solid_is_neg ? pos_pos : neg_pos;
-                        if (air_pos[0] >= 0 && air_pos[0] < N && air_pos[1] >= 0 && air_pos[1] < N &&
-                            air_pos[2] >= 0 && air_pos[2] < N) {
-                            const u32 ax = static_cast<u32>(air_pos[0]);
-                            const u32 ay = static_cast<u32>(air_pos[1]);
-                            const u32 az = static_cast<u32>(air_pos[2]);
-                            const u8 sky = light.sky_light(ax, ay, az);
-                            const u8 block = light.block_light(ax, ay, az);
-                            cell.light = static_cast<u8>((block << 4) | sky);
+                        // Real Bug 4 fix (Phase 74 Mac test: "water gets
+                        // darker with depth / you can see layers") - a
+                        // real, transparent substance quad (today, only
+                        // water) keeps MaskCell's own full-bright 0xFF
+                        // default instead of the real per-voxel light
+                        // sampling below. The removed sampling used
+                        // whichever air cell THIS ONE water/air boundary
+                        // happened to border - a water surface next to
+                        // open sky (full light) and one bordering a dark
+                        // cave air pocket (near-zero light) rendered at
+                        // wildly different brightness, a real, visible
+                        // "different depths/locations look different"
+                        // artifact, not the intended flat, consistently-
+                        // colored water look. Real terrain (the
+                        // `neg_opaque != pos_opaque` branch above,
+                        // opaque-vs-air) is unaffected - only this
+                        // transparent-vs-transparent branch's own quads
+                        // route through here with a transparent
+                        // `cell.block_id`.
+                        if (!registry.definition_of(cell.block_id).is_transparent) {
+                            // Shade the face by the light in the air cell
+                            // it's actually exposed to (the non-opaque side),
+                            // not the solid block's own cell (light is only
+                            // ever propagated into non-opaque cells - see
+                            // engine/lighting/propagation.h). At plane==0/N
+                            // the air side can fall off this chunk's own
+                            // LightStorage bounds (a genuine chunk-boundary
+                            // face, already rendered "as if air" by
+                            // block_or_air above) - cross-chunk light isn't
+                            // computed yet (Phase 29-31), so this keeps the
+                            // Phase 26/27-era full-bright default rather than
+                            // reading out of bounds or guessing dark.
+                            const i32* air_pos = solid_is_neg ? pos_pos : neg_pos;
+                            if (air_pos[0] >= 0 && air_pos[0] < N && air_pos[1] >= 0 && air_pos[1] < N &&
+                                air_pos[2] >= 0 && air_pos[2] < N) {
+                                const u32 ax = static_cast<u32>(air_pos[0]);
+                                const u32 ay = static_cast<u32>(air_pos[1]);
+                                const u32 az = static_cast<u32>(air_pos[2]);
+                                const u8 sky = light.sky_light(ax, ay, az);
+                                const u8 block = light.block_light(ax, ay, az);
+                                cell.light = static_cast<u8>((block << 4) | sky);
+                            }
                         }
                     }
                     mask[n++] = cell;

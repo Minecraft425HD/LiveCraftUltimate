@@ -77,6 +77,67 @@ already committed under that name, so this work is Phase 74 here.
   reported symptom; needs a real Mac run with `LCU_DEBUG_INPUT=1` to
   make further progress.
 
+#### Bug 3: visible edges between neighboring water chunks
+
+- **Symptom**: clear rectangular seams at the boundary between adjacent
+  water chunks.
+- **Root cause**: `Renderer::submit_chunk_mesh`'s alpha-blended (water)
+  state never included `BGFX_STATE_WRITE_Z` - two neighboring water
+  chunks' quads (exactly coplanar at a flat sea-level surface spanning
+  a chunk boundary) blended purely by submission order at each pixel
+  instead of via the shared depth buffer, so whichever chunk happened
+  to draw later "won" that pixel outright - a real, visible seam
+  exactly at chunk boundaries.
+- **Also found while touching this same code**: the alpha-blended state
+  still had `BGFX_STATE_CULL_CW` set - the exact backface-culling bug
+  Phase 67 found and fixed (water needs double-sided rendering, e.g.
+  looking up at a surface from underwater), silently reintroduced when
+  Phase 73 rolled the entire Phases 67-72 program back. Not one of this
+  round's 8 reported bugs, but directly adjacent to the code already
+  being edited for Bug 3, and leaving a previously-fixed regression in
+  place while touching its exact line would be irresponsible.
+- **Fix**: `Renderer::submit_chunk_mesh`'s water-layer state now writes
+  depth (`BGFX_STATE_WRITE_Z`) and does not cull backfaces - the
+  simpler alternative to sorting every water chunk by camera distance
+  every frame, per the bug report's own offered fallback.
+- **Verification**: full `ctest` green both configs (no dedicated
+  visual test possible - no real GPU/display in this sandbox, see
+  BUILD_STATUS.md); a real headless `LCU_MAX_FRAMES=60` run clean on
+  both. Real visual confirmation (no more seams) needs the next real
+  Mac run - **NOT VERIFIED — ENVIRONMENT LIMITATION** for the visual
+  result itself, though the state change is a real, deliberate,
+  documented one.
+
+#### Bug 4: water gets darker with depth / visible "layers"
+
+- **Symptom**: water looks different at different depths/locations;
+  screenshots show visible horizontal bands.
+- **Root cause, confirmed by reading `mesh_chunk_greedy`**: a
+  transparent (water) face's light was sampled from whichever specific
+  air cell it happened to border (Phase 28's own "shade by the exposed
+  air cell" rule, written for opaque terrain and never special-cased
+  for water) - a water surface under open sky (full light) and one
+  bordering a dark cave air pocket (near-zero light) rendered at wildly
+  different brightness. The OTHER hypothesis in the bug report (faces
+  generated between stacked water layers, not just at the surface) was
+  investigated and found already NOT the case - `mesh_chunk_greedy`
+  already only ever draws a water face at a real water/air boundary
+  (two adjacent water cells of the same type never draw a face between
+  them - confirmed by existing tests `TwoAdjacentTransparentBlocksProduce
+  NoOpaqueFaces`/`TwoDifferentTransparentBlocksProduceARealFaceBetween
+  Them`), so no greedy-mesher change was needed for that part.
+- **Fix**: a transparent (water) face's `MaskCell::light` now stays at
+  its own real, full-bright `0xFF` default instead of sampling the
+  adjacent air cell's real light - real terrain (the opaque-vs-air
+  branch) is completely unaffected, only the transparent-vs-transparent
+  branch's own quads route through the new fixed-light path.
+- **Verification**: new `GreedyMesher.TransparentBlockFaceIgnoresRealPer
+  VoxelLightAndStaysFullBright` unit test - a water block next to a
+  deliberately pitch-black air cell (sky=0, block=0) still renders at
+  `0xFF`, unlike the existing opaque-block equivalent test which
+  correctly does pick up real light. `ctest` 645/645 (non-bgfx, up by 1)
+  / 649/649 (bgfx, up by 1).
+
 ### Phase 73
 
 - **Rollback of Phases 67-72** (backface/frustum/occlusion culling,
