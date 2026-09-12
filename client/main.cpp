@@ -2268,7 +2268,18 @@ int main() {
     crop_growth_config.day_length_seconds = kDayLengthSeconds;
     LCU_LOG_INFO("Farming: fast_farming={}", fast_farming);
 
-    if (!networked) {
+    // Real Bug 8 fix (Phase 74 Mac test): NPCs are a real, working
+    // feature (Phase 59) but not something this round of Mac testing
+    // wants live yet ("kommen viel später") - default OFF, opt back in
+    // with LCU_SPAWN_NPCS=1. The entity/AI-wander/NpcAppearance systems
+    // themselves are untouched, only this one spawn call site is gated,
+    // so re-enabling is a real, single-flag flip whenever NPCs are
+    // wanted again, not a revert of removed code.
+    const bool spawn_npcs = [] {
+        const char* value = std::getenv("LCU_SPAWN_NPCS");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    if (!networked && spawn_npcs) {
         for (int i = 0; i < kAiEntityCount; ++i) {
             const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
             const lcu::math::Vec3 spawn_pos{static_cast<lcu::f32>(spawn_column.x) + 4.0f * std::cos(angle),

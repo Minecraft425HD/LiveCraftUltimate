@@ -552,14 +552,27 @@ int main(int argc, char** argv) {
     // section 64's "server-authoritative state").
     lcu::ecs::Registry entity_registry;
     std::mt19937 ai_rng(kAiRngSeed);
-    for (int i = 0; i < kAiEntityCount; ++i) {
-        const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
-        const lcu::math::Vec3 spawn_pos{static_cast<lcu::f32>(spawn_column.x) + 4.0f * std::cos(angle),
-                                         static_cast<lcu::f32>(spawn_ground_y),
-                                         static_cast<lcu::f32>(spawn_column.z) + 4.0f * std::sin(angle)};
-        const lcu::ecs::EntityId entity = entity_registry.create_entity();
-        entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
-        entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+    // Real Bug 8 fix (Phase 74 Mac test): same real, single-flag gate
+    // VoxelClient's own spawn call site now has - NPCs are a real,
+    // working feature (Phase 59) not wanted live for this round of Mac
+    // testing ("kommen viel später"). Default OFF, opt back in with
+    // LCU_SPAWN_NPCS=1 - AIWanderConfig/update_ai_wander below stay
+    // real and correct either way, they simply have nothing to act on
+    // when this is off.
+    const bool spawn_npcs = [] {
+        const char* value = std::getenv("LCU_SPAWN_NPCS");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    if (spawn_npcs) {
+        for (int i = 0; i < kAiEntityCount; ++i) {
+            const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
+            const lcu::math::Vec3 spawn_pos{static_cast<lcu::f32>(spawn_column.x) + 4.0f * std::cos(angle),
+                                             static_cast<lcu::f32>(spawn_ground_y),
+                                             static_cast<lcu::f32>(spawn_column.z) + 4.0f * std::sin(angle)};
+            const lcu::ecs::EntityId entity = entity_registry.create_entity();
+            entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
+            entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+        }
     }
     game::systems::AIWanderConfig ai_wander_config;
     LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());

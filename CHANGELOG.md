@@ -199,6 +199,28 @@ already committed under that name, so this work is Phase 74 here.
   result doesn't, that would newly confirm a real GPU-side (not CPU-
   generator-side) cause worth investigating next.
 
+#### Bug 8: remove NPC spawning for now
+
+- **Requirement**: the 3 wandering AI entities should no longer spawn
+  by default (real content coming back later).
+- **Fix**: both `client/main.cpp`'s single-player spawn loop and
+  `server/main.cpp`'s own real spawn loop are now gated behind a new
+  `LCU_SPAWN_NPCS=1` opt-in (default off) - a single-flag gate around
+  the existing spawn call site, not a removal of any AI/appearance
+  code, so turning NPCs back on later is a one-line flip. Checked
+  `LCU_VERIFY_HUD` for a hardcoded "expects 3 entities" assumption per
+  the brief's own instruction - none exists anywhere in the codebase
+  (the debug overlay's `entity_count` is always a real, dynamic count,
+  never asserted against a fixed number by any test or hook), so no
+  separate adjustment was needed there.
+- **Verification**: real headless runs confirm the exact expected
+  behavior on both client and server: default run logs no "Spawned ...
+  wandering AI entities" line at all (client) / logs "Spawned 0
+  wandering AI entities" (server, whose log line sits outside the new
+  gate); `LCU_SPAWN_NPCS=1` on either restores "Spawned 3 wandering AI
+  entities". `LCU_VERIFY_BREAK_PLACE` and `LCU_VERIFY_HUD` both re-run
+  clean with NPCs off. Full `ctest` clean both configs.
+
 ### Phase 73
 
 - **Rollback of Phases 67-72** (backface/frustum/occlusion culling,
