@@ -64,6 +64,16 @@ void World::load_chunk(voxel::ChunkCoord coord) {
     }
 }
 
+void World::adopt_generated_chunk(voxel::ChunkCoord coord, voxel::Chunk chunk) {
+    if (chunks_.find(coord) != chunks_.end()) {
+        return;
+    }
+    ChunkEntry entry;
+    entry.state = ChunkLifecycleState::Generated;
+    entry.chunk = std::move(chunk);
+    chunks_.emplace(coord, std::move(entry));
+}
+
 const voxel::Chunk* World::chunk_at(voxel::ChunkCoord coord) const {
     const auto it = chunks_.find(coord);
     if (it == chunks_.end() || it->second.state < ChunkLifecycleState::Generated) {

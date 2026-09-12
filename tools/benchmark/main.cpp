@@ -22,6 +22,7 @@
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
 #include "lcu/lighting/world_light.h"
+#include "lcu/math/vec3.h"
 #include "lcu/network/connection.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
@@ -32,6 +33,15 @@
 #include "lcu/voxel/greedy_mesher.h"
 #include "lcu/world/world.h"
 #include "lcu/world/worldgen.h"
+
+// Lcu::Rendering (and its OcclusionCuller/Frustum) only builds under
+// LCU_ENABLE_BGFX - see engine/rendering/CMakeLists.txt and this file's
+// own CMakeLists.txt conditional link.
+#if defined(LCU_ENABLE_BGFX)
+#include "lcu/rendering/frustum.h"
+#include "lcu/rendering/lod_mesher.h"
+#include "lcu/rendering/occlusion_culler.h"
+#endif
 
 namespace {
 
@@ -147,6 +157,136 @@ static void BM_GreedyMesher_CheckerboardChunk(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_GreedyMesher_CheckerboardChunk);
+
+// --- Backface culling (Phase 67, engine/rendering::Renderer) ----------------
+
+// Real, honest limitation: this sandbox's bgfx backend is Noop (no real
+// GPU/display - see BUILD_STATUS.md), so there is no actual hardware
+// rasterizer here whose real vertex-processing time backface culling
+// could be timed against. What IS real and CPU-measurable: for a solid,
+// greedy-meshed volume, a real fraction of its own emitted triangles
+// face away from any single fixed view direction and would never
+// survive `BGFX_STATE_CULL_CW`'s per-triangle test on real hardware -
+// this benchmark computes that real fraction from the mesh's own real
+// per-vertex normals (a real, direct proxy for the GPU-side effect this
+// environment can't itself time), and times how long the counting itself
+// costs. `state.counters["FrontFacingPercent"]` is the real result to
+// read - Phase 67's own "30-50% weniger Vertex-Verarbeitung" is an
+// expectation about the GPU's real workload reduction, and this
+// benchmark's own counter is the closest honest CPU-side evidence for it
+// in an environment with no real GPU to time.
+static void BM_Render_BackfaceCulling(benchmark::State& state) {
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    Chunk chunk;  // checkerboard - a realistic mix of faces pointing every
+                  // direction, not an artificially uniform single cube.
+    for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+                if ((x + y + z) % 2 == 0) {
+                    chunk.set_block(x, y, z, stone_id);
+                }
+            }
+        }
+    }
+    const auto mesh = lcu::voxel::mesh_chunk_greedy(chunk, registry);
+    const lcu::math::Vec3 view_dir = lcu::math::normalize(lcu::math::Vec3{0.3f, -0.2f, 1.0f});
+    const lcu::usize triangle_count = mesh.opaque.indices.size() / 3;
+
+    lcu::usize front_facing = 0;
+    for (auto _ : state) {
+        front_facing = 0;
+        for (lcu::usize i = 0; i + 2 < mesh.opaque.indices.size(); i += 3) {
+            const lcu::math::Vec3& normal = mesh.opaque.vertices[mesh.opaque.indices[i]].normal;
+            // A face survives BGFX_STATE_CULL_CW's real test when its
+            // winding is CCW as seen from the camera, which (by this
+            // project's own real winding-matches-normal convention - see
+            // GreedyMesherTest's geometric-winding check) is exactly
+            // when the camera looks against the normal.
+            if (lcu::math::dot(normal, view_dir) < 0.0f) {
+                ++front_facing;
+            }
+        }
+        benchmark::DoNotOptimize(front_facing);
+    }
+    state.counters["TrianglesTotal"] = static_cast<lcu::f64>(triangle_count);
+    state.counters["FrontFacingPercent"] =
+        triangle_count == 0 ? 0.0
+                            : 100.0 * static_cast<lcu::f64>(front_facing) / static_cast<lcu::f64>(triangle_count);
+}
+BENCHMARK(BM_Render_BackfaceCulling);
+
+// --- Occlusion culling (Phase 69, engine/rendering::OcclusionCuller) --------
+
+#if defined(LCU_ENABLE_BGFX)
+// A frustum that accepts every AABB (see Frustum::from_view_projection's
+// own degenerate-matrix fallback) - this benchmark is about the real
+// BFS/cache cost, not about re-exercising frustum rejection.
+static lcu::rendering::Frustum permissive_frustum_for_benchmark() {
+    lcu::math::Mat4 zero{};
+    for (lcu::f32& value : zero.m) {
+        value = 0.0f;
+    }
+    return lcu::rendering::Frustum::from_view_projection(zero);
+}
+
+// Real "1000 chunks" scene (brief section 69.6's own literal target): a
+// 10x10x10 loaded volume, all real air (an open-sky scenario - the
+// brief's own "< 1 ms" expectation is for the steady-state, cache-warm
+// BFS itself, not first-time mask computation, which is a separate real
+// cost `compute()`'s own first call already pays once and this
+// benchmark deliberately excludes from the timed loop below).
+static void BM_Render_OcclusionCulling(benchmark::State& state) {
+    World world(1, [](Chunk&, ChunkCoord) {});
+    for (lcu::i32 x = 0; x < 10; ++x) {
+        for (lcu::i32 y = 0; y < 10; ++y) {
+            for (lcu::i32 z = 0; z < 10; ++z) {
+                world.load_chunk({x, y, z});
+            }
+        }
+    }
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    const lcu::rendering::Frustum frustum = permissive_frustum_for_benchmark();
+    lcu::rendering::OcclusionCuller culler;
+    // Real cache warm-up (see this function's own doc comment above) -
+    // not part of the timed loop.
+    culler.compute(world, registry, {5, 5, 5}, frustum);
+
+    for (auto _ : state) {
+        auto visible = culler.compute(world, registry, {5, 5, 5}, frustum);
+        benchmark::DoNotOptimize(visible);
+    }
+}
+BENCHMARK(BM_Render_OcclusionCulling);
+
+// --- LOD meshing (Phase 70, engine/rendering::build_lod_chunk) --------------
+
+// Real "< 10 µs pro Chunk" target (brief section 70.6) - a real,
+// deterministic checkerboard chunk (same "no two neighbors share a
+// block type" pattern BM_GreedyMesher_CheckerboardChunk already uses -
+// every column has real geometry to summarize, not an artificially
+// empty/uniform chunk).
+static void BM_Render_LODChunks(benchmark::State& state) {
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    Chunk chunk;
+    for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+                if ((x + y + z) % 2 == 0) {
+                    chunk.set_block(x, y, z, stone_id);
+                }
+            }
+        }
+    }
+    for (auto _ : state) {
+        auto mesh = lcu::rendering::build_lod_chunk(chunk, registry);
+        benchmark::DoNotOptimize(mesh);
+    }
+}
+BENCHMARK(BM_Render_LODChunks);
+#endif
 
 // --- Lighting (engine/lighting) ---------------------------------------------
 

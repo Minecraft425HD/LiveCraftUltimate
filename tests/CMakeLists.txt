@@ -84,7 +84,9 @@ endif()
 # LCU_ENABLE_BGFX both ON) - these tests initialize a real (headless
 # Noop-backend) bgfx context to upload GPU buffers.
 if(TARGET Lcu::Rendering)
-    target_sources(VoxelTests PRIVATE rendering/chunk_mesh_upload_test.cpp rendering/quad_batch_2d_test.cpp)
+    target_sources(VoxelTests PRIVATE rendering/chunk_mesh_upload_test.cpp rendering/quad_batch_2d_test.cpp
+                                       rendering/frustum_test.cpp rendering/occlusion_culler_test.cpp
+                                       rendering/lod_mesher_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Rendering)
 endif()
 

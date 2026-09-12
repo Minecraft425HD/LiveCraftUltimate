@@ -39,6 +39,18 @@ constexpr bgfx::ViewId kSkyViewId = 1;
 // whatever the sky/terrain views already drew.
 constexpr bgfx::ViewId kUi2dViewId = 2;
 
+// Real LOD chunk view (Phase 70, brief section 70.4's own "View-Order
+// 0" for LOD, "View-Order 1" for near-chunk terrain): executed *before*
+// the near-chunk terrain view (view 0) - see init()'s own view_order
+// array - but *after* the sky view (which owns the actual color+depth
+// clear). No clear of its own, real depth WRITE+TEST on, so terrain
+// (drawn afterward, sharing the same depth buffer) correctly overdraws
+// a LOD quad wherever real near geometry is actually in front of it,
+// and vice versa - genuine depth-buffer occlusion, not draw-order
+// alone (the brief's own literal "Depth schreiben, damit Near-Chunks
+// korrekt überdecken").
+constexpr bgfx::ViewId kLodViewId = 3;
+
 }  // namespace
 
 Renderer::~Renderer() {
@@ -111,8 +123,14 @@ bool Renderer::init(const RendererDesc& desc) {
     bgfx::setViewClear(kUi2dViewId, BGFX_CLEAR_NONE, 0x000000ff, 1.0f, 0);
     bgfx::setViewRect(kUi2dViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
 
-    const bgfx::ViewId view_order[] = {kSkyViewId, 0, kUi2dViewId};
-    bgfx::setViewOrder(0, 3, view_order);
+    // LOD view (Phase 70) - no clear of its own either (the sky view
+    // already cleared color+depth; this view just needs to run before
+    // the near-chunk terrain view - see kLodViewId's own comment).
+    bgfx::setViewClear(kLodViewId, BGFX_CLEAR_NONE, 0x000000ff, 1.0f, 0);
+    bgfx::setViewRect(kLodViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+
+    const bgfx::ViewId view_order[] = {kSkyViewId, kLodViewId, 0, kUi2dViewId};
+    bgfx::setViewOrder(0, 4, view_order);
 
     bgfx::setDebug(BGFX_DEBUG_TEXT);
 
@@ -166,6 +184,7 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
     // submits a draw call to it this frame (e.g. an empty chunk, no
     // shader program compiled, or no sun/moon submitted this frame).
     bgfx::touch(kSkyViewId);
+    bgfx::touch(kLodViewId);
     bgfx::touch(0);
     bgfx::touch(kUi2dViewId);
 }
@@ -185,12 +204,21 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     // Real translucent state (Phase 61) - see this function's own doc
     // comment in renderer.h. BGFX_STATE_DEFAULT (every opaque chunk
     // draw, unchanged) already includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/
-    // MSAA; the alpha-blended path keeps depth TESTING (so water still
-    // correctly hides behind solid terrain) but drops depth WRITING and
-    // adds real alpha blending instead.
-    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
-                                      BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA)
-                                   : BGFX_STATE_DEFAULT;
+    // MSAA - a real, working backface cull confirmed against this
+    // project's own winding convention in Phase 67 (see
+    // GreedyMesherTest's "geometric winding matches stored normal" check
+    // and DECISIONS.md); the alpha-blended path keeps depth TESTING (so
+    // water still correctly hides behind solid terrain) but drops depth
+    // WRITING and adds real alpha blending instead. Real, deliberate
+    // Phase 67 fix: no CULL_CW here (removed - it used to be set,
+    // wrongly culling this layer the same as opaque terrain) - this is
+    // the real water/wheat translucent layer, and Minecraft's own water
+    // is genuinely visible from both sides (looking up at the surface
+    // from underwater must show it, not cull it away as a backface).
+    const u64 state = alpha_blend
+                           ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
+                              BGFX_STATE_BLEND_ALPHA)
+                           : BGFX_STATE_DEFAULT;
     bgfx::setState(state);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
     bgfx::setUniform(sky_light_scale_uniform_, uniform_value);
@@ -764,7 +792,74 @@ void Renderer::resize(u32 width, u32 height) {
         bgfx::setViewRect(0, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
         bgfx::setViewRect(kSkyViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
         bgfx::setViewRect(kUi2dViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
+        bgfx::setViewRect(kLodViewId, 0, 0, static_cast<u16>(width_), static_cast<u16>(height_));
     }
+}
+
+void Renderer::submit_lod_chunk(const math::Vec3& chunk_world_min, f32 chunk_edge, f32 average_local_height,
+                                 const math::Vec3& color, bgfx::ProgramHandle program, const math::Mat4& view,
+                                 const math::Mat4& proj) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    struct LodVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
+    };
+
+    const f32 quad_y = chunk_world_min.y + average_local_height;
+    const math::Vec3 corners[4] = {
+        {chunk_world_min.x, quad_y, chunk_world_min.z},
+        {chunk_world_min.x + chunk_edge, quad_y, chunk_world_min.z},
+        {chunk_world_min.x + chunk_edge, quad_y, chunk_world_min.z + chunk_edge},
+        {chunk_world_min.x, quad_y, chunk_world_min.z + chunk_edge},
+    };
+    LodVertex vertices[4];
+    for (u32 i = 0; i < 4; ++i) {
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f};
+    }
+    // Two triangles, real double-sided winding (both orders) so the
+    // quad is visible from above AND below (a distant LOD tile with no
+    // real backface-culling concern - it's a single flat sheet, not a
+    // closed volume like submit_solid_box's own box).
+    const u16 indices[12] = {
+        0, 1, 2, 0, 2, 3,  // top winding
+        0, 2, 1, 0, 3, 2,  // bottom winding
+    };
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
+        .end();
+
+    if (bgfx::getAvailTransientVertexBuffer(4, layout) < 4 || bgfx::getAvailTransientIndexBuffer(12) < 12) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 4, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 12);
+    std::memcpy(tvb.data, vertices, sizeof(vertices));
+    std::memcpy(tib.data, indices, sizeof(indices));
+
+    bgfx::setViewTransform(kLodViewId, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    // Real depth WRITE + TEST (brief section 70.4's own literal
+    // "Depth-Write AN, Depth-Test AN") - unlike submit_solid_box's own
+    // depth-test-only overlay, a LOD quad is real, persistent terrain
+    // stand-in geometry that must leave a real mark in the depth buffer
+    // for the near-chunk pass (drawn afterward, into the same buffer)
+    // to correctly composite against.
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS);
+    bgfx::submit(kLodViewId, program);
 }
 
 }  // namespace lcu::rendering

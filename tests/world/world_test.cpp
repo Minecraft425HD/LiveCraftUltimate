@@ -72,6 +72,35 @@ TEST(World, UnloadChunkRemovesIt) {
     EXPECT_EQ(world.chunk_at({0, 0, 0}), nullptr);
 }
 
+TEST(World, AdoptGeneratedChunkSkipsTheGeneratorAndUsesTheProvidedContent) {
+    int call_count = 0;
+    World world(1, [&call_count](Chunk&, ChunkCoord) { ++call_count; });
+
+    Chunk precomputed;
+    precomputed.set_block(1, 2, 3, kMarkerBlock);
+    world.adopt_generated_chunk({4, 0, -1}, precomputed);
+
+    EXPECT_EQ(call_count, 0) << "adopt_generated_chunk must never invoke generator_";
+    EXPECT_EQ(world.state_of({4, 0, -1}), ChunkLifecycleState::Generated);
+    const Chunk* chunk = world.chunk_at({4, 0, -1});
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_EQ(chunk->block_at(1, 2, 3), kMarkerBlock);
+}
+
+TEST(World, AdoptGeneratedChunkIsANoOpIfAlreadyLoaded) {
+    World world(1, marker_generator());
+    world.load_chunk({0, 0, 0});  // real content: kMarkerBlock at (0,0,0)
+
+    Chunk different;
+    different.set_block(5, 5, 5, 99);
+    world.adopt_generated_chunk({0, 0, 0}, different);
+
+    const Chunk* chunk = world.chunk_at({0, 0, 0});
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_EQ(chunk->block_at(0, 0, 0), kMarkerBlock) << "existing chunk must not be clobbered";
+    EXPECT_EQ(chunk->block_at(5, 5, 5), 0);
+}
+
 TEST(World, GenerateChunkAssertsIfNotRequestedFirst) {
     World world(1, marker_generator());
     EXPECT_DEATH(world.generate_chunk({0, 0, 0}), "");

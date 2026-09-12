@@ -63,6 +63,19 @@ As of the most recent phase, the game has:
   real stages under sufficient light, harvest it, and craft the wheat
   into bread or planks into a wooden hoe via the real crafting grid
   (not the quick-craft shortcut — see the Controls table below).
+- A real culling cascade for "maximum Minecraft-style performance":
+  real backface culling on the opaque chunk pass, a real 6-plane view
+  frustum, and real BFS occlusion culling that only crosses a chunk
+  boundary where a cached per-chunk opacity mask says a portal might
+  exist - all three gate what actually reaches a `bgfx::submit` call.
+  Distant chunks beyond `render_distance` render as a real flat LOD
+  quad instead of full geometry. Render distance/LOD distance are now
+  live, player-adjustable options-menu settings; chunks no longer
+  unload as the player walks away (still saved/reloadable, just kept
+  in memory); a new async pre-loader parallelizes real terrain
+  generation across worker threads, with a real directional bias ahead
+  of the player's own movement, so crossing into a new area doesn't
+  stall on single-threaded worldgen.
 
 See `CHANGELOG.md` for the full, phase-by-phase history of how this was
 built, and `DECISIONS.md` for the reasoning behind the non-obvious

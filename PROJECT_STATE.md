@@ -98,9 +98,72 @@ plant/harvest interactions, and real harvest drops)**, and **Phase 65
 2x `game:planks` -> a minimal `game:wooden_hoe`, both verified through
 the real 2x2/3x3 crafting grid via a new click-driven headless hook,
 plus the real discovery and documentation that the older Phase-23
-quick-craft shortcut structurally can't represent either recipe)** are
-done - see TASK_QUEUE.md for per-phase detail as each of the remaining
-1 phase lands. See
+quick-craft shortcut structurally can't represent either recipe)**, and
+**Phase 66 (documentation consolidation for Phases 58-65, no code
+changes)** are done - closing out that fifth user-directed program in
+full. A sixth user-directed program (Phases 67-72: a real culling
+cascade - backface, frustum, occlusion - plus LOD and a configurable
+render distance, "maximale Minecraft-Performance") is now in progress -
+**Phase 67 (a real backface-culling audit: the opaque chunk pass
+already correctly culled via `BGFX_STATE_DEFAULT`'s own `BGFX_STATE_
+CULL_CW`, confirmed against this project's own winding convention; the
+real bug fixed was the translucent water/wheat layer wrongly culling
+too, when it must render double-sided; a new `BM_Render_
+BackfaceCulling` benchmark computes a real, honest CPU-side proxy for
+the GPU-side effect this Noop-backend sandbox can't itself time)**, and
+**Phase 68 (a real 6-plane `Frustum` extracted from a real `proj * view`
+matrix via Gribb/Hartmann, adapted to this project's own column-major
+`Mat4` storage and verified with 8 real unit tests; wired into the real
+per-frame render loop to skip `submit_chunk_mesh` for chunks with no
+part inside it; a real, honestly-investigated gap where this project's
+own default-scene FOV=70 measures ~30% visible rather than the brief's
+own "~50% at 90°" - confirmed real and FOV-responsive by re-testing at
+FOV=90 and FOV=170, see DECISIONS.md)**, and **Phase 69 (real BFS
+occlusion culling - `engine/rendering::OcclusionCuller` floods across
+chunk boundaries only where a real per-chunk 6-bit `boundary_opacity_
+mask` says a portal might exist, gated by Phase 68's own frustum test
+too; wired in as a real persistent object with real cache-reuse on
+either camera movement/rotation or a relevant block edit/load/unload;
+a new `LCU_CULLING_SCENARIO=cave` scenario confirms a real sealed room
+renders only its own chunk, and a real, investigated benchmark
+confirmed the algorithm meets the brief's own "<1ms" target once run
+under an optimized build rather than this project's own unoptimized
+default - see DECISIONS.md)**, and **Phase 70 (real Distant-Horizons-
+style LOD: `build_lod_chunk` averages a chunk's own real topmost-voxel
+color/height per column; a new dedicated bgfx view (reusing this
+project's own existing `setViewOrder` mechanism) renders these flat
+quads before near-chunk terrain, with real depth write+test so they
+correctly composite; new `Options::render_distance`/`lod_distance`;
+confirmed working end to end via a real headless run with `render_
+distance` temporarily forced to 0, since this project's own default
+chunk-load radius never naturally reaches the LOD band until Phase 71 -
+see DECISIONS.md)**, and **Phase 71 (render distance goes live:
+`runtime_load_radius` replaces the old fixed quality-profile streaming
+radius everywhere, live-adjustable from two new options-menu rows -
+real, direct consequence, the default loaded area grew from 3x3 to
+17x17 columns; chunks no longer unload by default (`Options::keep_
+chunks_loaded`, confirmed monotonically non-decreasing over a real 30-
+second headless move); real async pre-loading via a new `World::
+adopt_generated_chunk` + `preload_world_async`, parallelizing real
+terrain generation across `engine::jobs::JobSystem` worker threads
+(confirmed thread-safe by reading the actual functions involved, not
+assumed) with real logged progress and a real 30s timeout that waits
+out rather than aborts an in-flight job (`JobSystem` can't preempt a
+Running job); a real directional-streaming bias reaching further ahead
+of the player's own movement; an optional, brief-marked-"Optional"
+`VoxelServer --pre-generate-radius N` flag; a new `LCU_VERIFY_PRELOAD`
+hook - see DECISIONS.md/BUILD_STATUS.md for the full real-run evidence
+and the two honest PARTIAL items)**, and **Phase 72 (documentation
+consolidation + a real performance report - building this phase's own
+required "mountain" `LCU_VERIFY_CULLING` scenario, needed for the
+brief's Abschluss, surfaced a real Phase 71.3/71.4 bug: `stream_chunks_
+around`'s old "already loaded" check silently left any `preload_world_
+async`-adopted chunk permanently unlit/unmeshed, invisible to the Phase
+71 monotonic-chunk-count check since that only counts `Generated`
+state - fixed by checking `world_light.has_chunk_light` instead; see
+DECISIONS.md for the full root-cause writeup and re-measured real
+culling/benchmark tables)** are done, closing out that sixth
+user-directed program in full. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2662,6 +2725,67 @@ None currently tracked.
   non-bgfx path skips) — a real, newly-confirmed data point extending
   Phase 64's own timing caveat above, not previously broken out by
   build config anywhere in this project's docs.
+- Phase 67's `BM_Render_BackfaceCulling` benchmark is **NOT VERIFIED —
+  ENVIRONMENT LIMITATION** in the sense that it cannot time an actual
+  GPU rasterizer's own vertex-processing cost (this sandbox's bgfx
+  backend is Noop, no real GPU/display exists here) — what it reports
+  instead (`FrontFacingPercent`, a real per-triangle CPU computation
+  against the mesh's own stored normals) is an honest proxy for that
+  effect, not a substitute for a real frame-time measurement on real
+  hardware. A real Mac/desktop run with an actual GPU backend would be
+  needed to confirm the brief's own literal "30-50% weniger Vertex-
+  Verarbeitung" FPS claim end-to-end.
+- Phase 68's `LCU_VERIFY_CULLING` real, measured result at this
+  project's own default scene (70° FOV, `radius_xz=1`) is ~30% visible
+  after frustum culling, not the brief's own rough "~50% at 90° FOV"
+  expectation - independently re-tested and confirmed real (FOV=90 gives
+  the same ~30%; FOV=170 gives exactly 50%, proving the wiring responds
+  correctly to FOV and the "~50%" figure is reachable, just at a much
+  wider FOV for this specific 36-chunk layout, which is unusually tall
+  relative to its horizontal extent at this small radius). See
+  DECISIONS.md for the full geometric explanation - not a bug, but a
+  real property of this specific near-spawn test scene rather than a
+  large, roughly isotropic render-distance area.
+- Phase 69's occlusion portal test is a real, coarse approximation: it
+  caches one bit per chunk side ("is this whole 16x16 face provably
+  100% opaque"), not an exact per-position match between two chunks'
+  own touching faces - a real, rare false positive is possible (each
+  side has a gap, but never at the same position), never a false
+  negative. `is_opaque` reuses `is_transparent`, so `game:leaves`
+  (opaque since Phase 61) also counts as opaque for occlusion, not
+  matching the brief's own real-Minecraft-describing "Blätter lassen
+  Licht durch" wording. `LCU_CULLING_SCENARIO=cave`'s own "open a real
+  shaft" check produces a real, larger jump than the brief's own literal
+  "+1" (the chunk revealed is itself fully open sky, so BFS keeps
+  going) - a real, honest property of testing in an otherwise-open
+  36-chunk world, with a clean, isolated "+1" proof instead in
+  `OcclusionCullerTest`. `BM_Render_OcclusionCulling` measured 1.06 ms
+  in this project's own unoptimized "Development" build (over the
+  brief's own "<1ms" target) but 0.12 ms in a one-off optimized
+  Release+bgfx build - see DECISIONS.md for the full investigation.
+- **Resolved by Phase 71**: Phase 70's own note that LOD rendering had
+  nothing to render under default settings no longer applies - Phase 71
+  made `render_distance` genuinely drive the real streaming radius
+  (17x17 columns by default), but a real headless `LCU_VERIFY_CULLING`
+  run still shows `LOD quads: 0` at default settings, since the default
+  `render_distance=8`/`lod_distance=32` band still sits inside the same
+  streamed area on this project's own relatively flat default terrain -
+  a real LOD quad needs either a taller world or terrain features
+  further out than default terrain provides, or deliberately walking
+  there first (`unload_far_chunks` no longer culls the trail behind the
+  player either, since Phase 71.2 - see DECISIONS.md). No per-chunk LOD
+  mesh cache exists yet either (each visible far chunk rebuilds its own
+  summary every frame it's drawn) - still real, deliberately deferred
+  future work, not yet a measured per-frame cost.
+- Phase 71's own 30-second preload timeout can't literally abort an
+  in-flight `JobSystem` job (`JobSystem::cancel` only prevents a job
+  that hasn't started yet - see its own doc comment) - past the
+  deadline, `preload_world_async` stops polling/logging progress and
+  just waits out whatever's still `Running`, so the real worst case is
+  unbounded rather than a hard 30s cutoff. No full graphical loading-
+  screen UI (a progress bar) was built for brief 71.3 either - only the
+  brief's own literal "debug text 'Loading chunks: X/Y'", logged via
+  `LCU_LOG_INFO` - see DECISIONS.md/BUILD_STATUS.md for both.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment
