@@ -4974,6 +4974,86 @@ either a taller world or terrain features further out than this
 project's own flat-ish default terrain to actually populate the LOD
 band without deliberately walking there first).
 
+## 2026-09-12 — Phase 72: a real "mountain" culling scenario surfaced a real Phase 71.3/71.4 bug (preloaded chunks were never lit or meshed) that the Phase 71 monotonic-chunk-count check couldn't catch
+
+**Context:** Phase 72's own job is documentation, but the brief's
+Abschluss requires real culling statistics in three scenarios (mountain,
+cave, open field) - only cave existed from Phase 69. Building the real
+"mountain" scenario (see CHANGELOG.md - real terrain around `(-104,-520)`,
+loaded via the already-existing `preload_world_async`/
+`stream_chunks_around`) surfaced a genuine, previously-undetected bug.
+
+**Symptom:** `LCU_VERIFY_CULLING` on the new mountain scenario logged
+`Chunks total: 1156, visible after frustum: 0, visible after occlusion:
+41` - `chunks total` didn't grow past the original spawn area's own
+count at all (the newly-streamed mountain chunks were missing from it
+entirely), and occlusion (41) exceeded frustum (0), violating the
+`OcclusionCuller`'s own documented invariant ("`compute()` never enters
+a chunk the frustum already rejected" - the code comment right next to
+where both numbers are logged).
+
+**Root cause:** `stream_chunks_around`'s per-coordinate skip condition
+was `if (world.state_of(coord) != Unloaded) continue;` - correct before
+Phase 71.3, when `world.load_chunk` (via `load_chunk_checking_disk`)
+was the *only* thing that could ever move a coordinate out of
+`Unloaded`, so "not Unloaded" reliably meant "this function (or an
+earlier identical call) already lit and meshed it". Phase 71.3's own
+`preload_world_async` broke that assumption: it calls `World::adopt_
+generated_chunk`, which sets a coordinate straight to `Generated`
+*without* ever computing light or building a mesh (a deliberate design
+choice - see the Phase 71 entry above on why preloading only touches
+terrain). Once a coordinate was preloaded (by the real startup `+2`
+margin, or by Phase 71.4's own directional bias reaching ahead of the
+player), `stream_chunks_around`'s old condition saw `state_of(coord) ==
+Generated` and skipped it *forever* - `compute_initial_block_light`,
+`compute_initial_sky_light`, and `remesh_and_upload` never ran for that
+coordinate through any real code path. The chunk existed in `world`
+with real terrain, but had no entry in `world_light` and (in a bgfx
+build) never got a `chunk_aabb_cache`/`gpu_meshes` entry either - a
+real, silent "you walk there and the world doesn't render" bug.
+
+**Why the Phase 71 `LCU_VERIFY_MOVE_SECONDS=30` check didn't catch
+this:** that check only asserts `world.loaded_chunk_count()` rises
+monotonically. `loaded_chunk_count()` counts `ChunkLifecycleState::
+Generated` entries - exactly the state `adopt_generated_chunk` sets
+*without* lighting/meshing. A preloaded-but-never-meshed chunk still
+counts as "loaded" by that metric, so the check passed cleanly on every
+real run in Phase 71's own verification even though the bug was already
+live in that exact code path. This is a real, humbling example of a
+metric that's real and honestly measured but doesn't actually prove
+what it was being used to prove - "loaded" and "actually rendered" had
+silently diverged the moment Phase 71.3 introduced a second way to
+reach `Generated`.
+
+**Decision (fix):** replaced the skip condition with `if (world_light.
+has_chunk_light(coord)) continue;` (checked independently from whether
+`load_chunk_checking_disk` needs to run). `WorldLight::has_chunk_light`
+is the real, direct, bgfx-build-agnostic signal for "has this
+coordinate's light actually been computed" - only ever true after
+`compute_initial_block_light`'s own `chunk_light()` get-or-create call,
+regardless of whether the underlying terrain arrived via normal loading
+or a prior preload. Re-verified: the same mountain scenario now logs
+`Chunks total: 2312, visible after frustum: 42, visible after occlusion:
+41` - total correctly includes both areas, and occlusion <= frustum
+holds. Re-ran the full Phase 71 regression suite (`LCU_VERIFY_MOVE_
+SECONDS=30`, `LCU_VERIFY_PRELOAD`, `LCU_VERIFY_BREAK_PLACE`, `ctest`
+669/669 bgfx / 641/641 non-bgfx) - all still clean after the fix.
+
+**A second, unrelated methodology gotcha found while gathering this
+phase's own numbers:** `LCU_VERIFY_PRELOAD` deliberately forces `render_
+distance=4` for that one run and (correctly, since `Options::save` runs
+unconditionally at shutdown) persists it to the real per-OS `options.txt`
+- meaning every subsequent, unrelated headless run in this same sandbox
+session silently inherited `render_distance=4` instead of the real
+default of 8, until the file was deleted. This produced a first, wrong
+"open field" reading of 324 total chunks (matching a 9x9-column/radius-4
+square, not the real default 17x17/radius-8 one) before it was caught
+and every scenario re-measured with a freshly-reset `options.txt`. Not a
+code bug - `Options` persisting exactly what was set is the entire point
+of Phase 45 - but a real trap for reproducible measurement that this
+project's own `BUILD_STATUS.md` reproduce-steps should account for
+(each scenario's own command now explicitly resets `options.txt` first).
+
 **Alternatives considered:** giving `World`/`WorldLight` real internal
 locking so jobs could mutate them directly - rejected as a large,
 cross-cutting change touching every existing call site for a benefit

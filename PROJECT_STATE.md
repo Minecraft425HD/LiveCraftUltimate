@@ -153,8 +153,17 @@ Running job); a real directional-streaming bias reaching further ahead
 of the player's own movement; an optional, brief-marked-"Optional"
 `VoxelServer --pre-generate-radius N` flag; a new `LCU_VERIFY_PRELOAD`
 hook - see DECISIONS.md/BUILD_STATUS.md for the full real-run evidence
-and the two honest PARTIAL items)** are done - see TASK_QUEUE.md for
-per-phase detail as the remaining phase lands. See
+and the two honest PARTIAL items)**, and **Phase 72 (documentation
+consolidation + a real performance report - building this phase's own
+required "mountain" `LCU_VERIFY_CULLING` scenario, needed for the
+brief's Abschluss, surfaced a real Phase 71.3/71.4 bug: `stream_chunks_
+around`'s old "already loaded" check silently left any `preload_world_
+async`-adopted chunk permanently unlit/unmeshed, invisible to the Phase
+71 monotonic-chunk-count check since that only counts `Generated`
+state - fixed by checking `world_light.has_chunk_light` instead; see
+DECISIONS.md for the full root-cause writeup and re-measured real
+culling/benchmark tables)** are done, closing out that sixth
+user-directed program in full. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,

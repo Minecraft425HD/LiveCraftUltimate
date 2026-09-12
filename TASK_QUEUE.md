@@ -2871,6 +2871,44 @@ for 71.3 - only the brief's own literal "debug text 'Loading chunks:
 X/Y'" readout. See DECISIONS.md and BUILD_STATUS.md for the full real-
 run evidence.
 
+## Phase 72 — Documentation + performance report
+
+- [x] Documentation consolidation across CHANGELOG/PROJECT_STATE/
+  BUILD_STATUS/DECISIONS/README for Phases 67-71.
+- [x] New `LCU_CULLING_SCENARIO=mountain` (real terrain at a real
+  scanned highest point, seed 1337, `(-104,-520)` height 16) - the
+  brief's Abschluss required mountain/cave/open-field stats; only cave
+  existed before this phase.
+- [x] **Real bug found and fixed while building the mountain scenario**:
+  `stream_chunks_around`'s old skip condition (`state_of(coord) !=
+  Unloaded`) silently left any `preload_world_async`-adopted chunk
+  permanently unlit/unmeshed - invisible to Phase 71's own monotonic-
+  chunk-count check (which only counts `Generated` state). Fixed by
+  checking `world_light.has_chunk_light(coord)` instead. See
+  DECISIONS.md for the full root-cause writeup.
+- [x] Real culling statistics, three scenarios, re-measured with a
+  freshly-reset `options.txt`: open field 1156/15/15/0, cave sealed
+  1156/65/1/0 -> shaft opened 1156/65/65/0, mountain 2312/42/41/0
+  (chunks total / frustum-visible / occlusion-visible / LOD quads).
+- [x] Real benchmark comparison (Development vs. a one-off Release+bgfx
+  build): `BM_Render_BackfaceCulling` 162.0/57.7 µs, `BM_Render_
+  OcclusionCulling` 946.2/101.6 µs (target <1ms), `BM_Render_LODChunks`
+  4.17/1.08 µs (target <10µs) - all under the brief's own targets.
+- [x] Real, honest note: no FPS measurement exists or can exist in this
+  sandbox (Noop bgfx backend, no GPU/display) - reported as NOT
+  VERIFIED — ENVIRONMENT LIMITATION, not guessed.
+- [x] Compact Mac build guide: already present in `BUILDING.md`'s own
+  "macOS" section (Phase 25) - reviewed and confirmed it needed no
+  changes, since Phases 67-72 added no new CMake options, only new env
+  vars (`LCU_VERIFY_CULLING`, `LCU_CULLING_SCENARIO`, `LCU_VERIFY_
+  PRELOAD`) and `Options` fields, both already covered by that guide's
+  existing general run instructions.
+
+`ctest` 669/669 (bgfx) / 641/641 (non-bgfx) - unchanged from Phase 71
+(the fix and new scenario added no new unit-testable pure logic, both
+verified via real headless runs instead). Full regression sweep
+re-run clean on both configs after the fix.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

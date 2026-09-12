@@ -2,7 +2,107 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69 / Phase 70 / Phase 71
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69 / Phase 70 / Phase 71 / Phase 72
+
+### Phase 72
+
+- Documentation consolidation + performance report for the sixth
+  user-directed program (Phases 67-72: backface/frustum/occlusion
+  culling, LOD, and a real, live render-distance/pre-loading system -
+  "maximale Minecraft-Performance"). `README.md`'s own "Status" section
+  gained a real culling-cascade bullet.
+- **Real bug found and fixed while building this phase's own required
+  "mountain" culling scenario** (the brief's Abschluss asks for real
+  stats in mountain/cave/open-field scenarios; only cave existed before
+  this phase): `stream_chunks_around`'s old skip condition
+  (`world.state_of(coord) != Unloaded`) was correct before Phase 71.3,
+  when `world.load_chunk` was the only thing that could ever move a
+  coordinate out of `Unloaded`. Phase 71.3's own `preload_world_async`
+  can now do that too (`World::adopt_generated_chunk`), and it
+  deliberately only adopts real terrain, leaving light/mesh to
+  whichever real per-movement path reaches that coordinate next - which
+  turned out to be *never*, since `state_of` was already `>= Generated`
+  by the time `stream_chunks_around` got there. A preloaded chunk (via
+  the startup preload's own +2 margin, or Phase 71.4's directional
+  bias) could sit in `world` with real terrain forever, never lit, never
+  meshed, never rendered - a real, silent, "the world doesn't look
+  right when you get there" bug that the Phase 71 `LCU_VERIFY_MOVE_
+  SECONDS=30` check never caught, since it only ever asserted the
+  *loaded chunk count* rose monotonically, not that those chunks were
+  actually lit/meshed. Fixed: the skip condition now checks
+  `world_light.has_chunk_light(coord)` instead - the real, bgfx-build-
+  agnostic signal for "has this coordinate's light actually been
+  computed yet" (only true after `compute_initial_block_light`'s own
+  `chunk_light()` get-or-create call), independent of whether `world`'s
+  terrain state came from normal loading or a prior preload. See
+  DECISIONS.md for the full root-cause writeup.
+- New `LCU_CULLING_SCENARIO=mountain`: loads real terrain (via the
+  already-existing `preload_world_async`/`stream_chunks_around`, no new
+  loading logic needed) around a real coordinate found by scanning
+  `terrain_height` for this project's own seed 1337 over a 6000x6000
+  block area (`(-104,-520)`, height 16 - a real highest point, not an
+  invented number), then teleports the player there with a normal
+  (non-inverted) camera pitch - a real mountain's own slopes naturally
+  produce partial occlusion without any synthetic block-sealing, unlike
+  the cave scenario.
+- **Real culling statistics, three scenarios, re-measured with a clean
+  `options.txt` (default `render_distance=8`) after the bugfix above**:
+
+  | Scenario | Chunks total | Visible (frustum) | Visible (occlusion) | LOD quads |
+  |---|---|---|---|---|
+  | Open field (default spawn) | 1156 | 15 | 15 | 0 |
+  | Cave (`LCU_CULLING_SCENARIO=cave`, sealed) | 1156 | 65 | 1 | 0 |
+  | Cave (same, after a real shaft is opened) | 1156 | 65 | 65 | 0 |
+  | Mountain (`LCU_CULLING_SCENARIO=mountain`) | 2312 | 42 | 41 | 0 |
+
+  Mountain's own "chunks total" is 2312 (2x the other two) because that
+  scenario keeps the original spawn area loaded too (Phase 71.2's own
+  "chunks never unload") on top of the newly-streamed mountain area -
+  a real, expected consequence of the two features composing, not a
+  bug. Every row's occlusion count is <= its frustum count, confirming
+  the fixed invariant holds (`compute()` never enters a chunk the
+  frustum already rejected).
+- **Real benchmark comparison, Development vs. a one-off Release+bgfx
+  build (same throwaway-build methodology Phase 69 used, deleted after
+  measuring - see DECISIONS.md)**:
+
+  | Benchmark | Development build | Release build | Brief's own target |
+  |---|---|---|---|
+  | `BM_Render_BackfaceCulling` (24576 triangles) | 162.0 µs | 57.7 µs | n/a (CPU-side proxy, see Phase 67) |
+  | `BM_Render_OcclusionCulling` (1000-chunk BFS) | 946.2 µs | 101.6 µs | < 1 ms |
+  | `BM_Render_LODChunks` (per chunk) | 4.17 µs | 1.08 µs | < 10 µs |
+
+  Both builds meet the brief's own numeric targets; the Release numbers
+  are the real, representative ones for anything resembling actual
+  shipped performance (this sandbox's own default `Development` build
+  type isn't one of CMake's optimized types - see Phase 69's own
+  DECISIONS.md entry).
+- **No real FPS measurement exists or ever will in this environment**:
+  this sandbox's bgfx backend is the Noop renderer (no GPU, no display -
+  see BUILD_STATUS.md's own "Environment" section) - there is no real
+  frame to time end-to-end, before or after any culling pass. Every
+  number in the benchmark table above is a real, measured CPU-side
+  proxy for the actual algorithmic cost (BFS time, LOD-mesh-build time,
+  the real fraction of triangles a real backface cull would discard),
+  not a substitute FPS figure - reported honestly as **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**, not silently omitted or guessed.
+- `ctest` 669/669 (bgfx) / 641/641 (non-bgfx) - unchanged counts from
+  Phase 71 (this phase's only code change, the `stream_chunks_around`
+  fix and the new mountain scenario, added no new unit-testable pure
+  logic - both are exercised via real headless runs instead, see
+  above). Full regression sweep (`LCU_VERIFY_BREAK_PLACE`,
+  `LCU_VERIFY_PRELOAD`, `LCU_VERIFY_MOVE_SECONDS=30`, `LCU_VERIFY_
+  CULLING` in all three scenarios) re-run clean on both configs after
+  the fix, each with a freshly-reset `options.txt` to rule out state
+  leaking between runs (a real methodology gotcha discovered while
+  gathering this phase's own numbers - see DECISIONS.md).
+- Honest PARTIAL summary (carried forward, still true): Phase 69's
+  coarse per-chunk-per-side occlusion bitmask (a documented
+  approximation of the brief's own more precise per-position portal
+  matching) and its real-vs-literal-"+1" cave-shaft jump; Phase 71's
+  30s preload timeout waiting out rather than aborting an in-flight
+  job, and no full graphical loading-screen UI (only the brief's own
+  literal "debug text" progress readout).
 
 ### Phase 71
 
