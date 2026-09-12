@@ -47,6 +47,14 @@ struct Options {
     i32 render_distance = 8;
     i32 lod_distance = 32;
 
+    // Real, persisted "don't unload chunks behind you" toggle (Phase
+    // 71, brief section 71.2) - true (the default) disables this
+    // project's own Phase 35 client-side unload-far-chunks behavior, so
+    // a real explored area stays loaded/rendered (as LOD once beyond
+    // render_distance) instead of vanishing and needing to regenerate/
+    // reload when revisited.
+    bool keep_chunks_loaded = true;
+
     // Real, human-editable `key=value` text format, one setting per
     // line, `#`-prefixed comment lines ignored - see options.cpp for
     // the exact key names (`mouse_sensitivity`, `fov`, `hud_enabled`,

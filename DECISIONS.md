@@ -4880,3 +4880,115 @@ Phase 71 lands - rejected as exactly the kind of unearned "should work"
 claim this project's own brief (section 96) forbids; a real
 `render_distance=0` override was cheap and gave real, direct evidence
 instead.
+
+## 2026-09-12 — Phase 71: preloading only generates terrain (never light/mesh), a real `World::adopt_generated_chunk` escape hatch instead of racing `World::load_chunk`, and why the 30s preload timeout can't actually abort a running job
+
+**Context:** Phase 71 makes `render_distance` genuinely live (Phase 70
+gave it a real default but nothing ever moved the actual streaming
+radius), stops chunks from unloading by default, and adds real async
+pre-loading through `engine::jobs::JobSystem` so a larger streaming
+radius doesn't turn every chunk-boundary crossing into a single-
+threaded worldgen stall.
+
+**Decision (async preloading only touches terrain, never `World`/
+`WorldLight` off the main thread):** `World` has no internal locking
+(a plain `std::unordered_map`, see its own class doc comment) and
+`WorldLight`'s cross-chunk sky/block-light propagation reads and writes
+several chunks' worth of state per call - neither is safe to touch from
+more than one thread at a time. Rather than add locking to either
+(real, cross-cutting complexity that would need to be threaded through
+every existing call site, not just this one new feature),
+`preload_world_async` keeps the parallel part narrow: each JobSystem
+worker only calls `lcu::world::worldgen::generate_terrain_chunk` (pure
+function of its own coordinate/seed/registry-id arguments, confirmed
+by reading its implementation - no `static`/`thread_local` state at
+all) and `lcu::serialization::load_chunk_from_file` (its own per-
+coordinate `FILE*`+`std::vector<u8>`, confirmed the same way) into a
+per-job-local `std::vector<Chunk>`, never touching `world` itself.
+Every real `World`/`WorldLight` mutation - adopting the generated data,
+computing initial light, remeshing - still happens back on the calling
+(main) thread, exactly like every other real mutation in this file
+already does.
+
+**Decision (new `World::adopt_generated_chunk`, not reusing `load_
+chunk`):** `World::load_chunk` always runs the registered `generator_`
+itself if the chunk isn't already loaded - there's no way to hand it
+already-computed content instead through the existing public API. Two
+options: (a) skip pre-generating and just call `load_chunk` on the main
+thread as before (defeats the entire point of parallelizing), or (b)
+add a small, real new method that adopts already-Generated content
+directly. Chose (b): `adopt_generated_chunk(coord, chunk)` sets the
+entry straight to `ChunkLifecycleState::Generated` with the supplied
+data, skipping `generator_` entirely - a natural, minimal extension of
+`World`'s own existing state machine (`request_chunk` already offers
+"transition state without generating"; this is the missing "finish the
+transition with externally-supplied content" half), not a workaround
+bolted on in `client/main.cpp`. Idempotent like `load_chunk` (a no-op
+if the coordinate is already loaded), covered by 2 new `World.*` unit
+tests.
+
+**Decision (preload generates terrain only, never light or mesh):**
+Sky/block-light propagation has real cross-chunk ordering requirements
+(sky light must cascade top-down per column - see `compute_initial_
+sky_light`'s own doc comment) that don't parallelize cleanly across
+independent worker threads the way pure terrain generation does, and
+meshing depends on light already being computed. Rather than build a
+second, more complex parallel pipeline for those too, `preload_world_
+async`'s job is deliberately narrow: get real terrain data into `world`
+ahead of time so there's no worldgen stall at the streaming boundary.
+Light and mesh for a preloaded chunk still run through the exact same
+`reseed_and_remesh_after_load`/`remesh_and_upload` path every other
+newly-loaded chunk already uses, the moment that chunk is actually
+needed (the initial spawn-area load loop, or `stream_chunks_around`
+during real gameplay) - a real, working two-tier design, not a shortcut
+that silently leaves preloaded chunks unlit.
+
+**Decision (the 30-second timeout waits for in-flight jobs instead of
+aborting):** `JobSystem::cancel` only prevents a `Pending`/`Ready` job
+from ever starting - it cannot preempt a job that's already `Running`
+(see its own doc comment). Once `preload_world_async`'s 30s deadline
+passes, any job still `Running` is going to finish and write into its
+own `PendingColumn::chunks` regardless of what this function does; the
+only real choices are wait for it (safe - never touches its own memory
+concurrently) or abandon it as a dangling background write into memory
+this function is about to walk away from and potentially let go out of
+scope (a real use-after-free). This is a real, honest divergence from
+the brief's own literal "abort after 30s" reading, documented as
+PARTIAL rather than silently "fixed" by pretending a job system with no
+preemption support could offer something it structurally can't.
+
+**Real, honest scope note - `Options::render_distance`'s default (8)
+changes real default behavior measured in earlier phases:** Phase 68's
+own frustum-culling percentage (~30% at default FOV) and Phase 70's own
+"LOD path never naturally triggers" note were both measured against
+this project's *old* default streaming radius (`load_settings.
+radius_xz=1`, a 3x3 column area). Phase 71 makes `render_distance=8`
+(the brief's own literal default, set back in Phase 70) actually drive
+the real streaming radius for the first time - the loaded/rendered area
+is now a real 17x17 column area by default. Re-measured via a real
+headless `LCU_VERIFY_CULLING` run after this change: `Chunks total: 324,
+visible after frustum: 15, visible after occlusion: 15, LOD quads: 0`
+(no LOD quads yet under default settings, since 8 is still inside the
+now-larger `render_distance` band itself - `lod_distance=32` would need
+either a taller world or terrain features further out than this
+project's own flat-ish default terrain to actually populate the LOD
+band without deliberately walking there first).
+
+**Alternatives considered:** giving `World`/`WorldLight` real internal
+locking so jobs could mutate them directly - rejected as a large,
+cross-cutting change touching every existing call site for a benefit
+(slightly less per-job bookkeeping) this phase doesn't need, when the
+"generate off-thread, adopt on the main thread" pattern already used by
+`remesh_and_upload`'s own meshing job (Phase 2) does the same job with
+zero locking; parallelizing light propagation and meshing too in this
+same pass - deferred, real future work once profiling shows it's
+actually the bottleneck (this phase's own measured JobSystem overhead
+target was terrain generation, not lighting); a literal `std::atomic
+<bool> abort` flag checked inside `generate_terrain_chunk`/
+`load_chunk_from_file` to make the 30s timeout a real abort - rejected
+as requiring changes to two functions this phase otherwise doesn't
+need to touch, for marginal benefit (the timeout already stops
+*logging progress*, which is the only real "loading screen" indicator
+that exists - the underlying generation work happening a little longer
+in the background isn't user-visible without a real graphical loading
+screen, which this phase honestly doesn't build - see BUILD_STATUS.md).

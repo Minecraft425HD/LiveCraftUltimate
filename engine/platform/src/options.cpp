@@ -90,6 +90,8 @@ bool Options::load(const std::string& path) {
             parse_int(value, render_distance);
         } else if (key == "lod_distance") {
             parse_int(value, lod_distance);
+        } else if (key == "keep_chunks_loaded") {
+            parse_bool(value, keep_chunks_loaded);
         } else if (key == "hud_enabled") {
             parse_bool(value, hud_enabled);
         } else if (key == "debug_overlay_enabled") {
@@ -140,6 +142,7 @@ void Options::save(const std::string& path) const {
     file << "fov=" << fov << "\n";
     file << "render_distance=" << render_distance << "\n";
     file << "lod_distance=" << lod_distance << "\n";
+    file << "keep_chunks_loaded=" << (keep_chunks_loaded ? "true" : "false") << "\n";
     file << "hud_enabled=" << (hud_enabled ? "true" : "false") << "\n";
     file << "debug_overlay_enabled=" << (debug_overlay_enabled ? "true" : "false") << "\n";
     file << "skin=" << skin_name << "\n";

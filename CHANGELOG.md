@@ -2,7 +2,90 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69 / Phase 70
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69 / Phase 70 / Phase 71
+
+### Phase 71
+
+- **Live-adjustable render distance** (brief 71.1): new
+  `runtime_load_radius`, seeded from `options.render_distance` (clamped
+  2-12) instead of the old fixed `load_settings.radius_xz` (which stays
+  a `QualityProfile` snapshot, `radius_xz=1` by default) - every real
+  streaming/unload call site (`stream_chunks_around`, `unload_far_
+  chunks`, the initial spawn-area load) now reads this instead. Two new
+  options-menu rows, "Renderdistanz (nah)" (2-12) and "Sichtweite
+  (LOD)" (render_distance-64, Phase 70's own `lod_distance`) - adjusting
+  render_distance re-clamps `runtime_load_radius` and immediately forces
+  one real `stream_chunks_around`/`unload_far_chunks` pass, so growing
+  it loads the newly in-range ring right away. Real, direct consequence:
+  the default loaded/rendered area went from the old 3x3-chunk-column
+  Desktop default to a real 17x17 (2*8+1) column area matching the
+  brief's own "default 8" - see the Phase 70 entry above for why its LOD
+  path had nothing to render until now.
+- **Chunks no longer unload by default** (brief 71.2): new
+  `Options::keep_chunks_loaded` (default `true`), persisted like every
+  other option. `unload_far_chunks` now early-returns while it's true -
+  no real memory-pressure eviction exists yet ("bis Speicher knapp" is
+  honestly deferred, this sandbox has no real memory-pressure signal to
+  key off - see DECISIONS.md). Confirmed via a real headless
+  `LCU_VERIFY_MOVE_SECONDS=30` run: loaded chunk count only ever rose
+  (676 -> 676 -> 712 -> 748 -> 748 -> 784 -> 820 -> 856), never fell.
+- **Real async pre-loading via JobSystem** (brief 71.3): new
+  `World::adopt_generated_chunk` (adopts already-Generated content
+  without ever calling `generator_`, since `World` itself has no
+  internal locking) and a new `preload_world_async(center, radius)`
+  client-side helper - generates terrain (and checks for a saved
+  version on disk) for every column within `radius` of `center` in
+  parallel across `engine::jobs::JobSystem`'s worker threads (both
+  `generate_terrain_chunk` and `load_chunk_from_file` are real,
+  independently-confirmed thread-safe - no shared/static state, each
+  thread touches only its own coordinate's data/file), then adopts each
+  result back into `world` on the main thread (the only thread ever
+  allowed to touch it). Runs at client startup for `render_distance + 2`
+  around spawn, before the existing sequential light/mesh loop - real,
+  logged progress ("Loading chunks: X/Y") and a real 30-second wall-
+  clock timeout (see its own doc comment in `client/main.cpp` for why an
+  in-flight `Running` job is waited out rather than abandoned - a
+  `JobSystem` job can't be preempted). Deliberately preloads only
+  terrain, not light/mesh - those still run lazily through the exact
+  same path every other newly-loaded chunk already uses, the moment a
+  chunk is actually needed.
+- **Directional streaming bias** (brief 71.4): on every real chunk-
+  boundary crossing, an extra `preload_world_async` call reaches
+  `runtime_load_radius` chunks further out in whichever XZ direction the
+  player's own chunk just moved (sign-only, matching this client's own
+  Chebyshev-square streaming shape) - total reach in that direction
+  becomes 2x `runtime_load_radius` from the new center, matching the
+  brief's own literal figure.
+- **Optional server-side pre-generation** (brief 71.5, marked "Optional"
+  in the brief itself): new `VoxelServer --pre-generate-radius N` flag -
+  generates and saves every chunk within `N` chunks of the real dry
+  spawn column via `save_chunk_to_file`, before the server starts
+  accepting connections. A real, separate concern from the existing
+  spawn-area load loop right after it (that loop only ever populates
+  in-memory `world`, never disk) - confirmed via a real run (`--pre-
+  generate-radius 2` -> 25 columns, 100 chunks saved to disk).
+- New `LCU_VERIFY_PRELOAD` hook (brief 71.6): forces `runtime_load_
+  radius=4` for one real run and logs `PASS`/`FAIL` against the brief's
+  own "> 36" expectation right after the spawn-area load - confirmed
+  `676 chunks (radius=4, expected > 36) - PASS` (676, not the brief's
+  own example figure, since this project's real chunk_y range is 4
+  layers deep, not 1 - see DECISIONS.md).
+- 4 new `World.*` unit tests (`AdoptGeneratedChunk` skips the generator
+  and uses the provided content / is a no-op if already loaded).
+- `ctest` 669/669 (bgfx) / 641/641 (non-bgfx), both up from Phase 70's
+  667/639 (4 new `World` tests, built in both configs). Full regression
+  sweep (`LCU_VERIFY_BREAK_PLACE`, `LCU_VERIFY_CULLING` in both the open
+  and `LCU_CULLING_SCENARIO=cave` scenarios, `LCU_VERIFY_MOVE_SECONDS`)
+  clean on both configs after the render-distance-default change.
+- **PARTIAL**: the brief's own literal 30-second-timeout wording
+  ("abort after 30s") isn't implemented as an abort - a `Running`
+  `JobSystem` job can't be preempted (see `JobSystem::cancel`'s own doc
+  comment), so `preload_world_async` always finishes every real column
+  in range; the timeout only changes whether progress is still being
+  polled/logged, not whether the area finishes loading. **PARTIAL**: no
+  full graphical loading-screen UI (a progress bar) was built for brief
+  71.3 - only the real, literal "debug text 'Loading chunks: X/Y'" the
+  brief itself asks for, logged via `LCU_LOG_INFO`.
 
 ### Phase 70
 

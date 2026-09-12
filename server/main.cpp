@@ -47,11 +47,26 @@ namespace protocol = game::systems::protocol;
 struct ServerConfig {
     std::string world = "world";
     lcu::u16 port = 25565;
+    // Real, optional server-side pre-generation radius (Phase 71, brief
+    // section 71.5, explicitly marked "Optional" there) - 0 (the
+    // default) means "don't pre-generate anything, behave exactly like
+    // every phase before this one". A positive value generates every
+    // chunk within that many chunks (Chebyshev, XZ; same fixed
+    // [min_chunk_y,max_chunk_y] vertical band the normal spawn-area
+    // load already uses) of the real dry spawn column and writes each
+    // one to disk via save_chunk_to_file, all before the server starts
+    // accepting connections - see the real pre_generate_world call
+    // below for why this is a real, separate concern from the existing
+    // load_settings.radius_xz spawn-area load right after it (that loop
+    // only ever populates in-memory `world`, never disk; this flag is
+    // specifically about disk, for a fresh world that hasn't been
+    // played on yet).
+    lcu::i32 pre_generate_radius = 0;
 };
 
-// Minimal CLI parsing for `VoxelServer --world <name> --port <n>`. Full
-// server config file support lands with a dedicated config system, not
-// this phase's job.
+// Minimal CLI parsing for `VoxelServer --world <name> --port <n>
+// --pre-generate-radius <n>`. Full server config file support lands
+// with a dedicated config system, not this phase's job.
 ServerConfig parse_args(int argc, char** argv) {
     ServerConfig config;
     for (int i = 1; i < argc; ++i) {
@@ -60,6 +75,8 @@ ServerConfig parse_args(int argc, char** argv) {
             config.world = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             config.port = static_cast<lcu::u16>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--pre-generate-radius" && i + 1 < argc) {
+            config.pre_generate_radius = static_cast<lcu::i32>(std::strtol(argv[++i], nullptr, 10));
         }
     }
     return config;
@@ -494,6 +511,43 @@ int main(int argc, char** argv) {
     const lcu::voxel::ChunkCoord spawn_chunk =
         lcu::voxel::world_to_chunk_and_local({spawn_column.x, 0, spawn_column.z}, lcu::voxel::Chunk::kEdgeLength)
             .chunk;
+
+    // Real, optional server-side pre-generation (Phase 71, brief
+    // section 71.5) - `--pre-generate-radius N` on the command line
+    // (see parse_args/ServerConfig above). Deliberately generates AND
+    // saves every chunk to disk right here, before the normal spawn-
+    // area load loop below (which only ever populates in-memory
+    // `world`, never touches chunk_save_dir) - the real point of this
+    // flag is priming a *fresh* world's save directory ahead of time
+    // (e.g. before a scheduled server launch, or before copying a
+    // world to a dedicated host) so the very first player connection's
+    // own interest-scoped load (below, and per-movement streaming
+    // further down) already finds real saved chunks on disk the moment
+    // it needs them, instead of every chunk in range paying worldgen's
+    // full cost inline during that first player's own session.
+    if (config.pre_generate_radius > 0) {
+        const lcu::i32 radius = config.pre_generate_radius;
+        const lcu::usize total_columns = static_cast<lcu::usize>(2 * radius + 1) * static_cast<lcu::usize>(2 * radius + 1);
+        LCU_LOG_INFO("--pre-generate-radius {}: generating {} column(s) around spawn ({},{})...", radius,
+                     total_columns, spawn_chunk.x, spawn_chunk.z);
+        lcu::usize saved_count = 0;
+        for (lcu::i32 cx = spawn_chunk.x - radius; cx <= spawn_chunk.x + radius; ++cx) {
+            for (lcu::i32 cz = spawn_chunk.z - radius; cz <= spawn_chunk.z + radius; ++cz) {
+                for (lcu::i32 cy = load_settings.min_chunk_y; cy <= load_settings.max_chunk_y; ++cy) {
+                    const lcu::voxel::ChunkCoord coord{cx, cy, cz};
+                    world.load_chunk(coord);
+                    if (const lcu::voxel::Chunk* chunk = world.chunk_at(coord)) {
+                        if (lcu::serialization::save_chunk_to_file(*chunk, chunk_file_path(coord))) {
+                            ++saved_count;
+                        }
+                    }
+                }
+            }
+        }
+        LCU_LOG_INFO("--pre-generate-radius {}: saved {} chunk(s) to \"{}\"", radius, saved_count,
+                     chunk_save_dir.string());
+    }
+
     for (lcu::i32 cx = spawn_chunk.x - load_settings.radius_xz; cx <= spawn_chunk.x + load_settings.radius_xz;
          ++cx) {
         for (lcu::i32 cz = spawn_chunk.z - load_settings.radius_xz; cz <= spawn_chunk.z + load_settings.radius_xz;

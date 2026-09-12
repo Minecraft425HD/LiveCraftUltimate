@@ -2830,6 +2830,47 @@ unverified claim; a real naturally-occurring demonstration needs Phase
 either - deferred until Phase 71 makes this a meaningful per-frame cost.
 See DECISIONS.md and PROJECT_STATE.md Known Limitations.
 
+## Phase 71 — Render distance + chunk persistence + pre-loading
+
+- [x] 71.1: `runtime_load_radius` (from `options.render_distance`,
+  clamped 2-12) replaces the old fixed `load_settings.radius_xz` at
+  every real client-side streaming/unload call site; two new live
+  options-menu rows ("Renderdistanz (nah)"/"Sichtweite (LOD)") force an
+  immediate re-stream on change.
+- [x] 71.2: new `Options::keep_chunks_loaded` (default true) makes
+  `unload_far_chunks` an early-return no-op - confirmed via a real
+  `LCU_VERIFY_MOVE_SECONDS=30` run, loaded chunk count only ever rose.
+- [x] 71.3: new `World::adopt_generated_chunk` + `preload_world_async`
+  - real parallel terrain generation across `JobSystem` worker threads
+  (independently confirmed thread-safe), real logged progress, real 30s
+  timeout (waits out an in-flight job rather than aborting it). Runs
+  for `render_distance + 2` at client startup, before the player
+  spawns.
+- [x] 71.4: an extra `preload_world_async` call on every real chunk-
+  boundary crossing, reaching `runtime_load_radius` further out in
+  whichever XZ direction the player just moved - total reach 2x
+  `runtime_load_radius`, matching the brief's own literal figure.
+- [x] 71.5 (marked "Optional" in the brief): new `VoxelServer --pre-
+  generate-radius N` flag - generates and saves every chunk within N of
+  spawn via `save_chunk_to_file` before the server accepts connections.
+- [x] 71.6: new `LCU_VERIFY_PRELOAD` hook (forces radius=4, logs a real
+  PASS/FAIL against "> 36"); real `LCU_VERIFY_MOVE_SECONDS=30` run
+  confirming monotonic chunk-count growth.
+- [x] 2 new `World.*` unit tests (`AdoptGeneratedChunk` skips the
+  generator / is a no-op if already loaded).
+
+`ctest` 669/669 (bgfx, up from 667) / 641/641 (non-bgfx, up from 639).
+Full regression sweep (`LCU_VERIFY_BREAK_PLACE`, `LCU_VERIFY_CULLING` in
+both the open and `cave` scenarios) clean on both configs after the
+render-distance-default change.
+
+**PARTIAL**: the 30s preload timeout can't literally abort an in-flight
+`JobSystem` job (waits it out instead - `JobSystem::cancel` can't
+preempt a Running job). No full graphical loading-screen UI was built
+for 71.3 - only the brief's own literal "debug text 'Loading chunks:
+X/Y'" readout. See DECISIONS.md and BUILD_STATUS.md for the full real-
+run evidence.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

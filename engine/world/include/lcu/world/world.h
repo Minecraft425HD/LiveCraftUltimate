@@ -56,6 +56,19 @@ class World : public NonCopyable {
     // for the same coordinate without regenerating it).
     void load_chunk(voxel::ChunkCoord coord);
 
+    // Adopts `chunk` as already-Generated content for `coord`, without
+    // ever calling `generator_` (Phase 71, brief section 71.3's own
+    // "Chunk-Generierung ueber JobSystem verteilen") - the real
+    // counterpart to load_chunk for a caller that already produced the
+    // chunk's content itself (typically off the main thread, since
+    // `generator_` isn't required to be thread-safe and this class
+    // itself has no internal locking - see the class's own doc comment
+    // on chunks_ being a plain, unsynchronized unordered_map). No-op if
+    // `coord` is already loaded (idempotent, same as load_chunk) so a
+    // caller racing against e.g. a concurrent stream_chunks_around call
+    // for the same coordinate can't clobber it with stale data.
+    void adopt_generated_chunk(voxel::ChunkCoord coord, voxel::Chunk chunk);
+
     // Returns nullptr if no chunk is loaded (state < Generated) at
     // `coord`.
     const voxel::Chunk* chunk_at(voxel::ChunkCoord coord) const;

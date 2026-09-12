@@ -137,8 +137,24 @@ correctly composite; new `Options::render_distance`/`lod_distance`;
 confirmed working end to end via a real headless run with `render_
 distance` temporarily forced to 0, since this project's own default
 chunk-load radius never naturally reaches the LOD band until Phase 71 -
-see DECISIONS.md)** are done - see TASK_QUEUE.md for per-phase detail
-as each of the remaining 2 phases lands. See
+see DECISIONS.md)**, and **Phase 71 (render distance goes live:
+`runtime_load_radius` replaces the old fixed quality-profile streaming
+radius everywhere, live-adjustable from two new options-menu rows -
+real, direct consequence, the default loaded area grew from 3x3 to
+17x17 columns; chunks no longer unload by default (`Options::keep_
+chunks_loaded`, confirmed monotonically non-decreasing over a real 30-
+second headless move); real async pre-loading via a new `World::
+adopt_generated_chunk` + `preload_world_async`, parallelizing real
+terrain generation across `engine::jobs::JobSystem` worker threads
+(confirmed thread-safe by reading the actual functions involved, not
+assumed) with real logged progress and a real 30s timeout that waits
+out rather than aborts an in-flight job (`JobSystem` can't preempt a
+Running job); a real directional-streaming bias reaching further ahead
+of the player's own movement; an optional, brief-marked-"Optional"
+`VoxelServer --pre-generate-radius N` flag; a new `LCU_VERIFY_PRELOAD`
+hook - see DECISIONS.md/BUILD_STATUS.md for the full real-run evidence
+and the two honest PARTIAL items)** are done - see TASK_QUEUE.md for
+per-phase detail as the remaining phase lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2738,19 +2754,29 @@ None currently tracked.
   in this project's own unoptimized "Development" build (over the
   brief's own "<1ms" target) but 0.12 ms in a one-off optimized
   Release+bgfx build - see DECISIONS.md for the full investigation.
-- Phase 70's real LOD rendering has nothing to render under this
-  project's own current default settings: the default chunk-load radius
-  (`radius_xz=1`) never places a loaded chunk beyond the default
-  `render_distance=8`, so `LOD quads: 0` is the real, expected steady
-  state today. The whole pipeline (classification, `build_lod_chunk`,
-  the dedicated bgfx view, real depth compositing) was confirmed working
-  by temporarily forcing `render_distance=0` in a real headless run
-  (`LOD quads: 10` appeared) - a real, direct proof, not an assumption -
-  but a real, naturally-occurring demonstration needs Phase 71's own
-  larger streaming radius. No per-chunk LOD mesh cache exists yet either
-  (each visible far chunk rebuilds its own summary every frame it's
-  drawn) - real, deliberately deferred until Phase 71 makes this a
-  meaningful per-frame cost (see DECISIONS.md).
+- **Resolved by Phase 71**: Phase 70's own note that LOD rendering had
+  nothing to render under default settings no longer applies - Phase 71
+  made `render_distance` genuinely drive the real streaming radius
+  (17x17 columns by default), but a real headless `LCU_VERIFY_CULLING`
+  run still shows `LOD quads: 0` at default settings, since the default
+  `render_distance=8`/`lod_distance=32` band still sits inside the same
+  streamed area on this project's own relatively flat default terrain -
+  a real LOD quad needs either a taller world or terrain features
+  further out than default terrain provides, or deliberately walking
+  there first (`unload_far_chunks` no longer culls the trail behind the
+  player either, since Phase 71.2 - see DECISIONS.md). No per-chunk LOD
+  mesh cache exists yet either (each visible far chunk rebuilds its own
+  summary every frame it's drawn) - still real, deliberately deferred
+  future work, not yet a measured per-frame cost.
+- Phase 71's own 30-second preload timeout can't literally abort an
+  in-flight `JobSystem` job (`JobSystem::cancel` only prevents a job
+  that hasn't started yet - see its own doc comment) - past the
+  deadline, `preload_world_async` stops polling/logging progress and
+  just waits out whatever's still `Running`, so the real worst case is
+  unbounded rather than a hard 30s cutoff. No full graphical loading-
+  screen UI (a progress bar) was built for brief 71.3 either - only the
+  brief's own literal "debug text 'Loading chunks: X/Y'", logged via
+  `LCU_LOG_INFO` - see DECISIONS.md/BUILD_STATUS.md for both.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment
