@@ -108,7 +108,11 @@ class Renderer : public NonCopyable {
     // routing), submitted as a SEPARATE `submit_chunk_mesh` call from
     // the opaque layer, after it, so translucent water composites over
     // already-drawn solid terrain (see client/main.cpp's own real
-    // per-frame two-pass draw loop).
+    // per-frame two-pass draw loop). Also (Phase 67) genuinely NOT
+    // backface-culled, unlike the opaque path's `BGFX_STATE_DEFAULT` -
+    // this layer must stay visible from both sides (looking up at a
+    // water surface from underwater is real Minecraft behavior, not a
+    // backface to discard).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
                             const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
                             bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, bool alpha_blend = false);

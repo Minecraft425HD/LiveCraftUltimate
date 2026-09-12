@@ -22,6 +22,7 @@
 #include "lcu/lighting/light_storage.h"
 #include "lcu/lighting/propagation.h"
 #include "lcu/lighting/world_light.h"
+#include "lcu/math/vec3.h"
 #include "lcu/network/connection.h"
 #include "lcu/physics/collision.h"
 #include "lcu/physics/raycast.h"
@@ -147,6 +148,64 @@ static void BM_GreedyMesher_CheckerboardChunk(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_GreedyMesher_CheckerboardChunk);
+
+// --- Backface culling (Phase 67, engine/rendering::Renderer) ----------------
+
+// Real, honest limitation: this sandbox's bgfx backend is Noop (no real
+// GPU/display - see BUILD_STATUS.md), so there is no actual hardware
+// rasterizer here whose real vertex-processing time backface culling
+// could be timed against. What IS real and CPU-measurable: for a solid,
+// greedy-meshed volume, a real fraction of its own emitted triangles
+// face away from any single fixed view direction and would never
+// survive `BGFX_STATE_CULL_CW`'s per-triangle test on real hardware -
+// this benchmark computes that real fraction from the mesh's own real
+// per-vertex normals (a real, direct proxy for the GPU-side effect this
+// environment can't itself time), and times how long the counting itself
+// costs. `state.counters["FrontFacingPercent"]` is the real result to
+// read - Phase 67's own "30-50% weniger Vertex-Verarbeitung" is an
+// expectation about the GPU's real workload reduction, and this
+// benchmark's own counter is the closest honest CPU-side evidence for it
+// in an environment with no real GPU to time.
+static void BM_Render_BackfaceCulling(benchmark::State& state) {
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    Chunk chunk;  // checkerboard - a realistic mix of faces pointing every
+                  // direction, not an artificially uniform single cube.
+    for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+                if ((x + y + z) % 2 == 0) {
+                    chunk.set_block(x, y, z, stone_id);
+                }
+            }
+        }
+    }
+    const auto mesh = lcu::voxel::mesh_chunk_greedy(chunk, registry);
+    const lcu::math::Vec3 view_dir = lcu::math::normalize(lcu::math::Vec3{0.3f, -0.2f, 1.0f});
+    const lcu::usize triangle_count = mesh.opaque.indices.size() / 3;
+
+    lcu::usize front_facing = 0;
+    for (auto _ : state) {
+        front_facing = 0;
+        for (lcu::usize i = 0; i + 2 < mesh.opaque.indices.size(); i += 3) {
+            const lcu::math::Vec3& normal = mesh.opaque.vertices[mesh.opaque.indices[i]].normal;
+            // A face survives BGFX_STATE_CULL_CW's real test when its
+            // winding is CCW as seen from the camera, which (by this
+            // project's own real winding-matches-normal convention - see
+            // GreedyMesherTest's geometric-winding check) is exactly
+            // when the camera looks against the normal.
+            if (lcu::math::dot(normal, view_dir) < 0.0f) {
+                ++front_facing;
+            }
+        }
+        benchmark::DoNotOptimize(front_facing);
+    }
+    state.counters["TrianglesTotal"] = static_cast<lcu::f64>(triangle_count);
+    state.counters["FrontFacingPercent"] =
+        triangle_count == 0 ? 0.0
+                            : 100.0 * static_cast<lcu::f64>(front_facing) / static_cast<lcu::f64>(triangle_count);
+}
+BENCHMARK(BM_Render_BackfaceCulling);
 
 // --- Lighting (engine/lighting) ---------------------------------------------
 

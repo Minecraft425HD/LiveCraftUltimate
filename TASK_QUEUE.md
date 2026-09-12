@@ -2679,6 +2679,49 @@ per-frame wall-clock cost difference between `dev-bgfx` and `dev-
 nobgfx` on this specific scene - see DECISIONS.md and PROJECT_STATE.md
 Known Limitations.
 
+## Phase 66 — Documentation for Phases 58-65
+
+- [x] `README.md` "Status" section gained bullets for the player model/
+  skin system, visible NPCs, transparent water, the crack-texture
+  overlay, and farming - none of which it mentioned before despite
+  being fully documented per-phase already.
+- [x] No code changes - `ARCHITECTURE.md`'s directory map was already
+  generic enough to cover the new files without edits, and the Controls
+  table's quick-craft row already described the grid-vs-shortcut
+  distinction Phase 65 relies on.
+
+Closes out the fifth user-directed program (Phases 58-65) in full.
+
+## Phase 67 — Backface culling
+
+- [x] Investigated (not assumed) whether the opaque chunk pass actually
+  culls backfaces: `BGFX_STATE_DEFAULT` already includes `BGFX_STATE_
+  CULL_CW`, and this project's own winding convention (confirmed via
+  `mesh_chunk_greedy`'s own comment and the existing `GreedyMesherTest`
+  geometric-winding check) is exactly what that cull mode expects - no
+  fix needed on the opaque path.
+- [x] Real bug found and fixed: the translucent `ChunkMesh::water` layer
+  (used by both `game:water` and `game:wheat`) had `BGFX_STATE_CULL_CW`
+  explicitly set too - removed, since that layer must render double-
+  sided (a water surface viewed from underneath must still show).
+- [x] New `BM_Render_BackfaceCulling` benchmark - a real, honest CPU-
+  side proxy (fraction of a checkerboard chunk's own triangles facing
+  away from a fixed view direction, via the mesh's own real per-vertex
+  normals) for the GPU-side effect this Noop-backend sandbox can't
+  itself time; measured `FrontFacingPercent=50` on a real run.
+
+`ctest` 646/646 (bgfx) / 638/638 (non-bgfx) - unchanged; `engine/
+rendering` only builds under `LCU_ENABLE_BGFX`, so this phase's only
+code change doesn't touch the non-bgfx build graph at all.
+
+Honestly scoped: `BM_Render_BackfaceCulling`'s own `FrontFacingPercent`
+is a real CPU-computed proxy, not an actual GPU frame-time measurement
+- this sandbox has no real GPU/display to measure the brief's own
+literal "30-50% weniger Vertex-Verarbeitung" FPS claim against directly
+(see DECISIONS.md and PROJECT_STATE.md Known Limitations). Opens the
+sixth user-directed program (Phases 67-72: culling cascade + LOD +
+render distance).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

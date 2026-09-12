@@ -185,12 +185,21 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     // Real translucent state (Phase 61) - see this function's own doc
     // comment in renderer.h. BGFX_STATE_DEFAULT (every opaque chunk
     // draw, unchanged) already includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/
-    // MSAA; the alpha-blended path keeps depth TESTING (so water still
-    // correctly hides behind solid terrain) but drops depth WRITING and
-    // adds real alpha blending instead.
-    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
-                                      BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA)
-                                   : BGFX_STATE_DEFAULT;
+    // MSAA - a real, working backface cull confirmed against this
+    // project's own winding convention in Phase 67 (see
+    // GreedyMesherTest's "geometric winding matches stored normal" check
+    // and DECISIONS.md); the alpha-blended path keeps depth TESTING (so
+    // water still correctly hides behind solid terrain) but drops depth
+    // WRITING and adds real alpha blending instead. Real, deliberate
+    // Phase 67 fix: no CULL_CW here (removed - it used to be set,
+    // wrongly culling this layer the same as opaque terrain) - this is
+    // the real water/wheat translucent layer, and Minecraft's own water
+    // is genuinely visible from both sides (looking up at the surface
+    // from underwater must show it, not cull it away as a backface).
+    const u64 state = alpha_blend
+                           ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
+                              BGFX_STATE_BLEND_ALPHA)
+                           : BGFX_STATE_DEFAULT;
     bgfx::setState(state);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
     bgfx::setUniform(sky_light_scale_uniform_, uniform_value);

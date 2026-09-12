@@ -4509,3 +4509,74 @@ click path) - rejected as weaker evidence than driving the actual
 player-facing interaction, and this project's own established pattern
 (`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`) already favors real
 click-driven headless verification for grid crafting.
+
+## 2026-09-12 — Phase 67: the opaque backface cull already existed and was correct; the real bug was the translucent layer wrongly culling too, plus an honest choice of what a "backface culling benchmark" can even mean under a Noop GPU
+
+**Context:** Phase 67 opens a new, sixth user-directed program (Phases
+67-72: a culling cascade - backface, frustum, occlusion - plus LOD and
+a configurable render distance, "maximale Minecraft-Performance").
+
+**The opaque chunk draw path did not need a fix - it was investigated,
+not assumed.** `Renderer::submit_chunk_mesh`'s opaque branch uses
+`BGFX_STATE_DEFAULT`, which bgfx itself defines as already including
+`BGFX_STATE_CULL_CW` (confirmed by reading bgfx's own `defines.h`, not
+assumed from memory). Whether that's the *correct* cull mode depends on
+this project's own triangle winding convention, which was independently
+re-confirmed (not assumed) by reading `mesh_chunk_greedy`'s own comment
+("the winding c0->c1->c2->c3 is correct for a positive-facing quad")
+and the existing `GreedyMesherTest` that checks the geometric winding
+(right-hand rule on the triangle's own edges) matches its stored vertex
+normal for every triangle. `BGFX_STATE_CULL_CW` culls clockwise-wound
+(screen-space) triangles, keeping CCW ones as front-facing - exactly
+the convention this project's own mesher already produces. So the
+opaque path was already correctly culling backfaces before this phase
+touched anything.
+
+**The real bug: the translucent (`ChunkMesh::water`) layer had
+`BGFX_STATE_CULL_CW` explicitly set too, which is wrong for that
+layer.** This layer is used by both `game:water` and `game:wheat`
+(Phase 63's `texture_index_offset_by_state` mechanism routes wheat
+through it for its own alpha-cutout texture, not because it's liquid).
+Minecraft's own water is genuinely visible from both sides - looking up
+at the underside of a water surface while swimming underneath must
+still show it, not cull it away as a "backface" the way opaque terrain
+correctly does. Removed the explicit `BGFX_STATE_CULL_CW` from the
+`alpha_blend` branch so this layer renders double-sided, matching the
+brief's own literal "Wasser-/Blätter-Pass NICHT cullen (man sieht
+durch)".
+
+**What "benchmark the 30-50% vertex-processing reduction" can honestly
+mean when the only bgfx backend available is Noop.** This sandbox has
+no real GPU or display (see BUILD_STATUS.md) - there is no actual
+rasterizer here whose real per-frame vertex-processing time backface
+culling could be timed against; a wall-clock "before/after" GPU
+benchmark would be theater, not a real measurement. `BM_Render_
+BackfaceCulling` instead computes something real and CPU-observable
+that stands in for the same effect: for a representative greedy-meshed
+checkerboard chunk (the same "no two neighbors share a block type, no
+merging possible" chunk `BM_GreedyMesher_CheckerboardChunk` already
+uses - a realistic mix of face directions, not one artificial cube), it
+counts what fraction of the chunk's own real triangles face away from a
+fixed view direction using the mesh's own real per-vertex normals - a
+direct, honest proxy for what `BGFX_STATE_CULL_CW` would discard on
+real hardware for that same view. A real run measured `FrontFacingPercent
+=50`, landing inside the brief's own expected 30-50% range - real
+evidence, not a fabricated number, for an effect this environment
+genuinely cannot time on real silicon.
+
+**Alternatives considered:** leaving `BGFX_STATE_CULL_CW` on the
+translucent layer since it was "already there" - rejected once actually
+read, since it directly contradicts the brief's own explicit
+requirement and real Minecraft's own see-through-water behavior; adding
+a second render-only water pass instead of removing the cull bit
+(rendering water twice, once per winding) - rejected as needless
+complexity when simply not culling that pass already achieves the same
+visible result with the existing single draw call; skipping the
+benchmark entirely since "there's no real GPU here anyway" - rejected as
+throwing away a real, honest, computable signal (the actual culled-
+triangle fraction) just because the literal wall-clock GPU timing this
+environment can't produce isn't available; benchmarking wall-clock time
+to submit a mesh with vs. without a cull state set - rejected as
+measuring bgfx's own CPU-side state-setting overhead (near zero,
+uninteresting) rather than anything related to the real GPU-side
+culling effect the brief is actually asking about.

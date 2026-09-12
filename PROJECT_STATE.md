@@ -98,9 +98,21 @@ plant/harvest interactions, and real harvest drops)**, and **Phase 65
 2x `game:planks` -> a minimal `game:wooden_hoe`, both verified through
 the real 2x2/3x3 crafting grid via a new click-driven headless hook,
 plus the real discovery and documentation that the older Phase-23
-quick-craft shortcut structurally can't represent either recipe)** are
+quick-craft shortcut structurally can't represent either recipe)**, and
+**Phase 66 (documentation consolidation for Phases 58-65, no code
+changes)** are done - closing out that fifth user-directed program in
+full. A sixth user-directed program (Phases 67-72: a real culling
+cascade - backface, frustum, occlusion - plus LOD and a configurable
+render distance, "maximale Minecraft-Performance") is now in progress -
+**Phase 67 (a real backface-culling audit: the opaque chunk pass
+already correctly culled via `BGFX_STATE_DEFAULT`'s own `BGFX_STATE_
+CULL_CW`, confirmed against this project's own winding convention; the
+real bug fixed was the translucent water/wheat layer wrongly culling
+too, when it must render double-sided; a new `BM_Render_
+BackfaceCulling` benchmark computes a real, honest CPU-side proxy for
+the GPU-side effect this Noop-backend sandbox can't itself time)** is
 done - see TASK_QUEUE.md for per-phase detail as each of the remaining
-1 phase lands. See
+5 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2662,6 +2674,16 @@ None currently tracked.
   non-bgfx path skips) — a real, newly-confirmed data point extending
   Phase 64's own timing caveat above, not previously broken out by
   build config anywhere in this project's docs.
+- Phase 67's `BM_Render_BackfaceCulling` benchmark is **NOT VERIFIED —
+  ENVIRONMENT LIMITATION** in the sense that it cannot time an actual
+  GPU rasterizer's own vertex-processing cost (this sandbox's bgfx
+  backend is Noop, no real GPU/display exists here) — what it reports
+  instead (`FrontFacingPercent`, a real per-triangle CPU computation
+  against the mesh's own stored normals) is an honest proxy for that
+  effect, not a substitute for a real frame-time measurement on real
+  hardware. A real Mac/desktop run with an actual GPU backend would be
+  needed to confirm the brief's own literal "30-50% weniger Vertex-
+  Verarbeitung" FPS claim end-to-end.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

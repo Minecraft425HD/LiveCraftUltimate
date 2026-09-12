@@ -2,7 +2,44 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67
+
+### Phase 67
+
+- **Real backface-culling fix**: the opaque chunk pass already had real
+  backface culling (`BGFX_STATE_DEFAULT` includes `BGFX_STATE_CULL_CW`,
+  confirmed against this project's own winding-matches-normal convention
+  - see `GreedyMesherTest`'s geometric-winding check). The translucent
+  layer (`ChunkMesh::water`, used by both `game:water` and `game:wheat`)
+  wrongly had the same `BGFX_STATE_CULL_CW` explicitly set too - removed,
+  since that layer must stay visible from both sides (looking up at a
+  water surface from underwater is real behavior, not a backface to
+  discard).
+- New `BM_Render_BackfaceCulling` benchmark: since this sandbox's bgfx
+  backend is Noop (no real GPU to time an actual rasterizer workload
+  reduction on), it instead computes the real fraction of a greedy-
+  meshed checkerboard chunk's own triangles that face away from a fixed
+  view direction (i.e. would be discarded by `BGFX_STATE_CULL_CW` on
+  real hardware) from the mesh's own real per-vertex normals - measured
+  `FrontFacingPercent=50` on a real run, consistent with the brief's own
+  "30-50% weniger Vertex-Verarbeitung" expectation.
+- Full regression sweep and `ctest` 646/646 (bgfx) / 638/638 (non-bgfx)
+  stay clean - `engine/rendering` only builds under `LCU_ENABLE_BGFX`,
+  so this phase's only code change (`renderer.cpp`/`.h`) doesn't affect
+  the non-bgfx config's own build graph at all, and its test count is
+  unchanged.
+
+### Phase 66
+
+- Documentation consolidation for the fifth user-directed program
+  (Phases 58-65: player model, skins, visible NPCs, crack textures,
+  transparent water, and full farming). No code changes - `README.md`'s
+  own "Status" section gained bullets for the player model/skin system,
+  visible NPCs, transparent water, the crack-texture overlay, and
+  farming (till/plant/grow/harvest/craft), none of which it mentioned
+  before despite being fully documented per-phase already in this file
+  and in `DECISIONS.md`/`BUILD_STATUS.md`/`PROJECT_STATE.md`/
+  `TASK_QUEUE.md`.
 
 ### Phase 65
 
