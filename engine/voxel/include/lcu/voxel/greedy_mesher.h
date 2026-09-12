@@ -19,6 +19,20 @@ struct MeshVertex {
     // layout attribute order in lockstep (this struct is memcpy'd
     // straight into a GPU buffer, see upload_chunk_mesh_layer).
     math::Vec3 color{1.0f, 1.0f, 1.0f};
+    // Texture-atlas tile index (Phase 53, lcu::assets::TextureAtlas) -
+    // deliberately placed HERE, before the trailing `light` byte below,
+    // not after it: a u16 needs 2-byte alignment, and this offset
+    // (right after `color`) already lands on one with zero compiler-
+    // inserted padding, so chunk_mesh_vertex_layout()'s existing "one
+    // tightly-packed .add() per field, single trailing skip() at the
+    // end" scheme (see its own doc comment) still holds exactly. Putting
+    // it after `light` instead would silently insert a 1-byte internal
+    // gap that same scheme doesn't account for, corrupting every
+    // vertex's light/texture_index bytes on GPU upload. Defaults to 0 -
+    // Phase 53 wires the *pipeline* only; every real face still resolves
+    // to atlas tile 0 until Phase 55 gives BlockDefinition real per-face
+    // texture assignments.
+    u16 texture_index = 0;
     // Packed per-voxel light (Phase 28): low nibble = sky light, high
     // nibble = block light, each 0-15 - the exact same packing
     // lcu::lighting::LightStorage itself uses (see its doc comment), one
@@ -52,14 +66,18 @@ struct ChunkMeshLayer {
     // default to full-bright so the light-less mesh_chunk_greedy
     // overload and any caller that doesn't care about lighting (this
     // engine's existing rendering test included) don't need updating.
+    // `texture_index` (Phase 53) is the same real atlas tile for all 4
+    // corners - a quad is one flat block face, never split across two
+    // different textures - defaults to 0 (atlas tile 0) for the same
+    // "existing callers don't need updating" reason.
     void add_quad(const math::Vec3& v0, const math::Vec3& v1, const math::Vec3& v2, const math::Vec3& v3,
                   const math::Vec3& normal, f32 width, f32 height, const math::Vec3& color = {1.0f, 1.0f, 1.0f},
-                  u8 light0 = 0xFF, u8 light1 = 0xFF, u8 light2 = 0xFF, u8 light3 = 0xFF) {
+                  u8 light0 = 0xFF, u8 light1 = 0xFF, u8 light2 = 0xFF, u8 light3 = 0xFF, u16 texture_index = 0) {
         const u32 base = static_cast<u32>(vertices.size());
-        vertices.push_back({v0, normal, 0.0f, 0.0f, color, light0});
-        vertices.push_back({v1, normal, width, 0.0f, color, light1});
-        vertices.push_back({v2, normal, width, height, color, light2});
-        vertices.push_back({v3, normal, 0.0f, height, color, light3});
+        vertices.push_back({v0, normal, 0.0f, 0.0f, color, texture_index, light0});
+        vertices.push_back({v1, normal, width, 0.0f, color, texture_index, light1});
+        vertices.push_back({v2, normal, width, height, color, texture_index, light2});
+        vertices.push_back({v3, normal, 0.0f, height, color, texture_index, light3});
 
         indices.push_back(base + 0);
         indices.push_back(base + 1);
@@ -93,12 +111,33 @@ BlockId block_or_air(const ChunkStorage<EdgeLength>& chunk, i32 x, i32 y, i32 z)
     return chunk.block_at(static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z));
 }
 
+// Real state counterpart to block_or_air above (Phase 63) - an
+// out-of-chunk cell has no real state to read (it's treated as air,
+// which itself is always state 0), so this returns 0 for the exact
+// same out-of-bounds case block_or_air does, rather than duplicating
+// its own bounds check with different behavior.
+template <u32 EdgeLength>
+u8 state_or_zero(const ChunkStorage<EdgeLength>& chunk, i32 x, i32 y, i32 z) {
+    constexpr i32 kEdge = static_cast<i32>(EdgeLength);
+    if (x < 0 || y < 0 || z < 0 || x >= kEdge || y >= kEdge || z >= kEdge) {
+        return 0;
+    }
+    return chunk.state_at(static_cast<u32>(x), static_cast<u32>(y), static_cast<u32>(z));
+}
+
 inline bool is_opaque_block(BlockId id, const BlockRegistry& registry) {
     return !registry.definition_of(id).is_transparent;
 }
 
 struct MaskCell {
     BlockId block_id = kAirBlockId;
+    // Real per-voxel block state (Phase 63) of whichever side actually
+    // draws this cell's face - part of the real merge identity below,
+    // exactly like block_id: two otherwise-identical neighboring blocks
+    // in different states (Phase 64's own wheat growth stages) must
+    // never merge into one quad, since they need to show different
+    // texture content.
+    u8 state = 0;
     bool positive_facing = false;
     bool has_face = false;
     // Packed light (Phase 28, same nibble layout as MeshVertex::light) of
@@ -119,7 +158,8 @@ struct MaskCell {
     // purely geometric/material now, exactly like Phase 26's original
     // rule, and lighting looks smooth instead of flat either way.
     bool merges_with(const MaskCell& other) const {
-        return has_face && other.has_face && block_id == other.block_id && positive_facing == other.positive_facing;
+        return has_face && other.has_face && block_id == other.block_id && state == other.state &&
+               positive_facing == other.positive_facing;
     }
 };
 
@@ -218,15 +258,50 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     const bool pos_opaque = detail::is_opaque_block(pos_id, registry);
 
                     detail::MaskCell cell;
+                    // `solid_is_neg` - which side (if either) actually
+                    // draws a face this cell, "solid" meaning "the real
+                    // substance side, not the side this face is exposed
+                    // to" (an opaque block normally, but see the Phase 61
+                    // branch below for a non-opaque real substance like
+                    // water too).
+                    bool solid_is_neg = false;
                     if (neg_opaque != pos_opaque) {
                         cell.has_face = true;
-                        if (neg_opaque) {
+                        solid_is_neg = neg_opaque;
+                    } else if (!neg_opaque && !pos_opaque && neg_id != pos_id) {
+                        // Real substance boundary between two DIFFERENT
+                        // non-opaque blocks (Phase 61: water's own real
+                        // surface against open air) - the plain
+                        // `neg_opaque != pos_opaque` test above only ever
+                        // catches "one side is a solid wall", so a
+                        // transparent-but-real block like water sitting
+                        // next to air (also transparent) would otherwise
+                        // never get a face at all, making it invisible -
+                        // exactly the trap `game:water`'s own Phase-53-
+                        // era registration comment already named. Today
+                        // air and water are the only two `is_transparent`
+                        // blocks that exist, so this real branch only
+                        // ever fires for a water/air boundary - it
+                        // generalizes correctly to any future non-opaque-
+                        // vs-non-opaque pairing too, preferring whichever
+                        // side isn't air to draw its face (falling back to
+                        // the negative side if somehow neither is air - a
+                        // real, deliberate but arbitrary tie-break with no
+                        // existing block pair to have a "right" answer
+                        // for).
+                        cell.has_face = true;
+                        solid_is_neg = (pos_id == kAirBlockId) || (neg_id != kAirBlockId);
+                    }
+                    if (cell.has_face) {
+                        if (solid_is_neg) {
                             // Solid is on the negative side: the visible
                             // face points away from it, along +d.
                             cell.block_id = neg_id;
+                            cell.state = detail::state_or_zero(chunk, neg_pos[0], neg_pos[1], neg_pos[2]);
                             cell.positive_facing = true;
                         } else {
                             cell.block_id = pos_id;
+                            cell.state = detail::state_or_zero(chunk, pos_pos[0], pos_pos[1], pos_pos[2]);
                             cell.positive_facing = false;
                         }
 
@@ -242,7 +317,7 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         // computed yet (Phase 29-31), so this keeps the
                         // Phase 26/27-era full-bright default rather than
                         // reading out of bounds or guessing dark.
-                        const i32* air_pos = neg_opaque ? pos_pos : neg_pos;
+                        const i32* air_pos = solid_is_neg ? pos_pos : neg_pos;
                         if (air_pos[0] >= 0 && air_pos[0] < N && air_pos[1] >= 0 && air_pos[1] < N &&
                             air_pos[2] >= 0 && air_pos[2] < N) {
                             const u32 ax = static_cast<u32>(air_pos[0]);
@@ -331,10 +406,29 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     // fallback chain.
                     const BlockDefinition& def = registry.definition_of(current.block_id);
                     math::Vec3 quad_color = def.color;
+                    // Real per-face atlas texture index (Phase 55) -
+                    // same fallback chain/face logic as quad_color just
+                    // above, resolved at the same time since both come
+                    // from the same real per-face lookup on `def`. See
+                    // BlockDefinition::top_texture's own doc comment.
+                    u32 quad_texture_index = def.top_texture;
                     if (d == 1 && !current.positive_facing) {
                         quad_color = def.bottom_color.value_or(def.side_color.value_or(def.color));
+                        quad_texture_index = def.bottom_texture.value_or(def.side_texture.value_or(def.top_texture));
                     } else if (d != 1) {
                         quad_color = def.side_color.value_or(def.color);
+                        quad_texture_index = def.side_texture.value_or(def.top_texture);
+                    }
+                    // Real state-to-texture offset (Phase 63 farming
+                    // foundation): opt-in per BlockDefinition (see its
+                    // own doc comment) - every current cell in this
+                    // merged run shares the same real state (merges_with
+                    // already refused to merge cells with different
+                    // states above), so this is exactly one real,
+                    // uniform offset for the whole quad, not a per-pixel
+                    // concern.
+                    if (def.texture_index_offset_by_state) {
+                        quad_texture_index += current.state;
                     }
                     // Smooth per-vertex light (Phase 33): one sample per
                     // geometric grid CORNER of this merged quad (A=c0's
@@ -349,10 +443,21 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                     const u8 light_b = detail::smooth_corner_light(mask, N, iu + width, jv);
                     const u8 light_c = detail::smooth_corner_light(mask, N, iu + width, jv + height);
                     const u8 light_d = detail::smooth_corner_light(mask, N, iu, jv + height);
+                    // Real transparent-layer routing (Phase 61): the same
+                    // `is_transparent` flag that decided this quad's own
+                    // face visibility above also decides which real
+                    // layer it belongs in - a transparent "current" block
+                    // (only water today; air itself is never `current`,
+                    // see the face-visibility branch above) goes into
+                    // `mesh.water` for its own separate, alpha-blended
+                    // draw call (Renderer::submit_chunk_mesh's real
+                    // `alpha_blend` parameter); everything else keeps
+                    // going into `mesh.opaque`, unchanged.
+                    ChunkMeshLayer& target_layer = def.is_transparent ? mesh.water : mesh.opaque;
                     if (current.positive_facing) {
-                        mesh.opaque.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color, light_a, light_b, light_c,
-                                              light_d);
+                        target_layer.add_quad(c0, c1, c2, c3, normal, static_cast<f32>(width),
+                                               static_cast<f32>(height), quad_color, light_a, light_b, light_c,
+                                               light_d, static_cast<u16>(quad_texture_index));
                     } else {
                         // Winding reversed (c0,c3,c2,c1) for a negative-
                         // facing quad - the light argument order must
@@ -360,9 +465,9 @@ ChunkMesh mesh_chunk_greedy(const ChunkStorage<EdgeLength>& chunk, const BlockRe
                         // gets the light for the corner it's actually
                         // at, not the corner it would be at under the
                         // other winding.
-                        mesh.opaque.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
-                                              static_cast<f32>(height), quad_color, light_a, light_d, light_c,
-                                              light_b);
+                        target_layer.add_quad(c0, c3, c2, c1, normal, static_cast<f32>(width),
+                                               static_cast<f32>(height), quad_color, light_a, light_d, light_c,
+                                               light_b, static_cast<u16>(quad_texture_index));
                     }
 
                     for (i32 l = 0; l < height; ++l) {

@@ -5,6 +5,8 @@ add_executable(VoxelClient
 target_link_libraries(VoxelClient PRIVATE
     Lcu::Engine
     Lcu::Game
+    Lcu::Stb
+    Lcu::StbImageWriteImpl
 )
 
 lcu_apply_common_options(VoxelClient)

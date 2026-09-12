@@ -81,3 +81,58 @@ TEST(ChunkStorage, SupportsAlternativeEdgeLength) {
     EXPECT_EQ(small_chunk.block_at(7, 7, 7), 1);
     EXPECT_FALSE(ChunkStorage<8>::in_bounds(8, 0, 0));
 }
+
+TEST(ChunkStorage, DefaultsToStateZeroEverywhere) {
+    Chunk chunk;
+    EXPECT_EQ(chunk.state_at(0, 0, 0), 0);
+    EXPECT_EQ(chunk.state_at(15, 15, 15), 0);
+}
+
+TEST(ChunkStorage, SetBlockWithStateSetsBothRealFields) {
+    Chunk chunk;
+    chunk.set_block_with_state(3, 4, 5, 42, 7);
+    EXPECT_EQ(chunk.block_at(3, 4, 5), 42);
+    EXPECT_EQ(chunk.state_at(3, 4, 5), 7);
+}
+
+TEST(ChunkStorage, PlainSetBlockResetsStateToZero) {
+    // A fresh block placement has no real state history - set_block
+    // (the pre-Phase-63 API every existing caller still uses) must not
+    // leave a stale state behind from whatever used to occupy this
+    // voxel.
+    Chunk chunk;
+    chunk.set_block_with_state(1, 1, 1, 5, 6);
+    ASSERT_EQ(chunk.state_at(1, 1, 1), 6);
+
+    chunk.set_block(1, 1, 1, 9);
+    EXPECT_EQ(chunk.block_at(1, 1, 1), 9);
+    EXPECT_EQ(chunk.state_at(1, 1, 1), 0);
+}
+
+TEST(ChunkStorage, SetStateAloneLeavesTheBlockIdUntouched) {
+    Chunk chunk;
+    chunk.set_block(2, 2, 2, 11);
+    chunk.set_state(2, 2, 2, 3);
+    EXPECT_EQ(chunk.block_at(2, 2, 2), 11);
+    EXPECT_EQ(chunk.state_at(2, 2, 2), 3);
+}
+
+TEST(ChunkStorage, StatesAndSetStatesRoundTripTheWholeArray) {
+    Chunk chunk;
+    chunk.set_block_with_state(0, 0, 0, 1, 200);
+    chunk.set_block_with_state(15, 15, 15, 2, 100);
+
+    Chunk other;
+    other.set_states(chunk.states());
+    EXPECT_EQ(other.state_at(0, 0, 0), 200);
+    EXPECT_EQ(other.state_at(15, 15, 15), 100);
+    // set_states never touches block ids.
+    EXPECT_EQ(other.block_at(0, 0, 0), lcu::voxel::kAirBlockId);
+}
+
+TEST(ChunkStorage, OutOfBoundsStateAccessAsserts) {
+    Chunk chunk;
+    EXPECT_DEATH(chunk.state_at(16, 0, 0), "");
+    EXPECT_DEATH(chunk.set_block_with_state(0, 0, 16, 1, 1), "");
+    EXPECT_DEATH(chunk.set_state(0, 16, 0, 1), "");
+}

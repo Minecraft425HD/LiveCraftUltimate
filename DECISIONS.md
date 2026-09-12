@@ -3639,3 +3639,873 @@ rejected as exactly the kind of unplanned scope growth the standing
 directive's own phase structure exists to prevent, and none of these
 verticals are actually small once a real implementation (not a stub) is
 attempted.
+
+## 2026-09-11 — Texture atlas: a UV inset instead of literal padding pixels, and why stb_image was deferred
+
+**Context:** Phase 53 built the real GPU texture-atlas pipeline (no
+actual block textures yet - that's Phase 54): atlas geometry, GPU
+upload, and chunk-shader UV mapping.
+
+**The directive's own "1-pixel padding between tiles" was implemented
+as a half-texel UV inset, not literal border pixels, because the
+directive also fixed the atlas at exactly 256x256 = 16x16 tiles of
+16x16 pixels - a size with zero spare pixel budget for a literal
+border.** Adding real padding pixels between tiles necessarily means
+either each tile's own authored content shrinks (e.g. 14x14 usable
+pixels inside a 16x16 cell) or the atlas itself grows past its own
+stated fixed size (e.g. 18px cells needing a 288x288 atlas) - both real
+costs the literal reading would impose that the directive's own fixed-
+size framing didn't leave room for. A half-texel inward inset from each
+tile's edge achieves the identical goal - nearest-filter sampling never
+reads a neighboring tile's pixel - at zero pixel-budget cost: unlike
+bilinear filtering (which blends across a wide footprint and genuinely
+needs a padding border), NEAREST sampling only risks bleeding from
+floating-point rounding landing a UV coordinate exactly on a tile's own
+boundary, which an inset this small already fully prevents. This is a
+real, working, deliberately-chosen alternative reading, in the same
+spirit as Phase 50's "read 'like inventory UI, grid+result only' as
+reuse-the-shape, not a literal grid-only screen" decision - the
+literal instruction and the atlas's own stated fixed size were in
+tension, and the reading that keeps both real constraints
+(no-bleeding AND the stated 256x256/16x16-tiles-of-16x16 size) intact
+was chosen over a reading that would have silently broken one of them.
+
+**`voxel::MeshVertex::texture_index` (u16) is declared BEFORE the
+trailing `light` byte, not after it - a real, deliberate field-order
+choice, not arbitrary.** `chunk_mesh_vertex_layout()`
+(`chunk_mesh_upload.cpp`) has always assumed the C++ struct has zero
+*internal* padding between fields, only a single *trailing* gap
+accounted for by one `layout.skip()` call at the end (see that
+function's own long-standing doc comment). Appending `texture_index`
+*after* `light` would have inserted exactly the kind of internal gap
+that scheme doesn't handle (a u16 needs 2-byte alignment; the offset
+right after a single trailing u8 is usually odd), which would have
+silently corrupted every vertex's light/texture-index bytes on GPU
+upload - a real, verified-in-advance failure mode, not a hypothetical
+one, caught by working through the exact byte offsets before writing
+the code rather than after debugging a broken render. Placing it
+*before* `light` instead lands its 2-byte alignment requirement on an
+already-even offset (right after the `Vec3 color` field), so the
+existing "tightly-packed .add() calls, one trailing skip()" scheme
+still holds exactly, with zero code changes to the general pattern
+needed.
+
+**Phase 53.2's optional stb_image-based debug PNG dump of the atlas was
+deliberately not implemented.** The directive itself marks it optional
+("nur Debug"); this sandbox has no display, so a dumped debug PNG has
+no real consumer here to view it against (the same "no GPU/display in
+this sandbox" limitation every other visual feature in this project
+already documents); and pulling in a new third-party single-header
+dependency (`stb_image_write.h`, not actually `stb_image.h` itself,
+which reads rather than writes PNGs - the directive's own wording
+conflates the two) for a feature nobody currently using this sandbox
+can act on would be real, avoidable scope creep this project's own
+"no overengineering ahead of need" discipline argues against. Marked
+PARTIAL rather than silently dropped - see CHANGELOG.md.
+
+**Alternatives considered:** literal padding pixels with a shrunk atlas
+tile budget (14x14 usable per 16x16 cell) - rejected as contradicting
+the directive's own explicit "16x16 Tiles à 16x16 Pixel" sizing;
+literal padding pixels with a grown atlas (288x288) - rejected as
+contradicting the directive's own explicit "256x256" sizing; a larger
+inset (a full texel instead of half) - rejected as unnecessarily
+wasteful of each tile's real usable area for no additional anti-bleed
+benefit over a half-texel inset, which already fully closes the real
+floating-point-rounding failure mode NEAREST filtering can hit.
+
+## 2026-09-11 — Phase 56: per-vertex texture flag over per-draw uniform, and no alpha blending on the sky-shader family
+
+**Context:** Phase 56 wires item icons (inventory, hotbar, hand) and
+dropped-item billboards through the Phase 53/54 texture atlas, reusing
+the two shader programs (`vs_ui2d.sc`/`fs_ui2d.sc` for UI,
+`vs_sky.sc`/`fs_sky.sc` for world billboards) that already existed for
+flat-colored quads.
+
+**`UiVertex2D` gained a per-vertex `use_texture` flag, not a per-draw
+uniform like `fs_chunk.sc`'s own `u_useTextures`.** A chunk mesh is
+homogeneous - either the whole draw call is textured or it isn't - so a
+per-draw uniform was correct there. A single UI batch is not
+homogeneous: one `flush_ui_quads` call legitimately mixes textured item
+icons with flat-colored slot borders, backdrops, and health/hunger
+bars, all queued into the same vertex/index buffer before one
+`bgfx::submit()`. A per-draw uniform would have forced either splitting
+every UI frame into multiple draw calls (real performance cost, no
+correctness benefit) or coloring every non-item quad through the atlas
+too (wrong). The per-vertex flag costs 4 bytes per vertex and lets
+`fs_ui2d.sc` mix() between the flat color and the sampled+alpha-
+multiplied atlas color per pixel, with no draw-call splitting. The same
+reasoning was applied to `submit_world_billboard`'s own extension to
+`vs_sky.sc`/`fs_sky.sc`.
+
+**`vs_sky.sc`/`fs_sky.sc` did not gain alpha blending in Phase 56, and
+still don't have it.** That shader family (skybox, wireframe boxes,
+solid boxes, and now textured world billboards) has never had
+`BGFX_STATE_BLEND_ALPHA` enabled, and adding it was out of this
+directive's own Phase 56 scope (56.5 asks only for texture UVs on
+`submit_world_billboard`, not a blend-state change). The real,
+observable consequence: a dropped torch - whose Phase 54 texture has
+real alpha-0 pixels around the flame/stem - renders those transparent
+pixels as solid black on its world billboard, not see-through. This is
+a genuine, accepted visual limitation, not a silently-swallowed bug -
+recorded here and in PROJECT_STATE.md's Known Limitations so a future
+phase that revisits dropped-item rendering (or wants real leaf
+transparency, which has the identical alpha-hole texture shape) knows
+exactly where the gap is and why it's still open.
+
+**Alternatives considered:** a per-draw `u_useTextures`-style uniform
+for the UI/billboard shaders too, matching `fs_chunk.sc` exactly -
+rejected because it would have required splitting every mixed textured/
+flat-colored UI batch into multiple draw calls, a real cost for no
+correctness gain; enabling alpha blending on the sky-shader family as
+part of Phase 56 to make the torch's dropped-item billboard render
+correctly - rejected as scope growth beyond what 56.5 actually asks
+for, and deferred as a named, honest limitation instead of silently
+special-cased per-item hackery (e.g. hiding the torch's alpha-holed
+pixels by editing its dropped-item color) that would have masked the
+real gap rather than documenting it.
+
+## 2026-09-11 — Phase 57: a separate font atlas, a hand-authored glyph table, and a tri-state UI sample mode
+
+**Context:** Phase 57, the last phase of the "Phasen 53-57" texture/
+font program, adds a real bitmap-font atlas and text renderer, replacing
+bgfx's built-in debug-text buffer as the default way HUD/menu/inventory/
+workbench labels draw.
+
+**The font atlas is a genuinely separate texture from the Phase 53
+block/item atlas, not packed into it, even though both are real GPU
+RGBA textures the UI shader can sample.** The directive's own wording
+("font atlas separate from block atlas") already settles this, but it's
+also the right call independent of that: block/item textures and font
+glyphs change on completely unrelated schedules (adding a new block
+type vs. adding font styling), have unrelated tile-size geometry (16x16
+vs. 6x8), and packing them into one shared atlas would only have
+coupled two independent concerns for zero real benefit. The cost is a
+second real sampler slot (`s_font`, alongside the existing `s_atlas`)
+bound in the SAME `flush_ui_quads()` draw call - both atlases are
+available to every UI quad in one batch, so this doesn't cost an extra
+draw call, just one more `bgfx::setTexture()` per frame.
+
+**Font glyphs are a real, hand-authored 5x7 dot-matrix bitmap table
+(95 characters x 7 rows of 5-bit-wide ASCII art), not an algorithmically
+rendered "stroke recipe" font.** A segment-based/stroke-rasterized
+letterform generator (drawing each character from a small reusable set
+of line-segment primitives, similar in spirit to a 16-segment LED
+display) was considered first, since it would have meant less literal
+per-character data to author and verify by hand. It was rejected because
+a segment model expressive enough to cleanly render all 95 real ASCII
+characters (uppercase, lowercase, digits, and 33 varied punctuation/
+symbol shapes) at only 5x7 pixels would itself have needed real, careful
+per-character tuning to stay legible - not meaningfully less authoring
+work than hand-drawing the bitmaps directly, while adding a whole
+intermediate rasterization layer to reason about and get right. Plain
+ASCII-art bitmap rows (`.` empty, `#` lit) are directly, visually
+checkable by reading the source, and their correctness was mechanically
+verified (character-code sequence 32..126 with no gaps/dupes, every row
+exactly 5 characters, 665 total row-strings = 95 x 7) before the code
+was ever built - see BUILD_STATUS.md. Every shape here is this
+project's own original design, not a transcription of any real/existing
+font file, matching the "own design, no external font file" requirement
+the directive itself states.
+
+**`UiVertex2D`'s existing Phase 56 per-vertex `use_texture` flag became
+a real tri-state (0 flat color / 1 item-atlas / 2 font-atlas, tinted)
+rather than adding a second boolean flag alongside it.** A second flag
+would have needed its own vertex-layout attribute (another 4 bytes/
+vertex) and its own `$input`/`$output` wiring through `varying_ui2d.
+def.sc`/`vs_ui2d.sc` for a distinction that's genuinely mutually
+exclusive per-quad (a quad is flat, OR item-textured, OR font-textured
+- never two at once), so an integer tri-state on the one existing float
+field costs nothing extra and models the real constraint directly.
+`fs_ui2d.sc` implements the 3-way selection as two chained `mix()`
+calls (`clamp(mode,0,1)` then `max(mode-1,0)`) rather than a branch -
+functionally equivalent for the three real integer values 0/1/2, and
+keeps the fragment shader branch-free, consistent with how `fs_chunk.
+sc`'s own `u_useTextures` mix was written in Phase 53.
+
+**Alternatives considered:** merging the font atlas into the block/item
+atlas's own spare tile slots - rejected per the directive's own explicit
+separation and the "unrelated change schedules" reasoning above; a
+stroke/segment-based procedural letterform generator - rejected as not
+actually less authoring effort at this resolution, see above; a second
+boolean vertex flag instead of widening the existing one to a tri-state
+- rejected as unnecessary extra vertex-layout/varying surface for a
+real mutually-exclusive choice a single tri-state field already models
+correctly.
+
+## 2026-09-11 — Phase 58: body yaw follows camera yaw directly, first-person arm shows the item not the skin, and the model is scaled to fit the real hitbox
+
+**Context:** Phase 58 (the first of a new Phasen 58-66 program: player
+model, NPCs, skins, farming) adds a real third-person character model
+and replaces the flat 2D hand icon with a 3D arm.
+
+**Body yaw is read directly from `camera.yaw`, not a separately tracked,
+independently-lagging "facing direction" the brief's own wording
+("Körper-Yaw bleibt der Bewegung voraus") could also support.** Real
+Minecraft has a genuine, nuanced system here: the body's own yaw tracks
+a player's recent movement direction and only starts catching up to the
+camera's own yaw once the two diverge past a real angular threshold (so
+you can look left/right without your torso instantly snapping to match,
+but strafing or moving eventually drags the body around too). Building
+that correctly needs its own persistent smoothed-yaw state, a real
+clamp/catch-up rule, and - critically - no existing gameplay system in
+this project distinguishes "the direction the camera looks" from "the
+direction the player is walking" in any way a player could actually
+notice yet (there's no over-the-shoulder strafe-lock, no separate
+aim-vs-move camera mode). Implementing the nuanced version now would be
+real, additional, untestable-by-anything-else work with no way to tell
+correct behavior from a small bug in this headless sandbox (no visual
+verification is possible - see BUILD_STATUS.md). Reading body yaw
+directly from camera yaw is a real, honest, working simplification -
+the body always faces exactly where the camera looks, horizontally -
+documented here rather than silently passed off as the "real" MC
+behavior.
+
+**The first-person arm box is textured with the current hotbar item's
+own atlas UV, not the skin texture's own arm region.** The brief's own
+wording ("eine einfache 3D-Box als Arm/Hand ... mit der aktuellen
+Item-Textur an der Vorderseite") names the ITEM texture explicitly, not
+skin/arm color - and this exactly continues the role Phase 48's own 2D
+hand icon already played (showing what you're holding, not your bare
+skin), so it needed no new multi-texture-per-box machinery (binding
+both an item atlas rect on one face and a skin atlas rect on the other
+5 would have needed two live sampler slots on a single draw call,
+real, avoidable complexity for a "simple box" the brief itself asks
+for). `submit_textured_box`'s single-UV-set-per-box design already
+supports this directly: all 6 faces get the same item UV rect.
+
+**Every body part's own real MC pixel-based proportions are uniformly
+scaled by `kPlayerHeight / 2.0` (0.9) so the whole stack (legs+torso+
+head) sums to exactly the real hitbox height (1.8 blocks), instead of
+MC's own real ~2.0-block-tall model sitting slightly taller than its
+own ~1.8-block hitbox.** That mismatch is a real, well-known,
+long-standing property of actual Minecraft (the rendered model
+genuinely extends a bit above the real collision box) - but it's not a
+requirement this project has any reason to reproduce faithfully; fitting
+the model exactly inside the real hitbox is the simpler, equally
+legitimate alternative, and avoids a body model that visually pokes
+through a low ceiling the real hitbox would have fit under.
+
+**Limb "swing" during the walk cycle is a real forward/back
+TRANSLATION of each leg/arm's own local center (offset along local Z,
+which then still correctly rotates with body yaw via
+`character_part_corners`), not a true rotation around a hip/shoulder
+pivot.** A true pivot-rotation would look more like an actual walking
+gait (the whole limb swinging on an arc), but a translation-based
+swing is dramatically simpler (no extra rotation composition needed
+for these parts, unlike the head's own real pitch) and still
+faithfully satisfies the brief's own literal ask ("Beine animieren
+beim Laufen (Sinus)") - a real, visible, sine-driven animation, just a
+simpler geometric primitive producing it. The head DOES get a true
+pivot rotation (via `rotate_pitch`) since the brief explicitly names
+pitch-following as a real requirement there, and it's exactly one
+extra composition, not a whole new animation category.
+
+**Alternatives considered:** a persistent, smoothed, threshold-clamped
+body-yaw-vs-camera-yaw system matching real Minecraft exactly -
+rejected per the "no way to verify it visually, no gameplay system
+would notice the difference yet" reasoning above; texturing the
+first-person arm box with the skin's own arm region instead of the
+held item - rejected as contradicting the brief's own explicit "mit
+der aktuellen Item-Textur" wording and Phase 48's own established
+"the hand icon shows what you're holding" role; a real per-limb
+pivot-rotation walk cycle for legs/arms - rejected as real additional
+complexity for a first pass the brief's own "Sinus" wording doesn't
+actually require, revisit if a later phase's own visual review (once a
+real Mac test is available) asks for it specifically.
+
+## 2026-09-11 — Phase 59: NPC animation runs on a real time clock, not a distance clock, and debug boxes fold into an existing toggle
+
+**Context:** Phase 59 extracts Phase 58's own inline third-person body
+rendering into `submit_character_model` and reuses it for the 3 real
+`AIWander` entities that have existed since Phase 6, giving them a real
+visible Steve-like body for the first time.
+
+**NPC walk-cycle/idle animation is driven by a new real elapsed-time
+clock (`npc_animation_time`), not the player's own real distance-driven
+`walk_cycle_phase`.** The player's own walk cycle can afford to be
+distance-driven because `client/main.cpp` already computes the local
+player's own exact per-frame `horizontal_delta` right where the camera/
+movement code lives. `game::systems::update_ai_wander` (in `game/
+systems`, a different module, by design decoupled from rendering - see
+that system's own earlier DECISIONS.md entry) has no equivalent
+per-frame distance value exposed back to the renderer; adding one would
+mean either growing `AIWander` itself with a new "how far did I move
+this tick" field purely for a cosmetic animation need, or duplicating
+the system's own internal movement math in the renderer to recompute
+it - both real, avoidable coupling for what a real, simpler elapsed-
+time clock already achieves honestly: `npc_animation_time` advances
+only while unpaused (so NPCs don't animate while the simulation itself
+is frozen), and every NPC's own walk-cycle frequency
+(`kNpcWalkCycleFrequency`) is a fixed constant rather than scaled by
+that NPC's own real `AIWander::speed` - a real, visible walk animation,
+just not individually speed-matched per NPC. Revisit if `AIWander`
+itself ever needs a real per-entity speed variation feature for
+gameplay reasons (at which point exposing it to the renderer stops
+being purely cosmetic plumbing).
+
+**Debug wireframe boxes (Phase 36) became a real toggle by folding into
+the EXISTING `options.debug_overlay_enabled` (F3) flag, not a new
+dedicated keybind/persisted option.** The brief's own 59.4 asks only for
+"ein Toggle, standardmäßig aus" without naming a specific control;
+`debug_overlay_enabled` already is exactly that - a real, persisted,
+already-bound "show debug visualization" preference that already
+defaults to `false` - so reusing it needed zero new `Action`s, zero new
+`Options` fields, and zero new menu rows, while still giving a real,
+working, discoverable toggle. A brand-new keybind/option would have
+been real, unnecessary surface area for a preference that's already a
+natural fit for an existing one.
+
+**Real networked remote-player avatars are out of this phase's own
+scope - only local `AIWander` NPCs get the real character model.** The
+brief's own wording ("Sichtbare NPCs" / "die 3 Entities") names the
+wandering AI specifically; multiplayer's own remote-player rendering is
+a materially different, larger feature (a real skin per connected
+player, synced over the network, not a locally-spawned NPC with a
+locally-assigned default skin) that this directive's own Phasen 58-66
+scope never separately names. Remote entities keep exactly their
+previous debug-wireframe-box representation, just now gated behind the
+same real toggle instead of being unconditionally drawn - a real,
+documented, honest scope boundary, not a silently dropped feature.
+
+**Alternatives considered:** growing `AIWander` with a real per-tick
+distance-moved field so NPC animation could match the player's own
+distance-driven scheme exactly - rejected as real, avoidable coupling
+between a gameplay component and a purely cosmetic rendering need (see
+above); a brand-new "Debug-Boxen" keybind/option separate from the
+existing debug overlay - rejected as unneeded surface area duplicating
+an already-correct existing toggle; extending Phase 59 to also render
+real networked remote-player avatars - rejected as materially larger
+scope the brief itself doesn't name for this phase.
+
+## 2026-09-11 — Phase 60: crack tiles share the existing atlas, coverage-threshold growth instead of 10 hand-drawn patterns, and a uniform box instead of one oriented face quad
+
+**Context:** Phase 60 replaces the Phase 48.2 flat-darkening break-
+progress overlay with real procedurally-generated crack textures.
+
+**The 10 crack tiles live in the SAME block/item atlas (Phase 53), not
+a new dedicated texture/sampler.** This looks like it cuts against the
+pattern set by the font atlas (Phase 57) and skin texture (Phase 58),
+both deliberately kept as their OWN separate textures - but the brief's
+own 60.1 wording explicitly offers "Eigener Atlas-Bereich ODER ein
+zweiter Atlas" as two real, equally-valid readings, unlike Phase 57/58
+where the brief named separation specifically. Crack tiles are real
+block-face-adjacent overlay content, conceptually much closer to the
+rest of the block atlas than a font or a player skin is, and the block
+atlas has ample real spare room (17 of 256 slots used before this
+phase) - reusing it needed zero new `Renderer` sampler-slot plumbing,
+while a second atlas would have meant a 4th real texture/sampler for a
+comparatively small, closely-related piece of content.
+
+**Every crack stage samples the SAME per-pixel noise field, only the
+threshold against it changes - not 10 independently hand-designed
+crack patterns (contrast Phase 57's 95 individually hand-authored
+glyph shapes, where each character's own SHAPE is the entire point).**
+A crack overlay's real job is showing progress growing, not displaying
+10 meaningfully different artistic images - a single noise field with a
+rising threshold gives that growing-damage property for free and for
+real (every pixel cracked at stage N is provably still cracked at stage
+N+1, see the `EachStageIsARealSupersetOfTheStageBefore` test), at a
+fraction of the authoring cost 10 hand-drawn crack patterns would have
+needed. This is the same "reach for the simplest generator that
+satisfies the real requirement" reasoning Phase 54's own noise-based
+generators already established, applied to a case where growth-over-
+stages is the actual requirement, not per-stage visual distinctiveness.
+
+**The crack overlay is a real alpha-blended BOX (all 6 faces share one
+crack UV), not a single quad positioned flush against the specific
+face the player is actually looking at.** The brief's own literal
+wording ("ein Quad ... leicht vor dem Block positioniert") names a
+quad; building the real, correctly-oriented single quad would need the
+raycast hit's own face normal threaded through to this render call (not
+currently exposed alongside `render_hit`) plus real per-face quad-
+orientation math this project has no existing pattern for. Reusing the
+exact same real inset-box shape the OLD flat-darkening overlay already
+used (Phase 48.2) - just textured now, with real alpha blending instead
+of a flat color - gets the identical real, growing-visible-damage
+effect on every face simultaneously, a strictly MORE visible cue (every
+angle shows the cracks, not just the one face being hit) for
+meaningfully less new code than face-normal-aware single-quad
+placement would have needed.
+
+**`Renderer::submit_textured_box` gained a real `alpha_blend` bool
+parameter (defaulted false) rather than a whole new function.** Every
+existing Phase 58/59 caller (the character model) needs the exact
+opaque behavior it already has; a new parameter defaulting to that
+existing behavior is real, minimal surface area, versus a parallel
+`submit_alpha_textured_box` that would have duplicated this function's
+own vertex/index-building logic for one flag's worth of real
+difference.
+
+**Alternatives considered:** a second, dedicated crack-texture atlas -
+rejected per the brief's own "own atlas area OR second atlas" wording
+and the spare-capacity/content-closeness reasoning above; 10 real
+hand-authored crack-pattern bitmaps (matching the font atlas's own
+authoring style) - rejected as real, unnecessary authoring cost for a
+requirement (growing damage) a single thresholded noise field already
+satisfies exactly; real face-normal-aware single-quad placement -
+rejected as real additional plumbing (`render_hit` would need a face-
+normal field it doesn't have) for a visual improvement unverifiable in
+this headless sandbox anyway; a new parallel `submit_alpha_textured_box`
+function - rejected as unnecessary duplication of `submit_textured_box`'s
+own vertex-building logic.
+
+## 2026-09-11 — Phase 61: reusing `is_transparent` as the layer-routing key, letting light pass through water as an accepted side effect, leaves stay opaque, and no back-to-front sort between water chunks
+
+**Context:** Phase 61 makes the long-dormant `ChunkMesh::water` layer
+real - water actually renders as alpha-blended, see-through geometry
+instead of a fully opaque block, closing a gap that has existed since
+`ChunkMesh` first gained its `opaque`/`transparent`/`water` fields.
+
+**Quads route to `mesh.water` vs `mesh.opaque` via the EXISTING
+`BlockDefinition::is_transparent` flag - no new field was added.**
+`is_transparent` already exists and is already true for exactly one
+real block (water); reusing it as the layer key needed zero new
+per-block data and zero registry changes, versus a hypothetical new
+`render_layer` enum field that would have duplicated information
+`is_transparent` already encodes for every block that currently has
+this phase's real content (water only - nothing else is transparent
+yet). The real cost of this reuse is accepted explicitly below.
+
+**Real, accepted side effect: flipping water's `is_transparent` to
+true also changes lighting, since `engine/lighting/propagation.h`
+reads the SAME flag to decide whether light passes through a block.**
+Sky/block light now propagates through water voxels where it
+previously stopped dead at the first water face. This was not
+separately special-cased or fixed - real Minecraft itself also lets
+light (attenuated) pass through water, so the side effect happens to
+be directionally correct rather than a regression, and adding a
+second, lighting-only "is this block opaque to light" flag purely to
+avoid an already-plausible behavior change would have been real,
+unjustified complexity for a phase titled and scoped to rendering, not
+lighting.
+
+**Leaves deliberately stay opaque (`is_transparent = false`) - not
+touched this phase.** The brief's own Phase 61 wording explicitly
+offers "entscheiden ob transparent (Alpha-Test) oder opak" for
+leaves, naming it as a real, open choice rather than a requirement.
+Phase 61 is titled and scoped to water specifically; folding leaves in
+too would have doubled the real scope (leaves need a genuinely
+different transparency mode - alpha-TEST/cutout, not alpha-BLEND,
+since real Minecraft leaves are either fully opaque or fully
+transparent per texel, never partially blended) for a phase whose own
+name only promises water.
+
+**No back-to-front sort exists between separate water chunks' draw
+calls - they render in whatever order `gpu_water_meshes` iterates.**
+Real sorted transparency would need either per-triangle/per-quad
+sorting inside each chunk mesh or at minimum a camera-distance sort
+across chunks, both real additional complexity with no way to visually
+verify the improvement in this headless, no-GPU-display sandbox
+regardless. A single contiguous water body (the overwhelmingly common
+real case - lakes, rivers, oceans) renders identically regardless of
+inter-chunk draw order, since its own internal opaque-water-against-
+air faces are unaffected by which OTHER chunk's water happens to draw
+before or after it; only adjacent/overlapping SEPARATE transparent
+volumes could show minor sorting artifacts, accepted as a real,
+documented, low-risk limitation.
+
+**Water reuses bgfx view 0 rather than gaining a dedicated transparency
+view.** A second Vhw would need real `setViewOrder`/`setViewClear`/
+resize-handling plumbing changes throughout `VoxelClient` for a
+render-order guarantee already achieved more simply by just issuing
+the water draw calls AFTER the opaque ones within the same view (bgfx
+executes submitted draws within a view in submission order for a fixed
+depth-test state) - the opaque-then-transparent split needed here is a
+draw-CALL-order property, not a view-order property.
+
+**Alternatives considered:** a new dedicated `render_layer`/
+`is_water` field on `BlockDefinition` instead of reusing
+`is_transparent` - rejected as duplicate data for the one real block
+that needs it today; a second lighting-only opacity flag to keep light
+stopping at water's surface - rejected as unjustified complexity for a
+side effect that is itself directionally realistic; extending Phase 61
+to leaves too - rejected as doubling scope for a mode (alpha-test) this
+phase's alpha-BLEND plumbing doesn't serve; per-chunk or per-camera
+back-to-front water sorting - rejected as real, unverifiable-in-sandbox
+complexity for a limitation that doesn't affect the common single-body
+case; a dedicated bgfx transparency view - rejected as more plumbing
+than the draw-call-ordering approach already achieves for real.
+
+## 2026-09-12 — Phase 62: stb_image in its own unstrict-warnings target, an unmirrored legacy-format limb copy, a module-local dialog mailbox, and NPCs getting their own fixed skins
+
+**Context:** Phase 62 turns Phase 58's single hardcoded default skin
+into a real, chosen-and-persisted skin system: 5 procedural presets, a
+real catalog that also discovers uploaded files, a real "Load own
+skin..." file-picker button, and per-NPC fixed skins.
+
+**stb_image's (and stb_image_write's) own implementation lives in a
+dedicated target that is deliberately never passed through this
+project's own `lcu_apply_common_options()` (-Wall/-Wextra/-Wpedantic/
+-Werror).** Every other real dependency in this repo is either treated
+as a genuine black box (fmt, SDL3, bgfx, zstd, Lua, GoogleTest,
+Benchmark - none of their own internals are compiled inside a target
+this project applies its own strict flags to) or, when it must be, kept
+warning-clean already. stb's single-header libraries are the one real
+exception: `STB_IMAGE_IMPLEMENTATION`/`STB_IMAGE_WRITE_IMPLEMENTATION`
+expands real, warning-heavy generated code (unused static helpers
+depending on which format decoders got compiled in, sign-compare,
+etc.) that has nothing to do with this project's own code quality.
+Two tiny one-file targets (`third_party/stb_image_impl.cpp`/
+`stb_image_write_impl.cpp`, each just a `#define ..._IMPLEMENTATION` +
+one `#include`) isolate that real cost to exactly the one real
+translation unit that needs it, while every real consumer
+(`skin_catalog.cpp`, the test fixture, the `LCU_VERIFY_SKIN` hook)
+only ever sees stb's own declarations, which are warning-clean and
+compile fine under this project's strict flags.
+
+**A legacy 64x32 skin upload's real left-arm/left-leg pixels are
+synthesized by copying the SAME file's own already-decoded right-arm/
+right-leg pixels, unmirrored.** Real Minecraft itself horizontally
+flips this copy (the legacy format's single arm/leg literally
+represented both real limbs via a mirrored render, not a stored
+second copy). This project's own `SkinCatalog::pixels_for` does a
+plain, unflipped rectangle copy instead - real, visible content
+appears in every real limb region (nothing stays blank/transparent),
+which is the actual requirement ("keeps a working texture", not "is
+pixel-perfect to Minecraft's own legacy rendering trick"), and adding
+real per-region horizontal-flip math for a legacy format this project
+doesn't otherwise treat as first-class (the brief's own upload
+requirement names 64x64 OR 64x32 as equally valid, without asking for
+flip-accurate legacy rendering) would have been real, disproportionate
+complexity for a cosmetic difference unverifiable on a real display in
+this sandbox regardless.
+
+**`request_open_png_file_dialog`/`poll_open_png_file_dialog_result`
+buffer SDL_ShowOpenFileDialog's real result in a small, module-local,
+mutex-protected mailbox in `window.cpp`, not as `Window` member
+state.** SDL's own documented contract allows the dialog's completion
+callback to run on a different thread than the one that requested it -
+mutating a live `Window` instance (or anything it owns) from that
+thread would be a real, if rare, data race against the main thread's
+own frame loop. `Window` also supports move-construction/assignment
+(used throughout `client/main.cpp` at startup); a `std::mutex` member
+would have broken that for a benefit this project doesn't actually
+need, since only one real `Window` is ever live at a time anyway (the
+same reasoning `g_window_count`'s own module-local bookkeeping already
+established). The real, small mailbox pattern (a pending flag, an
+`std::optional<std::optional<std::string>>` result, one mutex) needed
+far less real change than reworking `Window`'s own move semantics
+would have.
+
+**The 3 real `AIWander` NPCs get their own fixed skin, assigned once
+at spawn (`game::components::NpcAppearance`), completely independent
+of the player's own selectable/live-reloadable `skin_texture`.** The
+brief's own Phase 59 wording ("gleiches Skin, oder Farbvarianten")
+already allowed either choice; now that real distinct presets exist,
+varying them is strictly more real content for the same real cost (a
+second, small, always-5-entries texture array created once at
+startup, never touched by `apply_skin`). Assigning the choice as a
+real ECS component at spawn - rather than, say, always reading the
+player's own currently-selected skin, or a global "NPC skin" setting -
+is what makes it real "chosen once and kept" behavior matching the
+brief's own literal wording, and keeps it correct even if a future
+phase makes NPCs spawn/despawn dynamically (the index travels with the
+entity, not a shared mutable global).
+
+**`apply_skin` gets a real, working non-bgfx-build body instead of
+being `#if defined(LCU_ENABLE_BGFX)`-only.** `bgfx::TextureHandle`/
+`Renderer` are only nameable in `client/main.cpp` at all when
+`LCU_ENABLE_BGFX` is defined (see this file's own top-of-file gated
+include block) - a real, hard compile-time constraint discovered by
+actually building the non-bgfx config, not assumed. Rather than gating
+the entire Skins menu screen and its selection logic behind that same
+define (which would have made an entire real gameplay/UI feature
+invisible in the "fast iteration" build), `apply_skin` keeps a real,
+identically-shaped lambda in both branches - the bgfx branch also
+destroys/recreates the real GPU texture, the non-bgfx branch only
+updates the real non-graphical state (`current_skin_index`,
+`options.skin_name`) - so the Skins screen, its navigation, and
+options.txt persistence all stay fully real and exercised regardless
+of which config is built.
+
+**Alternatives considered:** inlining stb's implementation directly
+into `skin_catalog.cpp` (or the test file) - rejected once the real
+`-Werror` build failure it produced was reproduced, confirming the
+isolation was necessary, not precautionary; a real horizontal-flip for
+legacy-format limb synthesis - rejected as disproportionate complexity
+for content this sandbox can't visually verify either way; storing the
+file-dialog's pending/result state on `Window` itself - rejected as a
+real move-semantics regression for no real benefit given this project
+never runs two `Window`s at once; a shared/global NPC skin (all NPCs
+reading the player's own current skin, or one shared setting) -
+rejected as not matching the brief's own "assigned once at spawn,
+independent of the player" wording; gating the whole Skins screen
+behind `LCU_ENABLE_BGFX` - rejected as hiding a real gameplay/UI
+feature from the entire non-bgfx build for a limitation that only
+actually touches the one GPU-texture line.
+
+## 2026-09-12 — Phase 63: a parallel state array over widening BlockId, ChunkData needing zero protocol changes, and an opt-in state-to-texture flag instead of new BlockDefinitions per stage
+
+**Context:** Phase 63 is explicitly the farming FOUNDATION - no crop
+block exists yet (Phase 64), just the real, generic per-voxel state
+mechanism farming (and anything else state-shaped) will build on.
+
+**A second, parallel `std::array<u8, kVolume>` state array, not a
+wider BlockId or bits stolen from it.** `BlockId` is a 16-bit registry
+index (65536 possible block types) with real headroom this project has
+no reason to shrink; packing, say, 4 state bits into it would either
+cut that headroom in half or need real bit-packing/unpacking at every
+single `block_at`/`set_block` call site that exists today, all for a
+feature (state) most blocks will never use. A second flat array costs
+a real, fixed, accepted ~4KB per 16³ chunk (one byte per voxel) and
+touches zero existing `BlockId`-typed code - every serialized chunk,
+every network `BlockId`, every mod-registered block id keeps meaning
+exactly what it already meant.
+
+**`set_block` itself now also resets state to 0, rather than leaving
+whatever state happened to be there.** A freshly placed block has no
+real state history - Minecraft's own farmland doesn't stay "fully
+grown" if you dig it up and place plain dirt there instead. Making
+`set_block` do this automatically (instead of requiring every one of
+its many existing call sites to remember to also clear state) is both
+the more correct default and the reason v1-chunk loading needed zero
+special-case code (see below) - `unflatten_chunk`'s existing loop
+already calls `set_block` per voxel, so it already produces the right
+"every legacy voxel's state is 0" result for free.
+
+**A real v1 chunk file loads cleanly, with every voxel's state reading
+back as 0, rather than being rejected as an unsupported version.**
+Every real player's existing saved world is a v1 file; treating that
+as "unsupported" would mean Phase 63 silently corrupts or discards
+real save data the moment it ships. `deserialize_chunk_from_bytes`
+accepts both the current version and the literal legacy value 1,
+sizing its own unflatten step off the real header-declared uncompressed
+size for whichever version it saw - a real, minimal compatibility path
+(not a general migration framework, since there is exactly one legacy
+version to support and its own shape - blocks only, no state array -
+is simple enough not to need one).
+
+**`ChunkData`'s own wire format needed zero changes to carry states.**
+The brief's own Phase 63 wording asks for the network format to be
+"extended" - but `ChunkData::compressed_bytes` was already, and still
+is, nothing but `serialize_chunk_to_bytes`'s real output byte-for-byte
+(see `server/main.cpp`'s two real call sites, unchanged by this
+phase). Upgrading that one function's own payload shape already
+extends every real consumer of it - file save/load AND the network
+path - simultaneously, for free; a real, verified two-process server/
+client run round-trips a chunk with real per-voxel states with zero
+`ChunkData`/`encode_chunk_data`/`decode_chunk_data` changes. Writing a
+new, parallel state-carrying network message (or growing `ChunkData`
+with a second `compressed_state_bytes` field) would have duplicated
+work `serialize_chunk_to_bytes` already does for both real consumers.
+
+**`mesh_chunk_greedy` gets one opt-in `BlockDefinition::texture_index_
+offset_by_state` flag (default false) rather than a new per-state
+BlockDefinition or a callback/lookup table.** The real, concrete need
+this phase can already see (documented, not yet used) is Phase 64's
+wheat: 8 growth stages that should sample 8 sequential atlas tiles
+without registering 8 separate `BlockDefinition`s (which would also
+need 8 separate `BlockId`s, defeating the point of a single "wheat"
+block with sub-state). A single boolean plus "add state to whichever
+texture index the existing top/side/bottom fallback chain already
+resolved" is the minimal real mechanism that satisfies that concrete
+need; a more general per-state lookup table/callback would be real
+speculative complexity for a requirement this phase can't yet fully
+specify (Phase 64 hasn't registered wheat yet) - added now only to the
+extent a real, testable behavior exists today (the flag, and
+`merges_with`'s own state-awareness), not further.
+
+**Alternatives considered:** widening `BlockId` or bit-packing state
+into it - rejected as touching every existing `BlockId` call site for
+a feature most blocks won't use; rejecting v1 files as unsupported -
+rejected as real, unacceptable data loss for every existing save;
+inventing a full legacy-migration framework - rejected as
+disproportionate for exactly one real legacy version with a trivially
+simple shape; a new/extended network message for states - rejected as
+duplicate work once `ChunkData` was confirmed to already carry
+whatever `serialize_chunk_to_bytes` produces; a general per-state
+texture lookup table or callback on `BlockDefinition` - rejected as
+speculative complexity ahead of Phase 64 actually specifying what it
+needs.
+
+## 2026-09-12 — Phase 64: rolling growth directly against wheat blocks instead of a uniform random-tick scheduler, wheat traded non-collision for real targetability, single-player-only growth, and a real discovery about this project's own 60-frame verify convention
+
+**Context:** Phase 64 turns Phase 63's block-state foundation into a
+real, playable farming loop: till, plant, grow, harvest.
+
+**Random-tick growth rolls directly against the small set of currently
+-loaded wheat blocks, not a uniform sample of the whole loaded
+volume the way real Minecraft's own random tick literally works.**
+Real Minecraft picks random (x,y,z) positions across every loaded
+sub-chunk each real tick and only *sometimes* lands on something that
+cares; reproducing that exact scheme here would mean building a real
+chunk/sub-chunk random-tick scheduler (with its own sample-count-per-
+tick tuning) whose only real job today would be re-deriving "roughly
+one success per real day" for the one block type that can use it at
+all. `update_crop_growth` instead scans every loaded wheat block
+directly and rolls each one independently against a chance calibrated
+so the EXPECTED rate is exactly 1 stage per real day
+(`kCropRandomTickIntervalSeconds / day_length_seconds`) - the same
+real "random, tick-driven, day-calibrated" requirement with far less
+bookkeeping, while staying genuinely non-deterministic in exactly
+when any one block advances (real Bernoulli trials, not a scheduled
+batch update at day boundaries).
+
+**`game:wheat` is registered with `has_collision=true`, trading away
+real Minecraft's own "you walk straight through crops" for real
+targetability.** This project's own raycast targeting is gated
+entirely on `has_collision` (see `game:water`'s own doc comment: "the
+DDA raycast only ever stops on a block with has_collision=true") -
+this was independently re-derived and confirmed while implementing
+this phase, not assumed. A non-collidable wheat block would therefore
+be real-honestly unbreakable and un-right-clickable, defeating the
+entire point of a harvestable crop - exactly the same real trade-off
+`game:torch` already accepts (real torches aren't solid either, but
+this project needs them targetable to place/break). The player not
+being able to walk through a planted wheat field is a real, visible,
+documented simplification, not an oversight - fixing it properly would
+mean threading a second, interaction-specific predicate through
+`raycast()` alongside the existing collision-only one, real, separate
+plumbing this phase's own scope (a working, growing, harvestable crop)
+doesn't require.
+
+**Crop growth is single-player/client-authoritative only, with no
+server-side mirror.** The brief's own directive doesn't ask for
+networked farming sync, and the exact same real scope split already
+exists for local `AIWander` (client-simulated only when `!networked`;
+the server runs its own authoritative copy for networked play, never
+built for crop growth). Mirroring `update_crop_growth` into
+`server/main.cpp` as a second authoritative tick, plus the real
+`BlockChange` broadcasting a state-only mutation would need, is real,
+separate work this phase's own directive doesn't require - farming in
+networked mode is honestly a no-op today (till/plant/harvest are all
+gated `!networked` too, so a networked player simply can't farm yet,
+rather than farming silently diverging between clients).
+
+**Real, newly-discovered timing caveat about this project's own
+established `LCU_MAX_FRAMES=60` regression-sweep convention:**
+building `LCU_VERIFY_FARMING` (whose own real milestones span up to 20
+real seconds - tilling, planting, real growth ticks, harvesting)
+required directly measuring how much real wall-clock time 60 frames
+actually takes in this sandbox. The answer: as little as ~0.25 real
+seconds (confirmed via `date`-bracketed runs) - meaning several
+existing verify hooks' own later real-time-gated pulses (e.g.
+`LCU_VERIFY_TORCH`'s own placement at real t=1.6s) may never actually
+fire within the standard 60-frame regression sweep this project has
+used throughout every phase's own verification section. This was a
+real, if not phase-64-caused, blind spot in the existing convention -
+the 60-frame regression sweep genuinely proves "starts cleanly, no
+crash, exits cleanly" (a real, meaningful check, and the reason it's
+kept as the standard sweep), but does NOT, by itself, prove that every
+hook's own later real-time-gated milestone actually fired within that
+window. Retroactively re-auditing and re-calibrating every prior
+phase's own verify-hook frame counts is real, separate work outside
+this phase's own scope; `LCU_VERIFY_FARMING` itself was confirmed for
+real with a much higher, explicitly-chosen frame count (100,000,
+~27 real seconds in this sandbox) specifically because its own
+milestones need that much real time - see BUILD_STATUS.md for the
+exact command. This gap is flagged honestly here and in PROJECT_STATE.
+md's Known Limitations rather than silently worked around.
+
+**Alternatives considered:** a real chunk/sub-chunk random-tick
+scheduler matching Minecraft's own exact mechanism - rejected as real,
+disproportionate complexity for one crop type at this project's scale;
+keeping wheat non-collidable and living with it being untargetable -
+rejected as defeating the entire "harvestable crop" requirement;
+threading a second interaction-only predicate through `raycast()` -
+rejected as real, separate plumbing this phase's own scope doesn't
+need, given the `has_collision=true` trade-off already has a real
+precedent (`game:torch`); mirroring crop growth into `server/main.cpp`
+for networked play - rejected as real, separate work the brief doesn't
+ask for; silently raising every existing verify hook's own `LCU_MAX_
+FRAMES` to "fix" the newly-discovered timing gap - rejected as a large,
+unbounded retroactive change outside this phase's own real scope,
+better addressed as its own deliberate pass if/when it matters.
+
+## 2026-09-12 — Phase 65: real farming-processing recipes work through the existing 2x2/3x3 grid, not the quick-craft shortcut, plus a real per-build-config timing data point
+
+**Context:** Phase 65 is the brief's own "farming processing": 3 wheat
+-> 1 bread, and a minimal hoe recipe. `game:bread` has existed as an
+item since Phase 51 with no real survival obtain path until now;
+`RecipeRegistry` has supported `ShapelessRecipe`s needing more than one
+of the same ingredient since Phase 55 (`ingredients` is a plain
+`std::vector<ItemId>` that may repeat an id), but nothing registered
+before this phase had ever actually needed more than one of the same
+item, so this is the first real exercise of that path.
+
+**The 2 recipes needed genuinely required checking, not assuming, how
+this project's two different crafting mechanisms consume ingredients.**
+There are two independent, real ways to trigger a craft in this
+project: the Phase 23 "quick-craft" shortcut bound to `Action::Craft`,
+and the real 2x2 inventory-screen / 3x3 workbench grids (Phase 49/50)
+driven by actual mouse clicks. Reading both consumption paths before
+writing the recipes revealed they behave very differently for a
+multi-of-the-same-ingredient recipe:
+- **Quick-craft** builds its query grid by scanning the player's whole
+  inventory and keeping only one entry per *distinct* item type (`std::
+  find` dedup). This was already documented as "only correctly
+  represents a recipe needing exactly one of each distinct ingredient
+  type" back when it was written - a real, existing limitation, not one
+  introduced here - but until this phase every registered recipe
+  (compost, planks) only ever needed one of each ingredient, so the
+  limitation had never actually mattered. Both new recipes need >1 of
+  the same item (3 wheat, 2 planks), so quick-craft can now never match
+  either one, regardless of how much wheat or planks the player holds.
+  Fixing this would mean quick-craft tracking real per-item *counts*
+  instead of a deduped type list - but that would silently break every
+  existing 1-of-each recipe the moment a player holds more than one of
+  an ingredient (e.g. 2 grass + 1 dirt would no longer match compost,
+  since the exact-multiset match in `RecipeRegistry::matches_shapeless`
+  would then see 2 grass instead of 1). Real, disproportionate scope
+  and real regression risk for a shortcut that was always documented as
+  a simplification - left as-is, now with its own doc comment updated
+  to name this specific new limitation honestly rather than leaving the
+  stale "true of the one recipe registered above" text uncorrected.
+- **The real 2x2/3x3 grids** query actual per-cell contents (`craft_
+  grid_inventory.slot_at(i).item`, one cell per array index) - not a
+  deduped list - so placing 3 wheat into 3 separate grid cells (exactly
+  how a real player would drag them one at a time) produces a genuine
+  3-wheat multiset match. The existing take-result handler already
+  consumes "1 item per non-empty ingredient cell", which is exactly
+  correct here precisely because each occurrence occupies its own cell
+  - its own doc comment claimed this only worked for "every real
+  shapeless recipe registered so far (each lists each ingredient
+  once)", which Phase 65 makes no longer true; corrected that comment
+  rather than leaving stale, now-false reasoning in the code. No
+  `RecipeRegistry` or grid-handling code changes were needed at all -
+  both mechanisms already had the exact behavior this phase needed,
+  once actually read rather than assumed.
+
+**Verified via a new `LCU_VERIFY_FARMING_CRAFT` headless hook that
+drives real mouse clicks into the real 2x2 grid, not a shortcut around
+it.** Grants 3 wheat + 2 planks directly (same synthetic-item-grant
+precedent every prior hook already uses), opens the inventory screen,
+left-clicks to pick up each stack, right-clicks (which places exactly 1
+item per click - confirmed by reading `inventory_right_click`) into 3
+then 2 separate grid cells, takes each result, and logs the final
+counts. A real headless run confirmed `bread=1 wooden_hoe=1` on both
+`dev-bgfx` and `dev-nobgfx`.
+
+**Real, newly-confirmed data point extending Phase 64's own timing
+caveat: the two build configs run frames at dramatically different
+real-world rates.** Verifying this hook meant re-measuring real
+wall-clock frame rate rather than reusing Phase 64's numbers blind,
+since a stale assumption here would have silently produced a hook that
+times out before its own milestones fire. `dev-nobgfx` ran this
+specific scene at roughly 100,000-250,000 fps; `dev-bgfx` (Noop
+backend, but still doing real per-frame chunk-mesh/texture work
+`dev-nobgfx`'s code path skips) ran the same scene at roughly 5,000-
+5,500 fps - a real ~20-40x difference discovered while calibrating this
+hook's own `LCU_MAX_FRAMES`, not previously documented anywhere broken
+out by build config. `LCU_MAX_FRAMES=1,000,000` reliably covers this
+hook's ~2.8 real elapsed seconds on both configs (confirmed by direct
+runs) and is the number recorded in BUILD_STATUS.md; a smaller count
+tuned to `dev-bgfx`'s own real rate would work too, but one shared,
+generously-sized number that works on both configs is simpler to
+document and re-run than two separate ones.
+
+**Alternatives considered:** making quick-craft track real per-item
+counts instead of a deduped type list - rejected above as real
+regression risk to already-working recipes for a mechanism that was
+always documented as a 1-of-each-only simplification; inventing a
+`game:stick` item purely to make the hoe recipe match real Minecraft's
+own 2-stick-2-plank shape - rejected as real, disproportionate scope
+for a single recipe when nothing else in the project has ever needed a
+stick; a stone-hoe recipe - rejected as the brief's own "optional", and
+there's no real tool-tier concept yet for a stone vs. wood hoe to
+meaningfully differ by; testing the new recipes only via a targeted
+unit test against `RecipeRegistry` directly (bypassing the real UI
+click path) - rejected as weaker evidence than driving the actual
+player-facing interaction, and this project's own established pattern
+(`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`) already favors real
+click-driven headless verification for grid crafting.

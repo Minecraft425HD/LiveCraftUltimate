@@ -143,6 +143,59 @@ TEST(GreedyMesher, UnsetSideAndBottomColorFallBackToTopColorOnEveryFace) {
     }
 }
 
+TEST(GreedyMesher, PerFaceTextureIndexUsesTopSideBottomFallbackChain) {
+    // Phase 55: the same real top/side/bottom fallback chain
+    // PerFaceColorUsesTopSideBottomFallbackChain above already proves
+    // for color, now proven for texture_index - a block with distinct
+    // top/side texture indices and no bottom override must mesh each
+    // of its six faces with the correct atlas tile, purely from
+    // BlockDefinition data.
+    BlockRegistry registry;
+    BlockDefinition grass_like;
+    grass_like.namespaced_id = "test:grass";
+    grass_like.top_texture = 5;  // top
+    grass_like.side_texture = 7;  // sides; bottom_texture left unset
+    const auto grass = registry.register_block(grass_like);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, grass);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+
+    const auto texture_index_of_face_with_normal = [&](const lcu::math::Vec3& normal) {
+        for (const auto& vertex : mesh.opaque.vertices) {
+            if (lcu::math::dot(vertex.normal, normal) > 0.99f) {
+                return vertex.texture_index;
+            }
+        }
+        ADD_FAILURE() << "no vertex found with the expected face normal";
+        return static_cast<lcu::u16>(0);
+    };
+
+    EXPECT_EQ(texture_index_of_face_with_normal({0.0f, 1.0f, 0.0f}), 5u);
+    // bottom_texture unset -> falls back to side_texture, not top.
+    EXPECT_EQ(texture_index_of_face_with_normal({0.0f, -1.0f, 0.0f}), 7u);
+    EXPECT_EQ(texture_index_of_face_with_normal({1.0f, 0.0f, 0.0f}), 7u);
+}
+
+TEST(GreedyMesher, UnsetSideAndBottomTextureFallBackToTopTextureOnEveryFace) {
+    BlockRegistry registry;
+    BlockDefinition stone;
+    stone.namespaced_id = "test:stone";
+    stone.top_texture = 3;
+    const auto stone_id = registry.register_block(stone);
+
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone_id);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 3u);
+    }
+}
+
 TEST(GreedyMesher, AdjacentSameTypeBlocksMergeCoplanarFaces) {
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");
@@ -179,6 +232,87 @@ TEST(GreedyMesher, AdjacentDifferentTypeBlocksDoNotMerge) {
     expect_all_triangles_wound_correctly(mesh.opaque);
 }
 
+TEST(GreedyMesher, AdjacentSameTypeDifferentStateBlocksDoNotMerge) {
+    // Phase 63 farming foundation: two same-BlockId blocks in different
+    // real states (e.g. two wheat blocks at different growth stages)
+    // must NOT merge into one quad - they need to show different
+    // texture content, so merging them would visually lose that real
+    // difference.
+    BlockRegistry registry;
+    const auto wheat_like = register_opaque(registry, "test:wheat_like");
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, wheat_like, 0);
+    chunk.set_block_with_state(6, 5, 5, wheat_like, 3);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    // Same real face count as two different BlockIds (see
+    // AdjacentDifferentTypeBlocksDoNotMerge above) - state is a real,
+    // independent part of the merge identity, not merely "same as
+    // block_id happening to differ".
+    EXPECT_EQ(mesh.opaque.vertices.size(), 10u * 4u);
+    EXPECT_EQ(mesh.opaque.indices.size(), 10u * 6u);
+    expect_all_triangles_wound_correctly(mesh.opaque);
+}
+
+TEST(GreedyMesher, AdjacentSameTypeSameStateBlocksStillMerge) {
+    // A real regression guard the other direction: adding state
+    // tracking must not accidentally break merging for the ordinary
+    // "both state 0" case (every pre-Phase-63 block, forever).
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, stone, 2);
+    chunk.set_block_with_state(6, 5, 5, stone, 2);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    EXPECT_EQ(mesh.opaque.vertices.size(), 6u * 4u);
+    EXPECT_EQ(mesh.opaque.indices.size(), 6u * 6u);
+}
+
+TEST(GreedyMesher, TextureIndexOffsetByStateShiftsTheAtlasSlot) {
+    // Phase 63's own real state-to-texture mechanism: a block opted
+    // into `texture_index_offset_by_state` samples `top_texture +
+    // state` instead of a flat `top_texture` - the real foundation
+    // Phase 64's 8-stage wheat growth will actually use.
+    BlockRegistry registry;
+    BlockDefinition wheat_like;
+    wheat_like.namespaced_id = "test:wheat_like";
+    wheat_like.top_texture = 100;
+    wheat_like.texture_index_offset_by_state = true;
+    const auto wheat_id = registry.register_block(wheat_like);
+
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, wheat_id, 3);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_FALSE(mesh.opaque.vertices.empty());
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 103u);
+    }
+}
+
+TEST(GreedyMesher, TextureIndexUnaffectedByStateWhenFlagIsUnset) {
+    // Every existing block (the flag defaults false) must keep
+    // resolving a flat, state-independent texture index exactly like
+    // before Phase 63 - a real, explicit no-regression check next to
+    // the opt-in test above.
+    BlockRegistry registry;
+    BlockDefinition stone;
+    stone.namespaced_id = "test:stone";
+    stone.top_texture = 7;
+    const auto stone_id = registry.register_block(stone);
+
+    Chunk chunk;
+    chunk.set_block_with_state(5, 5, 5, stone_id, 9);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+    ASSERT_FALSE(mesh.opaque.vertices.empty());
+    for (const auto& vertex : mesh.opaque.vertices) {
+        EXPECT_EQ(vertex.texture_index, 7u);
+    }
+}
+
 TEST(GreedyMesher, TransparentNeighborDoesNotCullOpaqueBlockFace) {
     BlockRegistry registry;
     const auto stone = register_opaque(registry, "test:stone");
@@ -207,13 +341,78 @@ TEST(GreedyMesher, TwoAdjacentTransparentBlocksProduceNoOpaqueFaces) {
 
     const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
 
-    // Known simplification, not a bug: transparent-vs-transparent never
-    // draws a face here (even between two *different* transparent
-    // materials, e.g. glass touching water), since no transparent-layer
-    // meshing exists yet - see DECISIONS.md. Revisit once a real
-    // transparent block exists to motivate it.
+    // Two adjacent cells of the SAME transparent block never draw a face
+    // between them (a real merged transparent body, e.g. two touching
+    // water blocks - Phase 61's own visibility rule only fires for
+    // DIFFERENT transparent substances, see
+    // TwoDifferentTransparentBlocksProduceARealFaceBetweenThem below) -
+    // a real 2x1x1 glass box has exactly 6 real exposed faces (greedy-
+    // merged into 6 quads = 36 indices, the same real count a single
+    // isolated glass block would have), proving the shared internal
+    // boundary itself contributed zero extra faces.
     EXPECT_TRUE(mesh.opaque.empty());
-    EXPECT_TRUE(mesh.transparent.empty());
+    EXPECT_EQ(mesh.water.indices.size(), 36u);
+}
+
+TEST(GreedyMesher, TwoDifferentTransparentBlocksProduceARealFaceBetweenThem) {
+    // Phase 61: a real transparent substance (e.g. water) touching a
+    // DIFFERENT transparent block (including plain air) must still draw
+    // a real face - water sitting under open air needs a visible top
+    // face, or it would be completely invisible. This is the real fix
+    // for the exact gap the old EmptyChunk-style test above used to
+    // document as "known simplification, not a bug".
+    BlockRegistry registry;
+    const auto glass = register_transparent(registry, "test:glass");
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, glass);
+    chunk.set_block(6, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    EXPECT_TRUE(mesh.opaque.empty());
+    EXPECT_FALSE(mesh.water.empty());
+}
+
+TEST(GreedyMesher, TransparentBlockNextToAirProducesARealVisibleFace) {
+    // The real, common Phase 61 case: a single water block surrounded by
+    // open air (e.g. a lone water source block) - every one of its 6
+    // faces must be real and visible, not silently culled the way the
+    // old opaque-only visibility test would have culled them.
+    BlockRegistry registry;
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    EXPECT_TRUE(mesh.opaque.empty());
+    EXPECT_EQ(mesh.water.indices.size(), 36u);  // 6 faces * 6 indices, unmerged (isolated block).
+}
+
+TEST(GreedyMesher, TransparentBlockFacesRouteToTheWaterLayerNotOpaque) {
+    // A real opaque neighbor still culls correctly against a transparent
+    // block (the pre-existing `neg_opaque != pos_opaque` path), but the
+    // resulting face must land in mesh.water, not mesh.opaque - Phase 61's
+    // own real per-quad layer routing, keyed off the SAME `is_transparent`
+    // flag the face-visibility test itself already uses.
+    BlockRegistry registry;
+    const auto stone = register_opaque(registry, "test:stone");
+    const auto water = register_transparent(registry, "test:water");
+    Chunk chunk;
+    chunk.set_block(5, 5, 5, stone);
+    chunk.set_block(6, 5, 5, water);
+
+    const ChunkMesh mesh = mesh_chunk_greedy(chunk, registry);
+
+    // Stone's own real face at the shared stone/water boundary lands in
+    // mesh.opaque; water's own real faces (this shared boundary belongs
+    // to stone, not water - see solid_is_neg's own doc comment - but
+    // water's other 5 faces, all touching open air, are real too) land
+    // in mesh.water. Both layers end up real and non-empty, each with
+    // the right block's own geometry.
+    EXPECT_FALSE(mesh.opaque.empty());
+    EXPECT_FALSE(mesh.water.empty());
 }
 
 TEST(GreedyMesher, BlockAtChunkBoundaryStillProducesBoundaryFace) {

@@ -14,6 +14,14 @@ bgfx::VertexLayout chunk_mesh_vertex_layout() {
         .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
         // Phase 26.
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        // Phase 53 - real atlas tile index (see voxel::MeshVertex::
+        // texture_index's own doc comment for why it's added HERE, right
+        // after Color0, rather than after Color1 below): Uint16, not
+        // normalized, so the shader receives the raw 0-65535 tile index
+        // to decompose into atlas grid coordinates itself (see
+        // fs_chunk.sc), the same "raw byte value, unpacked shader-side"
+        // convention Color1/light below already establishes.
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Uint16)
         // Phase 28 - packed sky/block light byte (see
         // voxel::MeshVertex::light's doc comment). Uint8, not normalized
         // (normalized defaults to false), so the fragment shader receives

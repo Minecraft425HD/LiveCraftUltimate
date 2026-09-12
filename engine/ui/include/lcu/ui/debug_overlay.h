@@ -48,7 +48,13 @@ struct DebugOverlayStats {
 // menu_renderer's row labels) - see client/main.cpp for the one real
 // clear_debug_text() call that now owns clearing it once per frame,
 // before any of the three run.
+//
+// `legacy_debug_text` (Phase 57): false (the new default) draws through
+// the real lcu::ui::TextRenderer bitmap-font atlas instead of bgfx's
+// built-in debug-text buffer; true keeps the exact old
+// Renderer::draw_debug_text() behavior this parameter's doc comment
+// above describes, for LCU_LEGACY_DEBUG_TEXT=1 (see client/main.cpp).
 void draw_debug_overlay(rendering::Renderer& renderer, u32 screen_width, u32 screen_height, f32 fps,
-                         const DebugOverlayStats& stats);
+                         const DebugOverlayStats& stats, bool legacy_debug_text);
 
 }  // namespace lcu::ui

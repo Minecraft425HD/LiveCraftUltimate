@@ -27,6 +27,7 @@ TEST(Options, DefaultsMatchTheRealHardcodedConstantsItReplaces) {
     EXPECT_EQ(options.fov, 70);
     EXPECT_TRUE(options.hud_enabled);
     EXPECT_FALSE(options.debug_overlay_enabled);
+    EXPECT_EQ(options.skin_name, "Steve");
 }
 
 TEST(Options, LoadFromMissingFileReturnsFalseAndKeepsDefaults) {
@@ -46,6 +47,7 @@ TEST(Options, SaveThenLoadRoundTripsScalarFields) {
     saved.fov = 90;
     saved.hud_enabled = false;
     saved.debug_overlay_enabled = true;
+    saved.skin_name = "Ninja";
     saved.save(path);
 
     Options loaded;
@@ -54,6 +56,21 @@ TEST(Options, SaveThenLoadRoundTripsScalarFields) {
     EXPECT_EQ(loaded.fov, 90);
     EXPECT_FALSE(loaded.hud_enabled);
     EXPECT_TRUE(loaded.debug_overlay_enabled);
+    EXPECT_EQ(loaded.skin_name, "Ninja");
+
+    std::filesystem::remove(path);
+}
+
+TEST(Options, LoadIgnoresABlankSkinValueAndKeepsTheDefault) {
+    const std::string path = temp_file_path("blank_skin.txt");
+    {
+        std::ofstream file(path, std::ios::trunc);
+        file << "skin=\n";
+    }
+
+    Options options;
+    ASSERT_TRUE(options.load(path));
+    EXPECT_EQ(options.skin_name, "Steve");
 
     std::filesystem::remove(path);
 }

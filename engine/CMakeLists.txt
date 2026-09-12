@@ -37,6 +37,7 @@ if(LCU_BUILD_CLIENT)
     add_subdirectory(platform)
     add_subdirectory(player)
     add_subdirectory(audio)
+    add_subdirectory(assets)
 
     # rendering (if enabled) before ui - engine/ui/CMakeLists.txt's own
     # bgfx-only sources link Lcu::Rendering, so that target must already
@@ -54,7 +55,7 @@ if(LCU_BUILD_CLIENT)
 
     add_library(LcuEngine INTERFACE)
     add_library(Lcu::Engine ALIAS LcuEngine)
-    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform Lcu::Player Lcu::Audio Lcu::Ui)
+    target_link_libraries(LcuEngine INTERFACE Lcu::EngineCore Lcu::Platform Lcu::Player Lcu::Audio Lcu::Assets Lcu::Ui)
 
     if(LCU_ENABLE_BGFX)
         target_link_libraries(LcuEngine INTERFACE Lcu::Rendering)

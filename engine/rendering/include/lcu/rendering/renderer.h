@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,18 @@ struct UiVertex2D {
     f32 g = 0.0f;
     f32 b = 0.0f;
     f32 a = 0.0f;
+    // Real per-vertex sample mode (Phase 56, extended Phase 57) - 0 for
+    // a flat-color quad (submit_ui_quad, unchanged since Phase 44:
+    // borders, backgrounds, health/hunger bars), 1 for a real item-icon
+    // quad (submit_textured_ui_quad, samples the block/item atlas's own
+    // RGB as-is), 2 for a real font-glyph quad (submit_text_glyph_quad,
+    // samples the SEPARATE font atlas and multiplies its RGB by this
+    // vertex's own color - see that method's doc comment). Whichever
+    // mode, (u,v) above is a real atlas sample rect for that quad's own
+    // atlas, not a per-quad-local 0..1 UV, except mode 0 where it's
+    // unused. Lets all three kinds of quad share the same batch/single
+    // draw call - fs_ui2d.sc's own mix chain picks the right one.
+    f32 use_texture = 0.0f;
 };
 
 // Thin wrapper around bgfx's global init/frame/shutdown lifecycle. This is
@@ -76,8 +89,50 @@ class Renderer : public NonCopyable {
     // computed, already-packed sky light by; set once per draw call
     // here, never recomputed per-voxel/per-frame in meshing itself (see
     // DECISIONS.md "Light is never computed per frame").
+    // `atlas_texture` (Phase 53) - a texture created via create_texture_
+    // from_pixels, or an invalid handle (the default) to render fully
+    // procedurally, exactly as every prior phase already did. Only when
+    // valid does fs_chunk.sc actually sample it (`u_useTextures` is set
+    // from this, not a separate flag - a real, always-in-sync single
+    // source of truth: no atlas bound genuinely means no atlas to
+    // sample, not a caller-managed toggle that could drift out of sync
+    // with what's actually bound).
+    // `alpha_blend` (Phase 61, defaulted false so every existing opaque
+    // call site is unaffected): when true, real `BGFX_STATE_BLEND_ALPHA`
+    // replaces the opaque depth-writing state, and depth WRITE is turned
+    // off (real per-frame translucent geometry shouldn't leave a lasting
+    // mark in the depth buffer, the same reasoning every other real
+    // alpha-blended primitive in this class already gives) - the one
+    // real caller this exists for is a chunk's own `ChunkMesh::water`
+    // layer (see lcu::voxel::mesh_chunk_greedy's real transparent-layer
+    // routing), submitted as a SEPARATE `submit_chunk_mesh` call from
+    // the opaque layer, after it, so translucent water composites over
+    // already-drawn solid terrain (see client/main.cpp's own real
+    // per-frame two-pass draw loop).
     void submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program, const math::Mat4& model,
-                            const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f);
+                            const math::Mat4& view, const math::Mat4& proj, f32 sky_light_scale = 1.0f,
+                            bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, bool alpha_blend = false);
+
+    // Real GPU texture upload (Phase 53) - `pixels` is a tightly packed
+    // RGBA8 buffer, `width*height*4` bytes, row-major top-to-bottom (the
+    // same layout engine/assets::procedural_textures - Phase 54 - packs
+    // its atlas buffer in). Nearest-filter, clamp-addressed (Phase
+    // 53.1's own "Nearest-Filter, Clamp-Mode" requirement) - baked into
+    // the texture's own creation flags, not a separate per-draw sampler
+    // state, since every real consumer of a texture this project creates
+    // wants exactly that (a pixel-art atlas, never filtered/wrapped).
+    // Returns an invalid handle (bgfx::isValid == false) if bgfx itself
+    // is Noop-backed and rejects it - a real, legitimate possibility
+    // this sandbox's own headless runs can hit, not treated as fatal by
+    // any caller (see submit_chunk_mesh's own "invalid atlas_texture
+    // means fully procedural" fallback above).
+    bgfx::TextureHandle create_texture_from_pixels(const u8* pixels, u32 width, u32 height);
+
+    // Destroys a texture created via create_texture_from_pixels above.
+    // No-op if `handle` is already invalid (same "safe to call on an
+    // already-empty/never-created resource" convention destroy_gpu_
+    // chunk_mesh already establishes).
+    void destroy_texture(bgfx::TextureHandle handle);
 
     // Draws one camera-facing colored quad (Phase 27 - the sun/moon)
     // into a dedicated sky view, executed before the terrain view so
@@ -127,9 +182,65 @@ class Renderer : public NonCopyable {
     // reasoning submit_wireframe_box/submit_solid_box's own comments
     // give for a per-frame, moving object. No-op if `program` is
     // invalid.
+    // `atlas_texture`/`u0`/`v0`/`u1`/`v1` (Phase 56, all defaulted):
+    // when `atlas_texture` is valid, samples the real atlas rect
+    // (`u0`,`v0`)-(`u1`,`v1`) instead of drawing flat `color` - `color`'s
+    // own alpha still multiplies the sample's alpha (a real dropped
+    // torch's transparent background composites correctly). Invalid
+    // `atlas_texture` (the default) draws exactly the flat-color quad
+    // every dropped item rendered before Phase 56 - the same real "no
+    // atlas bound, no texture sampled" contract every other real
+    // `atlas_texture` parameter in this class establishes.
     void submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
                                  f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
-                                 const math::Mat4& view, const math::Mat4& proj);
+                                 const math::Mat4& view, const math::Mat4& proj,
+                                 bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE, f32 u0 = 0.0f,
+                                 f32 v0 = 0.0f, f32 u1 = 1.0f, f32 v1 = 1.0f);
+
+    // One face's real UV rect for submit_textured_box below.
+    struct BoxFaceUv {
+        f32 u0 = 0.0f;
+        f32 v0 = 0.0f;
+        f32 u1 = 1.0f;
+        f32 v1 = 1.0f;
+    };
+    // All 6 real faces of a box (Phase 58, the player/NPC character
+    // model + first-person arm) - unlike submit_solid_box's shared 8
+    // corners, each face gets its OWN 4 vertices so it can carry its own
+    // independent UV rect (a real Minecraft-format skin needs a
+    // different texture region per face, e.g. a torso's front is not
+    // its back - see lcu::assets::skin_texture.h).
+    struct BoxUvSet {
+        BoxFaceUv neg_x, pos_x, neg_y, pos_y, neg_z, pos_z;
+    };
+
+    // Draws an arbitrary (not necessarily axis-aligned) textured box
+    // from 8 real world-space corners the caller already computed
+    // (Phase 58) - `corners` follows the exact same index convention
+    // submit_solid_box's own `min`/`max` corner table uses (0..3 the
+    // "negative Z" face, 4..7 the "positive Z" face, in the same
+    // min/min/min .. max/max/max winding order), so any code that
+    // already knows how to build an axis-aligned box's 8 corners can
+    // feed this directly. Rotation (a character model's own body-yaw/
+    // head-pitch) is entirely the CALLER's job - this function only
+    // ever draws the 8 positions it's handed, using the exact same
+    // vs_sky.sc/fs_sky.sc pipeline/texture-binding contract
+    // submit_world_billboard already established (an invalid
+    // `atlas_texture` draws flat `color` instead, same honest
+    // fallback). Real depth test against terrain, no depth write - same
+    // reasoning every other per-frame world-space primitive here gives.
+    // `alpha_blend` (Phase 60, defaulted false so every existing caller
+    // - the character model - is unaffected): when true, real
+    // `BGFX_STATE_BLEND_ALPHA` is set instead of an opaque write, so a
+    // texture with real transparent pixels (e.g. the break-progress
+    // crack overlay, see lcu::assets::generate_crack) actually
+    // composites see-through instead of rendering those pixels solid
+    // black - the same real alpha-blending gap documented for the rest
+    // of this shader family (see DECISIONS.md) closed for this one real
+    // caller that needs it.
+    void submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
+                              bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
+                              bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs, bool alpha_blend = false);
 
     // Real 2D UI quad batch (Phase 44, brief section 60's UI framework):
     // appends one screen-space rectangle - `x`/`y`/`width`/`height` in
@@ -141,10 +252,41 @@ class Renderer : public NonCopyable {
     // upload the whole batch and issue exactly one real draw call for
     // however many quads were queued - the real "Quad-Batch...ein
     // Draw-Call" behavior the brief asks for, not one draw call per
-    // quad. UV runs 0..1 across each quad independently (for a future
-    // pattern/atlas use - see DECISIONS.md for why item-icon rendering
-    // itself is deferred past this phase).
+    // quad. UV runs 0..1 across each quad independently, unused by
+    // fs_ui2d.sc unless a texture is actually sampled (see
+    // submit_textured_ui_quad below - this call always draws flat
+    // `color`, no atlas involved, the same real behavior every quad had
+    // before Phase 56).
     void submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color);
+
+    // Real atlas-textured UI quad (Phase 56) - same real batch/one-
+    // draw-call contract as submit_ui_quad above, but samples
+    // `s_atlas` at the real rect (`u0`,`v0`)-(`u1`,`v1`) (from
+    // lcu::assets::tile_uv_range) instead of drawing flat `color` -
+    // `color`'s own alpha still multiplies the sampled texture's alpha
+    // (so a torch icon's real transparent background composites
+    // correctly), its RGB is otherwise unused once textured. Whichever
+    // atlas texture flush_ui_quads() below is actually handed this
+    // frame is what gets sampled - this call only queues the quad/UV
+    // data, same "nothing drawn yet" contract as submit_ui_quad.
+    void submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0, f32 u1,
+                                  f32 v1);
+
+    // Real font-atlas glyph quad (Phase 57) - same real batch/one-draw-
+    // call contract as submit_ui_quad/submit_textured_ui_quad above,
+    // but samples the SEPARATE font atlas (`s_font`, bound by
+    // flush_ui_quads' own `font_atlas_texture` param below) instead of
+    // the block/item atlas `submit_textured_ui_quad` samples. Unlike
+    // that call, `color`'s RGB IS applied (multiplied against the
+    // sampled glyph's own white-on-transparent pixels), not just its
+    // alpha - a font atlas is deliberately colorless (see
+    // lcu::assets::generate_glyph_pixels) so one glyph texture can be
+    // tinted to any real text color at draw time, the same real
+    // "colorless glyph, tinted at draw time" technique any bitmap-font
+    // renderer uses. `engine::ui::TextRenderer` is the one real caller
+    // - most code should go through that, not this directly.
+    void submit_text_glyph_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0, f32 u1,
+                                 f32 v1);
 
     // How many quads are currently queued (real, testable state - not
     // just an implementation detail): 0 right after flush_ui_quads() or
@@ -164,7 +306,22 @@ class Renderer : public NonCopyable {
     // already have, not something that should re-appear stale on a
     // later frame once a program becomes valid). Call once per frame,
     // after every submit_ui_quad() for that frame, before end_frame().
-    void flush_ui_quads(bgfx::ProgramHandle program);
+    // `atlas_texture` (Phase 56) - same real "invalid handle means no
+    // atlas bound, every textured quad's own u_useTextures mix just
+    // reads garbage no submit_textured_ui_quad call this frame should
+    // have produced" contract Renderer::submit_chunk_mesh's own
+    // `atlas_texture` parameter already establishes; pass the same
+    // texture handle here as there, or an invalid one if `LCU_USE_
+    // TEXTURES` is off (see client/main.cpp). `font_atlas_texture`
+    // (Phase 57) is the SAME kind of contract for submit_text_glyph_
+    // quad's own queued quads - a separate real texture bound to a
+    // separate sampler slot (`s_font`), since the font atlas is its own
+    // texture, not packed into the block/item atlas (see
+    // lcu::assets::font_atlas.h). Both atlases can be bound in the same
+    // draw call - fs_ui2d.sc's own per-vertex mode selects which one (if
+    // either) a given quad actually samples.
+    void flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE,
+                         bgfx::TextureHandle font_atlas_texture = BGFX_INVALID_HANDLE);
 
     // Advances one bgfx frame. Returns the frame count bgfx reports,
     // mainly useful for tests/logging.
@@ -210,6 +367,21 @@ class Renderer : public NonCopyable {
     // is simply ignored, not an error), so this doesn't need to be
     // gated on whether LCU_BUILD_SHADER_TOOLS built real chunk shaders.
     bgfx::UniformHandle sky_light_scale_uniform_ = BGFX_INVALID_HANDLE;
+    // Phase 53 - texture-atlas uniforms/sampler, same "created
+    // unconditionally in init(), destroyed in ~Renderer()" reasoning as
+    // sky_light_scale_uniform_ above (a bgfx uniform costs nothing to
+    // declare even if no atlas texture is ever actually bound - see
+    // submit_chunk_mesh's own doc comment). See fs_chunk.sc for what
+    // each one actually does.
+    bgfx::UniformHandle use_textures_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle tile_step_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle tile_inset_uniform_ = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle atlas_sampler_ = BGFX_INVALID_HANDLE;
+    // Phase 57 - the font atlas's own separate sampler slot (slot 1,
+    // `s_font` - `atlas_sampler_` above stays slot 0, `s_atlas`), same
+    // "created unconditionally in init(), destroyed in ~Renderer()"
+    // reasoning.
+    bgfx::UniformHandle font_sampler_ = BGFX_INVALID_HANDLE;
     // Phase 44 - this frame's queued submit_ui_quad() calls, 4 vertices/
     // 6 indices per quad, uploaded and cleared together by
     // flush_ui_quads(). Real per-frame state (not a persistent GPU

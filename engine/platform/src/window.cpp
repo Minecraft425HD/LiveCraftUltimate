@@ -1,5 +1,7 @@
 #include "lcu/platform/window.h"
 
+#include <mutex>
+
 #include <SDL3/SDL.h>
 
 #include "lcu/core/assert.h"
@@ -13,6 +15,16 @@ namespace {
 // the last Window to close can shut it down deterministically instead of
 // relying on process exit.
 i32 g_window_count = 0;
+
+// Real thread-safe mailbox for request_open_png_file_dialog()'s own
+// async result (Phase 62) - module-local rather than a Window member
+// because SDL's own callback contract allows it to run on a different
+// thread, and Window supports move constructon/assignment (a std::mutex
+// member would break that for no real benefit, since this project only
+// ever has one live Window at a time anyway - see g_window_count above).
+std::mutex g_dialog_mutex;
+bool g_dialog_pending = false;
+std::optional<std::optional<std::string>> g_dialog_result;
 }  // namespace
 
 Window::Window(const WindowDesc& desc) {
@@ -168,5 +180,48 @@ Window::MousePosition Window::mouse_position() {
 }
 
 void Window::warp_mouse(f32 x, f32 y) { SDL_WarpMouseInWindow(handle_, x, y); }
+
+void request_open_png_file_dialog(Window& window) {
+    {
+        std::lock_guard<std::mutex> lock(g_dialog_mutex);
+        if (g_dialog_pending) {
+            LCU_LOG_WARN("request_open_png_file_dialog: a dialog is already pending - ignoring this request");
+            return;
+        }
+        g_dialog_pending = true;
+        g_dialog_result.reset();
+    }
+
+    static const SDL_DialogFileFilter kFilters[] = {{"PNG image", "png"}};
+    SDL_ShowOpenFileDialog(
+        [](void* /*userdata*/, const char* const* filelist, int /*filter*/) {
+            std::optional<std::string> path;
+            if (filelist == nullptr) {
+                LCU_LOG_WARN("request_open_png_file_dialog: SDL_ShowOpenFileDialog failed or has no real backend "
+                             "available here ({})",
+                             SDL_GetError());
+            } else if (filelist[0] != nullptr) {
+                path = std::string(filelist[0]);
+            }
+            // filelist[0] == nullptr with a non-null filelist means the
+            // user cancelled - path stays std::nullopt, a real, distinct
+            // (but observably identical to the caller) outcome from the
+            // no-backend-available case above.
+            std::lock_guard<std::mutex> lock(g_dialog_mutex);
+            g_dialog_result = path;
+            g_dialog_pending = false;
+        },
+        nullptr, window.native_handle(), kFilters, 1, nullptr, false);
+}
+
+std::optional<std::optional<std::string>> poll_open_png_file_dialog_result() {
+    std::lock_guard<std::mutex> lock(g_dialog_mutex);
+    if (!g_dialog_result.has_value()) {
+        return std::nullopt;
+    }
+    std::optional<std::optional<std::string>> result = g_dialog_result;
+    g_dialog_result.reset();
+    return result;
+}
 
 }  // namespace lcu::platform

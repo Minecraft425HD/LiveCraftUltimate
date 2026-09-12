@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include "lcu/core/types.h"
 #include "lcu/math/vec4.h"
@@ -27,12 +28,19 @@ struct HotbarSlotRect {
 // One real rect per slot, bottom-center, left-to-right in slot order.
 std::array<HotbarSlotRect, kHotbarSlotCount> hotbar_slot_layout(u32 screen_width, u32 screen_height);
 
-// One hotbar slot's real display data - a flat colored icon quad (no
-// texture atlas, see ItemDefinition::icon_color's own doc comment) plus
-// the real held count from Inventory/placeable_items, not a mock value.
+// One hotbar slot's real display data - either a flat colored icon quad
+// (icon_color, Phase 47) or a real atlas texture sample (texture_uv,
+// Phase 56 - the real (u0,v0,u1,v1) sample rect from lcu::assets::
+// tile_uv_range, pre-resolved by client/main.cpp same as icon_color
+// itself already is - engine/ui doesn't depend on engine/assets, see
+// ItemDefinition::texture_index's own doc comment for why), plus the
+// real held count from Inventory, not a mock value. unset texture_uv
+// means "draw icon_color flat", the real default every item had before
+// Phase 56.
 struct HotbarItem {
     bool has_item = false;
     math::Vec4 icon_color{1.0f, 1.0f, 1.0f, 1.0f};
+    std::optional<math::Vec4> texture_uv;
     u32 count = 0;
 };
 

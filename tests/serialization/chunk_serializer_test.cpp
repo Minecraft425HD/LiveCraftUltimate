@@ -1,11 +1,13 @@
 #include "lcu/serialization/chunk_serializer.h"
 
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <zstd.h>
 
 using lcu::voxel::BlockId;
 using lcu::voxel::Chunk;
@@ -39,6 +41,48 @@ void patch_byte_at(const std::string& path, long offset, lcu::u8 new_value) {
     std::fseek(file, offset, SEEK_SET);
     std::fwrite(&new_value, 1, 1, file);
     std::fclose(file);
+}
+
+// Builds a real, standalone v1-format payload (blocks only, no state
+// array - the exact pre-Phase-63 layout) so LegacyV1FileLoadsWithState
+// ZeroEverywhere below exercises the real backward-compatibility path
+// against a byte-for-byte real legacy file, not a patched/faked one.
+// Mirrors serialize_chunk_to_bytes' own pre-Phase-63 body exactly.
+std::vector<lcu::u8> build_legacy_v1_bytes(const Chunk& chunk) {
+    std::vector<BlockId> flat;
+    flat.reserve(Chunk::kVolume);
+    for (lcu::u32 z = 0; z < Chunk::kEdgeLength; ++z) {
+        for (lcu::u32 y = 0; y < Chunk::kEdgeLength; ++y) {
+            for (lcu::u32 x = 0; x < Chunk::kEdgeLength; ++x) {
+                flat.push_back(chunk.block_at(x, y, z));
+            }
+        }
+    }
+    const lcu::usize uncompressed_size = flat.size() * sizeof(BlockId);
+
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 9);
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
+    std::vector<lcu::u8> compressed(ZSTD_compressBound(uncompressed_size));
+    const lcu::usize result =
+        ZSTD_compress2(cctx, compressed.data(), compressed.size(), flat.data(), uncompressed_size);
+    ZSTD_freeCCtx(cctx);
+
+    struct LegacyHeader {
+        lcu::u32 magic = 0x4C435543u;  // "LCUC"
+        lcu::u32 format_version = 1;
+        lcu::u32 edge_length = Chunk::kEdgeLength;
+        lcu::u32 uncompressed_size = 0;
+        lcu::u32 compressed_size = 0;
+    };
+    LegacyHeader header;
+    header.uncompressed_size = static_cast<lcu::u32>(uncompressed_size);
+    header.compressed_size = static_cast<lcu::u32>(result);
+
+    std::vector<lcu::u8> bytes(sizeof(header) + result);
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    std::memcpy(bytes.data() + sizeof(header), compressed.data(), result);
+    return bytes;
 }
 
 }  // namespace
@@ -200,4 +244,62 @@ TEST(ChunkSerializer, DeserializeRejectsTruncatedBytes) {
 TEST(ChunkSerializer, DeserializeRejectsEmptyBytes) {
     Chunk loaded;
     EXPECT_EQ(deserialize_chunk_from_bytes({}, loaded), ChunkLoadResult::CorruptHeader);
+}
+
+// --- Real block-state persistence (Phase 63) ----------------------------
+
+TEST(ChunkSerializer, RoundTripPreservesBlockStates) {
+    Chunk original;
+    original.set_block_with_state(2, 3, 4, 10, 7);
+    original.set_block_with_state(6, 6, 6, 20, 255);
+
+    const std::vector<lcu::u8> bytes = serialize_chunk_to_bytes(original);
+    ASSERT_FALSE(bytes.empty());
+
+    Chunk loaded;
+    ASSERT_EQ(deserialize_chunk_from_bytes(bytes, loaded), ChunkLoadResult::Ok);
+    EXPECT_EQ(loaded.block_at(2, 3, 4), 10);
+    EXPECT_EQ(loaded.state_at(2, 3, 4), 7);
+    EXPECT_EQ(loaded.block_at(6, 6, 6), 20);
+    EXPECT_EQ(loaded.state_at(6, 6, 6), 255);
+    // An untouched voxel round-trips as real state 0.
+    EXPECT_EQ(loaded.state_at(0, 0, 0), 0);
+}
+
+TEST(ChunkSerializer, FileRoundTripPreservesBlockStates) {
+    Chunk original;
+    original.set_block_with_state(5, 5, 5, 3, 42);
+    const std::string path = temp_file_path("states.chunk");
+    ASSERT_TRUE(save_chunk_to_file(original, path));
+
+    Chunk loaded;
+    ASSERT_EQ(load_chunk_from_file(path, loaded), ChunkLoadResult::Ok);
+    EXPECT_EQ(loaded.state_at(5, 5, 5), 42);
+
+    std::filesystem::remove(path);
+}
+
+TEST(ChunkSerializer, LegacyV1FileLoadsWithStateZeroEverywhere) {
+    Chunk original;
+    original.set_block(1, 1, 1, 42);
+    const std::vector<lcu::u8> legacy_bytes = build_legacy_v1_bytes(original);
+
+    Chunk loaded;
+    ASSERT_EQ(deserialize_chunk_from_bytes(legacy_bytes, loaded), ChunkLoadResult::Ok);
+    EXPECT_EQ(loaded.block_at(1, 1, 1), 42);
+    EXPECT_EQ(loaded.state_at(1, 1, 1), 0);
+    EXPECT_EQ(loaded.state_at(5, 5, 5), 0);
+}
+
+TEST(ChunkSerializer, LegacyV1FileWithWrongPayloadSizeIsCorruptData) {
+    // A real v1 header, but with uncompressed_size lying about the
+    // real block-only payload size - must be rejected as corrupt, not
+    // silently accepted with garbage/short data.
+    Chunk original;
+    std::vector<lcu::u8> legacy_bytes = build_legacy_v1_bytes(original);
+    // uncompressed_size is the 4th u32 field (byte offset 12).
+    legacy_bytes[12] = 0xFF;
+
+    Chunk loaded;
+    EXPECT_EQ(deserialize_chunk_from_bytes(legacy_bytes, loaded), ChunkLoadResult::CorruptData);
 }

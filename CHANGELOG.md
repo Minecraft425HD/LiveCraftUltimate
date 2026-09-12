@@ -2,7 +2,655 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65
+
+### Phase 65
+
+- **Real farming-processing recipes**: two new `ShapelessRecipe`s in the
+  existing `RecipeRegistry` - 3x `game:wheat` -> 1x `game:bread` (the
+  brief's own literal "3 Weizen -> 1 Brot"; `game:bread` has existed
+  since Phase 51 with no real survival obtain path until now) and 2x
+  `game:planks` -> 1x `game:wooden_hoe`. The hoe recipe is a real,
+  documented simplification of Minecraft's own 2 sticks + 2 planks: no
+  `game:stick` item exists anywhere in this project, and inventing one
+  solely for this single recipe was rejected as disproportionate new
+  scope (see DECISIONS.md) - 2 planks alone is an honest substitute
+  using only already-existing items. No stone-hoe recipe either (the
+  brief's own "optional", and there is no real tool-tier concept yet for
+  a stone vs. wood hoe to meaningfully differ by).
+- **Real, documented limitation discovered while wiring this up**: the
+  Phase 23 "quick-craft" shortcut (`Action::Craft`) can never match
+  either new recipe, no matter how much wheat/planks are held - it
+  dedupes held items down to one of each *distinct* type before querying
+  `RecipeRegistry`, so it structurally cannot represent "needs 3 of the
+  same item". Both new recipes work correctly through the real,
+  already-existing 2x2 inventory-screen grid and 3x3 workbench grid
+  instead (Phase 49/50): those query actual per-cell contents, so
+  placing each wheat/plank into its own cell (exactly how a real player
+  would drag them) produces a correct multiset match, and the existing
+  take-result handler's "consume 1 per non-empty ingredient cell" logic
+  is already exactly correct for this case - it just had a stale doc
+  comment (now corrected) claiming this only worked for 1-of-each
+  recipes.
+- New `LCU_VERIFY_FARMING_CRAFT` headless hook: grants 3 wheat + 2
+  planks directly, drives the real 2x2 grid through real mouse-click
+  simulation (left-click pickup, right-click "place 1 per cell" x3 then
+  x2, take result, stow) for both recipes back to back in one run, then
+  logs the final bread/wooden_hoe counts - confirmed via a real headless
+  run: `bread=1 wooden_hoe=1` on both dev-bgfx and dev-nobgfx builds
+  (needs `LCU_MAX_FRAMES>=1000000` in this sandbox to reliably cover its
+  ~2.8 real elapsed seconds - see DECISIONS.md's Phase 64 entry on this
+  convention's own real timing variance run to run).
+  Full regression sweep (all prior `LCU_VERIFY_*` hooks, including
+  `LCU_VERIFY_FARMING`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`/
+  `LCU_VERIFY_CRAFT`) stays clean. `ctest` 646/646 (bgfx) / 638/638
+  (non-bgfx) - no new tests needed since `RecipeRegistry` and the real
+  click-handling code were already fully unit/integration tested; this
+  phase only adds data (recipe registrations) exercised by the new
+  headless hook.
+
+### Phase 64
+
+- **Real farming**: `game:farmland` (tilled from grass/dirt, right-
+  click with a hoe on the top face) and `game:wheat` (8 real growth
+  states, planted via seeds on farmland's top face). New procedural
+  `generate_wheat_stage` textures (8 real tiles, sparse pale-green at
+  stage 0 to dense golden-brown at stage 7, same real "one noise field,
+  rising threshold" technique as the Phase 60 crack overlay) mapped
+  onto wheat's own real state via `BlockDefinition::texture_index_
+  offset_by_state` (Phase 63).
+- **Real, documented simplification**: wheat is registered with
+  `has_collision=true` - this project's own raycast targeting is
+  gated entirely on that flag (see `game:water`'s own doc comment), so
+  a non-collidable wheat block would be real-honestly untargetable and
+  unharvestable; the same trade-off `game:torch` already accepts.
+  Rendering stays a full alpha-cutout CUBE (routed into the real
+  alpha-blended `mesh.water` layer via `is_transparent=true`), not real
+  cross/X-shaped crop geometry - the brief's own "cross_block" category
+  is **PARTIAL**, deferred: `mesh_chunk_greedy` has no non-cube
+  rendering path at all today, and building one is real, separate
+  architectural work this phase's own scope doesn't require.
+- **Real growth**: new `game::systems::update_crop_growth` - a real
+  per-random-tick scan (once per real elapsed second) of every loaded
+  wheat block below max growth, gated on real sky-OR-block light >= 9,
+  independently rolling each eligible block against a real chance
+  calibrated so the EXPECTED growth rate is +1 stage per real in-game
+  day (`kCropRandomTickIntervalSeconds / day_length_seconds`). New
+  `LCU_FAST_FARMING=1` dev toggle scales the real elapsed time fed into
+  the growth accumulator (not the probability math itself) so a
+  headless run can observe full 0-7 growth within seconds.
+  Single-player only for now (client-authoritative, matching local
+  `AIWander`'s own real scope split - see DECISIONS.md).
+- **Real harvest**: breaking OR right-clicking mature wheat (state 7)
+  drops a real, uniformly random 1-3 wheat + 1-3 seeds (via new
+  `game::systems::harvest_wheat`); an immature crop drops only 1 real
+  seed. Right-click harvest replants a fresh state-0 wheat immediately.
+  Farmland underneath is never touched by either path, so it honestly
+  stays farmland. Optional real 5%-seed-from-grass bonus drop on top of
+  grass's own normal dirt-item drop.
+- **New items**: `game:wheat_seeds`, `game:wheat`, and a minimal
+  `game:wooden_hoe` (no durability/tool-tier concept - `ItemDefinition`
+  has none; tilling behavior lives in a real side table, same pattern
+  `edible_hunger_restore` already established).
+- New unit tests: `CropGrowthSystem.*` (growth gating, light thresholds,
+  max-state clamp, safe no-op on misconfiguration), `HarvestWheat.*`
+  (drop-count ranges and real randomness), `GenerateWheatStage.*`
+  (coverage growth/superset/maturity-color checks). New `LCU_VERIFY_
+  FARMING` headless hook drives a real till -> plant -> (fast-forwarded)
+  grow -> harvest round trip end-to-end - confirmed via a real, longer
+  headless run (not part of the standard 60-frame regression sweep,
+  which only checks for a clean crash-free shutdown - see DECISIONS.md
+  for a real, newly-discovered timing caveat about that convention).
+  Full regression sweep and a real two-process networked run (farming
+  correctly inert there) both clean. `ctest` 646/646 (bgfx, up from
+  629) / 638/638 (non-bgfx, up from 621).
+
+### Phase 63
+
+- **Real block-state system (farming foundation)**: `lcu::voxel::
+  ChunkStorage` gains a parallel `std::array<u8, kVolume>` state array
+  (~4KB/16³ chunk, a real, accepted memory cost). New `state_at`/
+  `set_block_with_state`/`set_state`/`states`/`set_states` API sits
+  alongside the unchanged `block_at`/`set_block` pair - `set_block`
+  itself now also resets state to 0 (a fresh placement has no state
+  history), so every pre-Phase-63 caller keeps behaving identically.
+- **Real chunk-format v2**: `serialize_chunk_to_bytes`/`deserialize_
+  chunk_from_bytes` now compress the state array alongside the block-id
+  array in one payload. A real v1 file (blocks only) still loads
+  cleanly - every v1 chunk's state reads back as a real, honest 0 (via
+  the same `set_block`-always-resets-state behavior above), no separate
+  migration code needed.
+- **Real network wire-format extension, with zero protocol changes**:
+  `game::systems::protocol::ChunkData::compressed_bytes` is - and
+  always was - exactly `serialize_chunk_to_bytes`'s own output (see
+  `server/main.cpp`'s two real call sites), so upgrading that function
+  already extends the real wire format to carry states; `ChunkData`/
+  `encode_chunk_data`/`decode_chunk_data` needed no changes at all.
+  Verified via a real two-process server/client run.
+- **Real meshing awareness**: `mesh_chunk_greedy`'s `MaskCell` gains a
+  real `state` field, and `merges_with` now also requires equal state -
+  two otherwise-identical neighboring blocks in different real states
+  no longer merge into one quad. New opt-in `BlockDefinition::
+  texture_index_offset_by_state` (default false, no existing block
+  affected) adds the voxel's own real state to its resolved per-face
+  texture index - the real mechanism Phase 64's 8-stage wheat growth
+  will use, with no BlockDefinition-per-stage needed.
+- New unit tests for state persistence (in-memory + file round trip,
+  legacy-v1 compatibility, corrupt-size rejection), a real network
+  round trip (`ChunkDataCarriesRealBlockStatesEndToEnd`), and meshing
+  with states (merge-blocking, texture-offset opt-in and its no-op
+  default). Full regression sweep (`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH`/`HUD`/`BREAK_PLACE`/`SKIN`) plus a real
+  two-process networked run all complete cleanly. `ctest` 629/629
+  (bgfx, up from 614) / 621/621 (non-bgfx, up from 606).
+- Honestly scoped: no real block actually sets `texture_index_offset_
+  by_state` yet (Phase 64's wheat is the first real consumer) - this
+  phase is the foundation only, per its own name.
+
+### Phase 62
+
+- **Real skin system (full version)**: 5 procedural skins
+  (`lcu::assets::SkinPreset::{Steve,Alex,Red,Cyan,Ninja}`) - each a
+  flat 4-material palette (hair/skin-tone/shirt/pants) painted across
+  the exact same real MC region layout Phase 58's `Steve` default
+  already used; `Steve` matches the old `generate_default_skin_pixels()`
+  byte-for-byte.
+- **Real `lcu::assets::SkinCatalog`**: the 5 builtins plus every real
+  `*.png` file sitting in `assets/skins` (same CWD-relative,
+  real-directory-scan convention as `mods`), discovered via a real
+  `std::filesystem` scan. `add_from_file()` validates a real file via
+  stb_image (must decode, must be 64x64 or the legacy 64x32 format),
+  copies it into `assets/skins/<stem>.png`, and adds/updates its real
+  catalog entry - never crashes on an invalid file (unreadable, wrong
+  size, or a name colliding with a builtin), always returns a real
+  `{ok, error}` result instead. A legacy 64x32 upload's missing real
+  left-arm/left-leg regions are synthesized by copying the same file's
+  own already-decoded right-arm/right-leg pixels (unmirrored - a real,
+  documented simplification, see DECISIONS.md).
+- **Real new dependency**: stb_image (decode) + stb_image_write
+  (test/verify-fixture encode only), fetched via `FetchContent`
+  (no version tags exist upstream, pinned to a real commit), each
+  compiled in its own dedicated, unstrict-warnings target
+  (`StbImageImpl`/`StbImageWriteImpl`) to keep this project's own
+  zero-warning `-Werror` build clean of third-party warning noise.
+- **Real "Skins" menu screen**: reachable from the pause menu, one row
+  per real catalog entry (marked `AUSGEWAEHLT` when selected) plus a
+  real "Eigenen Skin laden..." row and "Zurueck" - built with the same
+  `MenuStack`/`MenuScreen` framework Phase 46's Options/Controls
+  screens already use.
+- **Real "Load own skin..." file picker**: new `lcu::platform::
+  request_open_png_file_dialog`/`poll_open_png_file_dialog_result`
+  wrap the real, async, platform-native `SDL_ShowOpenFileDialog` (its
+  own callback may run on a different thread - handled via a real
+  thread-safe, module-local mailbox in `window.cpp`), polled once per
+  frame; a successful pick runs through the same real
+  `SkinCatalog::add_from_file` + live-reload path as everything else.
+- **Real persistence**: `Options` gains `skin_name` (persisted as
+  `skin=<name>` in options.txt, default `"Steve"`), resolved against
+  the real `SkinCatalog` at startup with a logged fallback to Steve if
+  the saved name isn't found (a deleted custom skin file, a stale/
+  corrupt value).
+- **Real live-reload**: `apply_skin(index)` destroys the old GPU
+  texture and uploads the new skin's real pixels immediately - the
+  player's own third-person model and first-person arm both pick it up
+  next frame with zero extra plumbing, since they already read the one
+  `skin_texture` handle fresh every frame.
+- **Real per-NPC fixed skins**: new `game::components::NpcAppearance`
+  (`skin_preset_index`) assigned once at spawn, cycling through the 5
+  builtin presets - the 3 real `AIWander` NPCs no longer share the
+  player's own selectable skin, and never change even if the player
+  later changes or uploads their own (a new, independent
+  `npc_skin_textures` array of 5 real GPU textures, created once at
+  startup).
+- New `LCU_VERIFY_SKIN` headless hook: exercises `apply_skin`, a real
+  `SkinCatalog::add_from_file` round trip (via a real temp PNG written
+  through stb_image_write, standing in for a real user-picked file -
+  `SDL_ShowOpenFileDialog` itself has no real backend in this headless
+  sandbox and can't be scripted), and real `build_skins_screen()`
+  construction. Full regression sweep (`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH`/`HUD`/`BREAK_PLACE`/`SKIN`) all complete
+  cleanly. `ctest` 614/614 (bgfx, up from 591) / 606/606 (non-bgfx, up
+  from 586).
+- Honestly scoped: the real native OS file-open dialog itself is
+  **NOT VERIFIED — ENVIRONMENT LIMITATION** (no desktop/portal service
+  in this headless sandbox); everything downstream of "a real file path
+  was chosen" is exercised for real via `LCU_VERIFY_SKIN`. A legacy
+  64x32 upload's synthesized left-limb pixels are unmirrored (see
+  DECISIONS.md).
+
+### Phase 61
+
+- **Real transparent water rendering**: the `ChunkMesh::water` layer
+  (structurally present since early phases, never populated) is now
+  real. `mesh_chunk_greedy`'s face-visibility test gains a second real
+  branch - beyond the existing opaque-vs-transparent XOR - for "two
+  different non-opaque substances touching" (today: water next to
+  air), so a transparent block is no longer silently invisible where
+  it borders another non-opaque material. Quads route to `mesh.water`
+  vs `mesh.opaque` by reusing the existing `BlockDefinition::
+  is_transparent` flag (no new field needed) - water is now the one
+  real block with that flag flipped true.
+- **Real alpha-blended chunk draw**: `Renderer::submit_chunk_mesh`
+  gains an `alpha_blend` parameter (default false, every existing
+  opaque call site unaffected) - when true, real
+  `BGFX_STATE_BLEND_ALPHA` replaces the opaque state, keeping depth
+  test but dropping depth write. `fs_chunk.sc` now samples and outputs
+  the atlas's real per-texel alpha (previously hardcoded `1.0`) -
+  harmless for every opaque draw (alpha is only ever consumed when
+  blend state is enabled) and lets water's real semi-transparent
+  texture (alpha ~180/255, Phase 54) genuinely composite see-through.
+- **Real client wiring**: a second `gpu_water_meshes` map mirrors
+  `gpu_meshes` through every lifecycle point (remesh/upload, far-chunk
+  unload, shutdown); the render loop draws the opaque layer fully
+  first, then a second pass over `gpu_water_meshes` with
+  `alpha_blend=true`, reusing view 0 (no new bgfx view) - opaque-then-
+  transparent with no back-to-front sort between water chunks, a real,
+  documented limitation.
+- Real, accepted side effect: `is_transparent` also drives light
+  propagation (`engine/lighting/propagation.h`), so light now passes
+  through water too - not separately fixed, see DECISIONS.md.
+- Leaves deliberately stay opaque (`is_transparent = false`) - out of
+  scope for this phase, which is titled and scoped to water only.
+- 3 new `GreedyMesher` unit tests for the new visibility branch and
+  layer routing; 1 existing test's stale assertion/comment fixed (a
+  2-block transparent pair's 5 real air-facing faces are NOT empty,
+  only the shared internal boundary between them stays face-less).
+- Verified via real headless runs (default + `LCU_VERIFY_BREAK_PLACE`,
+  60 frames, clean shutdown) and the full regression sweep (`HEALTH`/
+  `MENU`/`INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH`/`HUD`, all complete
+  cleanly), plus a real `LCU_BUILD_SHADER_TOOLS=ON` build confirming
+  `fs_chunk.sc` recompiles cleanly to all 3 profiles (spirv/glsl/
+  essl). `ctest` 591/591 (bgfx, up from 587) / 586/586 (non-bgfx, up
+  from 583).
+- Honestly scoped: no back-to-front sorting between separate water
+  chunks (a real, low-risk limitation - single water bodies render
+  correctly either way); what real transparency looks like on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**.
+
+### Phase 60
+
+- **Real crack textures**: 10 new procedural atlas tiles
+  (`TileId::Crack0`..`Crack9`, in the SAME block/item atlas - a real,
+  spare-capacity "own atlas area", not a whole new texture/sampler).
+  `generate_crack(stage)` samples one deterministic per-pixel noise
+  field with a threshold that grows with `stage`, so every higher
+  stage's real cracked pixels are a real superset of the stage below -
+  the same real growing-damage look Minecraft's own break overlay has,
+  without 10 independently hand-authored crack patterns.
+- **Real alpha-blended rendering**: `Renderer::submit_textured_box`
+  gains an `alpha_blend` parameter (defaulted false, every Phase 58/59
+  caller unaffected) - when true, real `BGFX_STATE_BLEND_ALPHA`
+  replaces the opaque write, so the crack texture's real transparent
+  "uncracked" pixels actually composite see-through instead of
+  rendering solid black (closing, for this one real caller, the same
+  alpha-blending gap documented since Phase 56).
+- **Real rendering**: the Phase 48.2 flat-darkening break-progress box
+  is replaced by a real alpha-blended, crack-textured box (all 6 faces
+  share the same crack UV - a real, simpler reading than raycasting the
+  exact hit face for one oriented quad, see DECISIONS.md) - `render_
+  break_fraction` (0..1) maps onto the real 10 crack stages.
+- 4 new unit tests (`GenerateCrack.*`, incl. a real superset-growth
+  check across all 10 stages) plus the existing `ProceduralTextures.*`/
+  `BuildBlockAtlasPixels.*` suites now also iterate the 10 new tiles.
+- Verified via real headless runs, real `LCU_VERIFY_BREAK_PLACE`
+  (exercises the real crack overlay across multiple frames of held
+  break progress) and the full regression sweep (`HEALTH`/`MENU`/
+  `INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH`/`HUD`, all complete cleanly),
+  and a real `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files
+  touched - the new `alpha_blend` flag is a pure bgfx render-state
+  change, `vs_sky.sc`/`fs_sky.sc` are unchanged). `ctest` 591/591
+  (bgfx, up from 587) / 583/583 (non-bgfx, up from 579).
+- Honestly scoped: what the real crack texture looks like on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; the
+  crack overlay covers all 6 faces of the targeted block uniformly
+  rather than only the specific face being broken (a real, documented
+  simplification, see DECISIONS.md).
+
+### Phase 59
+
+- **Real visible NPCs**: `submit_character_model` (Phase 58's own
+  third-person body rendering) extracted into a real, reusable
+  function - the local player's own third-person body and every
+  wandering AI entity now go through the exact same function, just
+  fed different position/yaw/pitch/walk-phase. The 3 AI entities
+  spawned since Phase 6 now render as real Steve-like figures, not
+  invisible logic-only points.
+- **Real NPC facing + animation**: each NPC's own yaw is derived from
+  its real `AIWander::target` direction (faces where it's walking, not
+  a fixed default); a real walk-cycle limb swing plays while
+  `wait_seconds <= 0` (moving), a real small head-wobble idle animation
+  plays while `wait_seconds > 0` (waiting) - both driven by a new
+  `npc_animation_time` real elapsed-time clock (advances only while
+  unpaused), since NPC movement (unlike the player's own) has no
+  per-frame distance delta exposed back to the renderer to drive an
+  exact walk-cycle from.
+- **Debug wireframe boxes are now a real toggle, default off**: bundled
+  into the existing `options.debug_overlay_enabled` (F3) flag rather
+  than a new dedicated keybind - it was already a real "show debug
+  visualization" preference with exactly the right default. Real
+  remote-player avatars (networked mode) stay out of this phase's own
+  scope (the brief names AI wander entities specifically); remote
+  entities keep their previous debug-box-only representation, now
+  gated behind the same toggle instead of always-on.
+- Verified via real headless runs (default run logs "Spawned 3
+  wandering AI entities" as before, now rendered as real models every
+  frame), real `LCU_VERIFY_HUD`/`BREAK_PLACE`/`HEALTH`/`MENU`/
+  `INVENTORY`/`WORKBENCH`/`CRAFT`/`TORCH` regression runs (all still
+  complete their full frame counts cleanly), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files touched -
+  `submit_character_model` reuses Phase 58's own `submit_textured_box`
+  unchanged). `ctest` 587/587 (bgfx) / 579/579 (non-bgfx) - unchanged
+  counts, real-rendering wiring on top of Phase 58's already-tested
+  math/primitives, not new pure-logic surface.
+- Honestly scoped: what real NPCs look like walking around on a real
+  GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**; NPC
+  walk-cycle speed is a fixed real constant (`kNpcWalkCycleFrequency`),
+  not derived from each NPC's own real `AIWander::speed` (a real,
+  documented simplification, see DECISIONS.md); no player-vs-NPC
+  collision (unchanged, pre-existing "collision with player still
+  inactive" behavior per the brief's own note).
+
+### Phase 58
+
+- **Real character model**: `engine/assets::skin_texture.{h,cpp}` - a
+  procedurally-generated 64x64 player skin in the real Minecraft
+  "modern" (dual-arm/dual-leg) UV layout, 36 named per-face regions
+  (`SkinRegion`), own texture/sampler slot. `Renderer` gains
+  `submit_textured_box` (draws an arbitrary, not-necessarily-axis-
+  aligned box from 8 caller-supplied world-space corners, independent
+  UV rect per face) plus real `rotate_yaw`/`rotate_pitch`/
+  `character_part_corners` math in `client/main.cpp` (yaw/pitch derived
+  to reproduce `FirstPersonCamera::forward()` bit-for-bit).
+- **First-person arm**: replaces the flat 2D hand icon (Phase 48) with
+  a small 3D box held in view-space, textured with the current hotbar
+  item's own atlas UV (not the skin) - the same swing animation as
+  before, now a real position/orientation offset instead of a 2D quad
+  offset.
+- **Third-person body**: a real 6-box Steve-like model (head, torso, 2
+  arms, 2 legs) - legs/arms swing in a real, frame-rate-independent
+  walk cycle (`walk_cycle_phase` advances by distance travelled, not
+  wall-clock time); head follows real camera pitch, body yaw follows
+  camera yaw (a documented simplification of MC's own head/body-yaw-lag
+  system - see DECISIONS.md). Every part's own real dimensions are
+  Minecraft's own per-part pixel sizes, uniformly scaled so the whole
+  stack fits exactly inside `kPlayerHeight` (1.8 blocks).
+- **Real 3-way F5 perspective cycle**: First-Person -> Third-Person-
+  Behind -> Third-Person-Front -> First-Person, closing the previously
+  documented "no third-person-front, no player model to look at" PARTIAL.
+- **AABB verified, not changed**: `kPlayerHalfWidth`/`kPlayerHeight`/
+  `kEyeHeight` already held the exact real Minecraft values (0.3/1.8/
+  1.62) from earlier phases - Phase 58.1 needed no numeric change, only
+  confirmation and the real work built on top of them above.
+- Verified via real headless runs (`Player skin: skin_texture_valid=
+  true`), a real extended `LCU_VERIFY_HUD` run (now presses F5 three
+  times, cycling through all three perspectives and exercising every
+  one of `submit_textured_box`'s 7 real per-frame call sites - the arm
+  box plus all 6 body-part boxes), real `LCU_VERIFY_BREAK_PLACE`/
+  `LCU_VERIFY_HEALTH`/`LCU_VERIFY_MENU`/`LCU_VERIFY_INVENTORY`/
+  `LCU_VERIFY_WORKBENCH`/`LCU_VERIFY_CRAFT`/`LCU_VERIFY_TORCH`
+  regression runs (all still complete their full frame counts cleanly),
+  and a real `LCU_BUILD_SHADER_TOOLS=ON` build (no shader files were
+  touched this phase - `submit_textured_box` reuses `vs_sky.sc`/
+  `fs_sky.sc` unchanged - so this just confirms the existing pipeline
+  still compiles/links against the new caller). 12 new unit tests
+  (`SkinTextureConstants`, `SkinUvRange.*` incl. 5 exact-coordinate
+  checks against the brief's own example regions, `GenerateDefaultSkin
+  Pixels.*`). `ctest` 587/587 (bgfx, up from 575) / 579/579 (non-bgfx,
+  up from 567).
+- Honestly scoped: what the real character model/skin actually looks
+  like on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; body yaw follows camera yaw directly rather than a real
+  independent, lagging body-facing direction (see DECISIONS.md); no
+  idle/breathing animation for the player (that's Phase 59's own NPC
+  job per the brief's own phasing); no third-person camera collision
+  (the existing `kThirdPersonDistance` gap noted since Phase 47 is
+  unchanged).
+
+### Phase 57
+
+- **Real bitmap-font atlas**: new `engine/assets::font_atlas.{h,cpp}` -
+  a real, own-design procedurally-generated monospace font covering
+  ASCII 32-126 (95 characters), one glyph per 6x8-pixel cell (a 5x7
+  glyph plus 1px right/bottom spacing), packed into its own separate
+  96x48 RGBA8 atlas (deliberately NOT merged into the Phase 53 block
+  atlas - see DECISIONS.md). Each glyph is real hand-authored 5x7 dot-
+  matrix art (95 characters, not a transcription of any existing font
+  file), rasterized to opaque-white/transparent pixels by a real,
+  deterministic `generate_glyph_pixels(char)` so one texture can be
+  tinted to any text color at draw time. Same half-texel UV-inset
+  anti-bleed technique as `texture_atlas.h`. 12 new unit tests
+  (`FontAtlasConstants`, `GlyphUvRange.*` incl. an out-of-range->'?'
+  fallback check, `GenerateGlyphPixels.*` incl. a determinism check,
+  `BuildFontAtlasPixels.*` incl. a full atlas-vs-generator byte match).
+- **Real text renderer**: new `engine::ui::TextRenderer` - stateless,
+  `draw_text(renderer, text, x, y, color, scale)` queues one real
+  textured quad per character via the new `Renderer::
+  submit_text_glyph_quad`, and `measure_text_width` for right-
+  alignment. `UiVertex2D`'s per-vertex sample flag becomes a real
+  tri-state (0 flat color / 1 item-atlas RGB-as-is / 2 font-atlas RGB
+  tinted by vertex color); `fs_ui2d.sc` gains a second real sampler
+  (`s_font`, its own texture slot) and a chained-`mix()` selector
+  picking the right one of the three per pixel, all within the SAME
+  single UI draw call/batch a frame already had - no extra draw calls
+  for text.
+- **HUD/menu/inventory/workbench now render real text**: `draw_debug_
+  overlay`/`draw_hud_labels`/`draw_menu_labels`/`draw_inventory_screen_
+  labels`/`draw_crafting_table_screen_labels` all gain a real
+  `legacy_debug_text` parameter - `false` (the new default) draws
+  through `TextRenderer`'s real bitmap-font atlas at real pixel
+  positions (no more character-cell rounding for e.g. hotbar item
+  counts); `true` keeps every one of those functions' exact previous
+  `bgfx::dbgTextPrintf`-based behavior, unchanged, as a real working
+  fallback - `LCU_LEGACY_DEBUG_TEXT=1` (`client/main.cpp`) switches all
+  five over live.
+- Verified via real headless runs (`Font atlas: font_atlas_texture_
+  valid=true`, clean 30-frame runs under both the new and legacy text
+  paths), real `LCU_VERIFY_MENU`/`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_
+  WORKBENCH` runs (the three real UI screens whose labels now go
+  through `TextRenderer`, all complete their full 60 frames cleanly),
+  real `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs
+  (still byte-identical gameplay-logic output), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (`fs_ui2d.sc`/`vs_ui2d.sc` compile
+  cleanly to spirv/glsl/essl with the new sampler/mix logic). `ctest`
+  575/575 (bgfx, up from 563) / 567/567 (non-bgfx, up from 555).
+- Honestly scoped: what the real bitmap font actually looks like
+  rendered on a real GPU/display is still **NOT VERIFIED — ENVIRONMENT
+  LIMITATION**; the hand-authored 5x7 glyph shapes are plain geometric
+  block letters, not aiming for real typographic refinement; text has
+  no kerning (fixed-width monospace advance only, by design); this
+  closes out the Phase 53-57 program - see PROJECT_STATE.md.
+
+### Phase 56
+
+- **Items now use the real texture atlas**: `ItemDefinition` gains
+  `texture_index` (`std::optional<u32>`, same layering reason as
+  `BlockDefinition`'s own texture fields) - block-as-items (stone,
+  grass, dirt, torch, wood, crafting table, compost, planks) reuse the
+  exact same atlas slot as their block. Apple/bread deliberately keep no
+  `texture_index` (no Phase 54 texture exists for either) and fall back
+  to `icon_color` everywhere, same as before.
+- **One real helper, one real call site pattern**: `client/main.cpp`
+  gained a single `resolve_item_display` lambda that every one of the
+  13 places that used to read `.icon_color` off the item registry now
+  routes through - it fills `icon_color` (always, unchanged) and
+  `texture_uv` (only when textures are on *and* the item has a real
+  `texture_index`), so inventory slots, hotbar, the crafting grid, and
+  the drag cursor all pick up real textures from one place, not 13
+  separate lookups.
+- **Real textured-quad rendering plumbed through the whole UI stack**:
+  `UiVertex2D` gains a per-vertex `use_texture` flag (not a per-draw
+  uniform - a single UI batch legitimately mixes textured item icons
+  with flat-color borders/backgrounds/health bars in the same draw
+  call); `Renderer::submit_textured_ui_quad` is the new real entry
+  point; `vs_ui2d.sc`/`fs_ui2d.sc` sample `s_atlas` and `mix()` against
+  the flat color per-vertex. `HotbarItem`/`InventorySlotDisplay` both
+  gain `std::optional<math::Vec4> texture_uv`; `hud_renderer.cpp`,
+  `inventory_screen_renderer.cpp`, and `crafting_table_screen_renderer.cpp`
+  all branch on it the same way.
+- **Hand icon and dropped items textured too**: the Phase 48 hand icon
+  now goes through `resolve_item_display` + `submit_textured_ui_quad`.
+  `submit_world_billboard` (Phase 50 dropped items) gains real
+  atlas-texture + UV-rect parameters, reusing the same `vs_sky.sc`/
+  `fs_sky.sc` program already shared by the skybox/wireframe/solid-box
+  billboard family - the other 3 callers of that program
+  (`submit_billboard`, `submit_wireframe_box`, `submit_solid_box`) get
+  their vertex structs mechanically extended with always-zero UV/flag
+  fields, keeping their own output byte-identical.
+- Verified via real headless runs (`atlas_texture_valid=true`/`false`
+  under both `LCU_USE_TEXTURES=1`/`0`, unchanged from Phase 55), real
+  `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` regression runs (still
+  byte-identical gameplay-logic output), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build compiling every touched shader
+  (`vs_ui2d.sc`/`fs_ui2d.sc`/`vs_sky.sc`/`fs_sky.sc`) to spirv/glsl/essl.
+  `ctest` 563/563 (bgfx) / 555/555 (non-bgfx) - unchanged counts, since
+  Phase 56 is real-rendering wiring with fallback-chain coverage already
+  proven by Phase 55's tests, not new pure-logic surface.
+- Honestly scoped: what any of this actually looks like textured on a
+  real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  the `vs_sky.sc`/`fs_sky.sc` family never had alpha blending enabled
+  and still doesn't, so a dropped torch's transparent background pixels
+  render solid black on its billboard rather than see-through - a real,
+  accepted visual limitation, not a bug, documented in DECISIONS.md.
+
+### Phase 55
+
+- **Blocks now use the real texture atlas**: `BlockDefinition` gains
+  `top_texture`/`side_texture`/`bottom_texture` (`u32`, mirroring
+  `color`/`side_color`/`bottom_color`'s own fallback chain exactly) -
+  `mesh_chunk_greedy` resolves the real per-face atlas tile at the same
+  place/time it already resolves `quad_color`, and passes it through to
+  `ChunkMeshLayer::add_quad`'s new `texture_index` parameter. Every
+  real block registered in `client/main.cpp` (stone, grass, dirt, sand,
+  snow, torch, water, coal/iron ore, wood, leaves, cactus, crafting
+  table) now points at its own real Phase-54 texture(s) - grass's real
+  underside is the dedicated dirt tile (not a reuse of the green-capped
+  side texture the color-only fallback used), wood's top and bottom
+  both show real growth rings (only the sides show bark), matching real
+  Minecraft's own per-face convention more closely than color alone
+  could.
+- **Real texture-atlas tests**: `BlockDefinition` is `EngineCore`-level
+  (built for `VoxelServer` too), so `top_texture`/etc. stay a plain
+  `u32`, not `lcu::assets::TileId` directly - engine/voxel can't depend
+  on `engine/assets` (`LCU_BUILD_CLIENT`-only). Two new
+  `GreedyMesher.*` tests prove the same real top/side/bottom fallback
+  chain `PerFaceColorUsesTopSideBottomFallbackChain` already proves for
+  color, now for `texture_index`.
+- Verified via a real headless run (`atlas_texture_valid=true` with
+  real per-block textures now resolved through meshing), a real
+  `LCU_VERIFY_BREAK_PLACE` regression run (still passes byte-identical
+  - breaking/placing carries real texture indices through the whole
+  pipeline with no behavior change to the logged gameplay), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build. `ctest` 563/563 (bgfx, up from
+  561) / 555/555 (non-bgfx, up from 553).
+- Honestly scoped: what any real block actually looks like textured on
+  a real GPU/display is still **NOT VERIFIED — ENVIRONMENT LIMITATION**;
+  `game:crafting_table`'s sides reuse the plain `Planks` tile (no
+  dedicated crafted-table-side texture exists - Phase 54's own texture
+  list names only a table-top pattern); `game:torch`/`game:cactus`
+  render one real texture on every face (no per-face variation exists
+  for either in Phase 54's own texture list either).
+
+### Phase 54
+
+- **Real procedurally-generated MC-style textures**: new
+  `engine/assets::procedural_textures.{h,cpp}` - 17 real 16x16 RGBA
+  generators (`generate_grass_top`/`_side`, `generate_dirt`,
+  `generate_stone`, `generate_sand`, `generate_snow`, `generate_water`,
+  `generate_wood_side`/`_top`, `generate_leaves`, `generate_coal_ore`/
+  `iron_ore`, `generate_torch`, `generate_crafting_table_top`,
+  `generate_cactus`, `generate_compost`, `generate_planks`), each real
+  and deterministic (a pure hash function of a fixed per-texture seed +
+  pixel position - same call, same bytes, every time, no RNG-engine
+  state to carry around). New `TileId` enum fixes each texture's own
+  real atlas slot (0-16) - grass's real jagged green/dirt boundary
+  (a deterministic per-column row jitter, not a flat line), wood's real
+  concentric growth rings, ore's real 2x2 pixel-blob clusters over a
+  stone base, leaves' real alpha-0 holes, and torch's real transparent
+  background + stem + flame are all genuinely computed, not flat fills
+  with a label.
+- **New `build_block_atlas_pixels()`** packs all 17 real textures into
+  one real 256x256 RGBA8 buffer at their own fixed `TileId` slots -
+  `client/main.cpp` now uploads this (via Phase 53's own `Renderer::
+  create_texture_from_pixels`) instead of Phase 53's flat-white
+  placeholder whenever `LCU_USE_TEXTURES` is on.
+- 8 new unit tests (`ProceduralTextures.*`/`BuildBlockAtlasPixels.*`) -
+  including a real proof the atlas-packing math lands each tile at its
+  own correct slot (comparing a packed atlas pixel against that same
+  tile's own standalone generator output), not just "the buffer is the
+  right size".
+- Verified via a real headless run (`Texture atlas: use_textures=true
+  atlas_texture_valid=true` - the real generated atlas uploads
+  successfully under the real, headless Noop backend) and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (unchanged shaders from Phase 53,
+  still compile cleanly). `ctest` 561/561 (bgfx, up from 553) / 553/553
+  (non-bgfx, up from 545).
+- Honestly scoped: no `BlockDefinition`/`ItemDefinition` yet reference
+  any of these real textures - every face/icon still renders atlas tile
+  0 (`TileId::GrassTop`) regardless of block type until Phase 55/56
+  wire real per-face/per-item texture indices; what these textures
+  actually look like on a real GPU/display is still **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**.
+
+### Phase 53
+
+- **Real texture-atlas pipeline** (infrastructure only - no actual block
+  textures yet, see Phase 54): new `engine/assets::texture_atlas.{h,cpp}`
+  (pure logic, no bgfx dependency) - a fixed 256x256 RGBA atlas packed
+  as a 16x16 grid of 16x16-pixel tiles, `tile_uv_range(tile_index)`
+  returning each tile's real sample rect. Anti-bleed is a real half-texel
+  UV inset, not literal padding pixels between tiles (the atlas's own
+  fixed 256x256/16x16-tiles-of-16x16-pixels size leaves no spare pixel
+  budget for a literal border without shrinking real tile content or
+  growing the atlas - see DECISIONS.md).
+- **New `Renderer::create_texture_from_pixels`/`destroy_texture`**:
+  real bgfx 2D RGBA8 texture upload, nearest-filtered + clamp-addressed
+  (`BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP`) baked into the
+  texture's own creation flags.
+- **`voxel::MeshVertex` gains a real `u16 texture_index` field** (Phase
+  53.4) - placed *before* the trailing `light` byte, not after, so its
+  2-byte alignment needs zero compiler-inserted padding (see the field's
+  own doc comment for the real bug this avoids: an internal gap the
+  existing tightly-packed `chunk_mesh_vertex_layout()` doesn't account
+  for). `ChunkMeshLayer::add_quad` takes a new, defaulted
+  `texture_index` parameter - existing call sites (including
+  `mesh_chunk_greedy`'s own two) are unaffected, still resolving to
+  atlas tile 0 until Phase 55 gives `BlockDefinition` real per-face
+  texture assignments.
+- **Real chunk-shader atlas sampling**: `vs_chunk.sc`/`fs_chunk.sc`/
+  `varying.def.sc` extended with the tile index + 3 new uniforms
+  (`u_useTextures`, `u_tileStep`, `u_tileInset`) and an `s_atlas`
+  sampler. `local_uv = fract(v_texcoord0)` wraps a greedy-meshed quad's
+  per-block UV back into 0..1 so a merged multi-block face tiles the
+  same texture repeatedly instead of stretching one tile across the
+  whole run. `u_useTextures.x` mixes between the real atlas sample and
+  the existing flat-color/noise path - driven directly by whether
+  `Renderer::submit_chunk_mesh` was actually handed a valid atlas
+  texture this draw (a real, always-in-sync source of truth, not a
+  separately-tracked toggle that could drift).
+- **New `LCU_USE_TEXTURES` env toggle** (default ON, `=0` forces the
+  exact pre-Phase-53 procedural-only path). `client/main.cpp` creates a
+  real placeholder 256x256 flat-white atlas texture when textures are
+  on - proves the real GPU round-trip (`create_texture_from_pixels` ->
+  a valid `bgfx::TextureHandle` under the real, headless Noop backend)
+  end to end this phase, not just declared/unused API surface; Phase 54
+  replaces this placeholder with real procedurally-generated content.
+- 6 new unit tests (`TextureAtlasConstants`/`TileUvRange`).
+- Verified via real `LCU_USE_TEXTURES=1`/`=0` headless runs (bgfx build
+  - `Texture atlas: use_textures=true atlas_texture_valid=true` /
+  `use_textures=false atlas_texture_valid=false`), real regression runs
+  of `LCU_VERIFY_BREAK_PLACE`/`LCU_VERIFY_HEALTH` (both still pass
+  byte-identical to Phase 52 - fall damage/eating/item pickup all still
+  log correctly with the new vertex format in place), and a real
+  `LCU_BUILD_SHADER_TOOLS=ON` build (`vs_chunk.sc`/`fs_chunk.sc` compile
+  cleanly to all 3 real shader profiles - spirv/glsl/essl). `ctest`
+  553/553 (bgfx, up from 547) / 545/545 (non-bgfx, up from 539).
+- **Deliberately deferred, marked PARTIAL**: Phase 53.2's optional
+  stb_image-based debug PNG dump of the atlas was not implemented -
+  this sandbox has no display to actually view a dumped debug image
+  against, the directive itself marks it optional, and pulling in a new
+  third-party dependency for a feature nobody here can currently use to
+  verify anything would be real, avoidable scope creep. See
+  DECISIONS.md.
 
 ### Phase 52
 

@@ -1,5 +1,6 @@
 #include "lcu/serialization/chunk_serializer.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 
@@ -52,11 +53,23 @@ void unflatten_chunk(const std::vector<voxel::BlockId>& flat, voxel::Chunk& chun
     }
 }
 
+constexpr usize kBlocksByteSize = static_cast<usize>(voxel::Chunk::kVolume) * sizeof(voxel::BlockId);
+constexpr usize kStatesByteSize = static_cast<usize>(voxel::Chunk::kVolume) * sizeof(u8);
+
 }  // namespace
 
 std::vector<u8> serialize_chunk_to_bytes(const voxel::Chunk& chunk) {
+    // Real v2 payload (Phase 63): the flat block-id array followed
+    // immediately by the flat state array, compressed together as one
+    // buffer - the state array is a real, small (kVolume bytes) fixed-
+    // size addition, not worth a second zstd frame/header of its own.
     const std::vector<voxel::BlockId> flat = flatten_chunk(chunk);
-    const usize uncompressed_size = flat.size() * sizeof(voxel::BlockId);
+    const std::array<u8, voxel::Chunk::kVolume>& states = chunk.states();
+    const usize uncompressed_size = kBlocksByteSize + kStatesByteSize;
+
+    std::vector<u8> uncompressed(uncompressed_size);
+    std::memcpy(uncompressed.data(), flat.data(), kBlocksByteSize);
+    std::memcpy(uncompressed.data() + kBlocksByteSize, states.data(), kStatesByteSize);
 
     ZSTD_CCtx* cctx = ZSTD_createCCtx();
     ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 9);
@@ -66,7 +79,8 @@ std::vector<u8> serialize_chunk_to_bytes(const voxel::Chunk& chunk) {
     ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1);
 
     std::vector<u8> compressed(ZSTD_compressBound(uncompressed_size));
-    const usize result = ZSTD_compress2(cctx, compressed.data(), compressed.size(), flat.data(), uncompressed_size);
+    const usize result =
+        ZSTD_compress2(cctx, compressed.data(), compressed.size(), uncompressed.data(), uncompressed_size);
     ZSTD_freeCCtx(cctx);
 
     if (ZSTD_isError(result)) {
@@ -96,7 +110,13 @@ ChunkLoadResult deserialize_chunk_from_bytes(const std::vector<u8>& bytes, voxel
     if (header.magic != kMagic) {
         return ChunkLoadResult::CorruptHeader;
     }
-    if (header.format_version != kChunkFormatVersion || header.edge_length != voxel::Chunk::kEdgeLength) {
+    // Real v1-file compatibility (Phase 63): a v1 chunk (blocks only,
+    // no state array) still loads cleanly - see kChunkFormatVersion's
+    // own doc comment for why every v1 chunk's state then reads back as
+    // a real, honest 0 with no extra code needed.
+    const bool is_current_version = header.format_version == kChunkFormatVersion;
+    const bool is_legacy_v1 = header.format_version == 1;
+    if ((!is_current_version && !is_legacy_v1) || header.edge_length != voxel::Chunk::kEdgeLength) {
         // A different chunk edge length is treated as an unsupported
         // version too, not an attempted resize - this build can only
         // produce/consume voxel::Chunk (16^3).
@@ -105,9 +125,13 @@ ChunkLoadResult deserialize_chunk_from_bytes(const std::vector<u8>& bytes, voxel
     if (bytes.size() < sizeof(header) + header.compressed_size) {
         return ChunkLoadResult::CorruptData;
     }
+    const usize expected_uncompressed_size = is_legacy_v1 ? kBlocksByteSize : (kBlocksByteSize + kStatesByteSize);
+    if (header.uncompressed_size != expected_uncompressed_size) {
+        return ChunkLoadResult::CorruptData;
+    }
 
-    std::vector<voxel::BlockId> flat(header.uncompressed_size / sizeof(voxel::BlockId));
-    const usize decompressed_size = ZSTD_decompress(flat.data(), header.uncompressed_size,
+    std::vector<u8> uncompressed(header.uncompressed_size);
+    const usize decompressed_size = ZSTD_decompress(uncompressed.data(), header.uncompressed_size,
                                                       bytes.data() + sizeof(header), header.compressed_size);
 
     if (ZSTD_isError(decompressed_size) || decompressed_size != header.uncompressed_size) {
@@ -115,7 +139,16 @@ ChunkLoadResult deserialize_chunk_from_bytes(const std::vector<u8>& bytes, voxel
         return ChunkLoadResult::CorruptData;
     }
 
-    unflatten_chunk(flat, out_chunk);
+    std::vector<voxel::BlockId> flat(voxel::Chunk::kVolume);
+    std::memcpy(flat.data(), uncompressed.data(), kBlocksByteSize);
+    unflatten_chunk(flat, out_chunk);  // also resets every state to 0 (set_block's own real behavior)
+
+    if (!is_legacy_v1) {
+        std::array<u8, voxel::Chunk::kVolume> states{};
+        std::memcpy(states.data(), uncompressed.data() + kBlocksByteSize, kStatesByteSize);
+        out_chunk.set_states(states);
+    }
+
     return ChunkLoadResult::Ok;
 }
 

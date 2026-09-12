@@ -19,11 +19,15 @@ void queue_inventory_screen_quads(rendering::Renderer& renderer, const Inventory
                                    const InventoryScreenState& state, u32 screen_width, u32 screen_height);
 
 // Draws each slot's real held-item count (and the cursor stack's own
-// count) via bgfx debug text, same mechanism draw_hud_labels/
-// draw_menu_labels already use. Does not call Renderer::clear_debug_text()
-// itself - client/main.cpp owns the single per-frame clear call (see
-// hud_renderer.h's own doc comment for why).
+// count) - via the real lcu::ui::TextRenderer bitmap-font atlas by
+// default, or bgfx's built-in debug-text buffer when
+// `legacy_debug_text` is true (Phase 57 - same real toggle
+// draw_hud_labels/draw_menu_labels take, see client/main.cpp's
+// LCU_LEGACY_DEBUG_TEXT). Does not call Renderer::clear_debug_text()
+// itself - client/main.cpp owns the single per-frame clear call (only
+// relevant when `legacy_debug_text` is true - see hud_renderer.h's own
+// doc comment for why).
 void draw_inventory_screen_labels(rendering::Renderer& renderer, const InventoryScreenLayout& layout,
-                                   const InventoryScreenState& state);
+                                   const InventoryScreenState& state, bool legacy_debug_text);
 
 }  // namespace lcu::ui

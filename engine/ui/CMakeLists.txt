@@ -26,6 +26,7 @@ if(LCU_BUILD_CLIENT)
             src/hud_renderer.cpp
             src/inventory_screen_renderer.cpp
             src/crafting_table_screen_renderer.cpp
+            src/text_renderer.cpp
         )
         # Never bgfx directly (see debug_overlay.h's doc comment) - only
         # Lcu::Rendering touches bgfx; Lcu::Platform for the shared

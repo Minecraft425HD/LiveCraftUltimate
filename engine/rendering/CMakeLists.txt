@@ -13,7 +13,7 @@ target_include_directories(LcuRendering PUBLIC
 # types in its own public interface, so consumers of Lcu::Rendering need
 # bgfx's include directories too, not just this library's own .cpp files.
 target_link_libraries(LcuRendering
-    PUBLIC Lcu::EngineCore Lcu::Platform bgfx
+    PUBLIC Lcu::EngineCore Lcu::Platform Lcu::Assets bgfx
 )
 
 lcu_apply_common_options(LcuRendering)

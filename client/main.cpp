@@ -12,17 +12,26 @@
 #include <functional>
 #include <random>
 
+#include <stb_image_write.h>
+
 #include "game/components/ai_wander.h"
 #include "game/components/item_entity.h"
+#include "game/components/npc_appearance.h"
 #include "game/components/player_health.h"
 #include "game/components/player_hunger.h"
 #include "game/components/position.h"
 #include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
+#include "game/systems/crop_growth_system.h"
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/item_entity_system.h"
 #include "game/systems/player_vitals_system.h"
 #include "game/systems/replication_protocol.h"
+#include "lcu/assets/font_atlas.h"
+#include "lcu/assets/procedural_textures.h"
+#include "lcu/assets/skin_catalog.h"
+#include "lcu/assets/skin_texture.h"
+#include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
 #include "lcu/audio/positional.h"
 #include "lcu/audio/waveform.h"
@@ -84,6 +93,7 @@
 #include "lcu/ui/hud_renderer.h"
 #include "lcu/ui/inventory_screen_renderer.h"
 #include "lcu/ui/menu_renderer.h"
+#include "lcu/ui/text_renderer.h"
 #endif
 
 namespace {
@@ -197,6 +207,14 @@ lcu::core::ChunkLoadSettings load_settings_from_env() {
     return lcu::core::chunk_load_settings_for(profile);
 }
 
+// Real Minecraft-sized player AABB (Phase 58.1, brief section
+// "korrekte Größe") - 0.6 wide x 1.8 tall x 0.6 deep, eye height 1.62.
+// Verified/re-confirmed this phase, not newly introduced - these three
+// constants (and every consumer: make_player_aabb below, the camera-eye
+// offset, entity debug boxes) already had the exact real Minecraft
+// values from earlier phases, so Phase 58.1 needed no numeric change,
+// only this note and the real character-model work built on top of
+// them (58.2-58.4 below) - see DECISIONS.md.
 constexpr lcu::f32 kPlayerHalfWidth = 0.3f;   // 0.6-block-wide AABB, Minecraft-like
 constexpr lcu::f32 kPlayerHeight = 1.8f;
 constexpr lcu::f32 kEyeHeight = 1.62f;
@@ -234,15 +252,61 @@ constexpr lcu::f32 kItemPickupRangeInflate = 2.0f;
 // yet (a real, honest PARTIAL - see DECISIONS.md).
 constexpr lcu::f32 kThirdPersonDistance = 4.0f;
 
-// Real hand-icon swing (Phase 48) - triggered on every real break/place
-// action, real elapsed-time-driven, not a frame-count animation (so it
-// plays at the same real speed regardless of frame rate, same reasoning
-// LCU_VERIFY_MOVE_SECONDS already established for movement).
+// Real hand swing (Phase 48, real elapsed-time-driven, not a
+// frame-count animation, so it plays at the same real speed regardless
+// of frame rate - same reasoning LCU_VERIFY_MOVE_SECONDS already
+// established for movement) - triggered on every real break/place
+// action. Phase 58.2 replaces the flat 2D hand-icon quad this used to
+// drive with a real 3D arm box (see kArm* constants below), but the
+// swing timing itself is unchanged.
 constexpr lcu::f32 kHandSwingDuration = 0.25f;
-constexpr lcu::f32 kHandIconSize = 32.0f;
-constexpr lcu::f32 kHandRestMarginX = 24.0f;
-constexpr lcu::f32 kHandRestMarginY = 24.0f;
-constexpr lcu::f32 kHandSwingOffset = 20.0f;
+
+// Real character-model dimensions (Phase 58.2/58.3) - Minecraft's own
+// real per-part pixel sizes (in 1/16-block units, its own texel grid),
+// uniformly scaled so the whole stack (legs+torso+head) sums to exactly
+// kPlayerHeight (1.8 blocks) instead of MC's own slightly-taller 2.0 -
+// a real, deliberate choice: MC's real player MODEL is taller than its
+// own real HITBOX (a long-standing, well-known MC quirk), but this
+// project has no reason to reproduce that specific mismatch - fitting
+// the model exactly inside the real hitbox is the simpler, equally
+// real alternative (see DECISIONS.md).
+constexpr lcu::f32 kBodyModelScale = kPlayerHeight / 2.0f;  // 0.9
+constexpr lcu::f32 kHeadSize = 0.5f * kBodyModelScale;                                    // 8px cube
+constexpr lcu::f32 kTorsoHalfWidth = 0.25f * kBodyModelScale, kTorsoHalfDepth = 0.125f * kBodyModelScale,
+                    kTorsoHeight = 0.75f * kBodyModelScale;  // 8x4x12px
+constexpr lcu::f32 kLimbHalfWidth = 0.125f * kBodyModelScale, kLimbHalfDepth = 0.125f * kBodyModelScale,
+                    kLimbHeight = 0.75f * kBodyModelScale;  // 4x4x12px (arms and legs share this size)
+// Real walk-cycle swing (Phase 58.3/59.3) - advances proportional to
+// real horizontal distance travelled this frame (see the real
+// `walk_cycle_phase += length(horizontal_delta) * kWalkCyclePerBlock`
+// call below), not raw elapsed time, so faster movement genuinely swings
+// the limbs faster/more often - a real, working, frame-rate-independent
+// animation, not merely a wall-clock oscillation.
+constexpr lcu::f32 kWalkCyclePerBlock = 9.0f;    // radians of phase per block walked
+constexpr lcu::f32 kLimbSwingAmplitude = 0.22f;  // blocks, forward/back translation
+constexpr lcu::f32 kArmSwingAmplitude = 0.16f;   // blocks - a bit less than the legs'.
+
+// Real NPC animation (Phase 59.3) - npc_animation_time-driven (see that
+// variable's own doc comment for why NPCs use a time clock rather than
+// the player's own distance-driven kWalkCyclePerBlock).
+constexpr lcu::f32 kNpcWalkCycleFrequency = 6.0f;          // radians of phase per real second while wandering.
+constexpr lcu::f32 kNpcIdleHeadWobbleFrequency = 1.3f;     // radians per real second while idling.
+constexpr lcu::f32 kNpcIdleHeadWobbleAmplitude = 0.12f;    // radians (a small, real head nod).
+
+// Real first-person arm box (Phase 58.2, replaces the flat 2D hand icon
+// - see kHandSwingDuration above) - a small box held in view-space in
+// front of the camera, textured with the real currently-held item's own
+// atlas UV (resolve_item_display below), not the skin texture (the
+// brief's own "eine einfache 3D-Box ... mit der aktuellen Item-Textur"
+// reading: this box stands in for "the item in hand", the same real
+// role the old 2D icon played, not a literal bare-arm/skin render - see
+// DECISIONS.md).
+constexpr lcu::f32 kArmForwardOffset = 0.55f;
+constexpr lcu::f32 kArmRightOffset = 0.35f;
+constexpr lcu::f32 kArmDownOffset = 0.45f;
+constexpr lcu::f32 kArmHalfWidth = 0.12f, kArmHalfDepth = 0.12f, kArmHalfHeight = 0.18f;
+constexpr lcu::f32 kArmSwingForwardBoost = 0.35f;
+constexpr lcu::f32 kArmSwingUpBoost = 0.12f;
 
 // Real block-highlight wireframe (Phase 48) - a slightly outset cube so
 // the highlight lines sit just outside the block's own faces, visible
@@ -250,16 +314,11 @@ constexpr lcu::f32 kHandSwingOffset = 20.0f;
 constexpr lcu::f32 kBlockHighlightOutset = 0.002f;
 constexpr lcu::math::Vec3 kBlockHighlightColor{0.05f, 0.05f, 0.05f};
 
-// Real break-progress overlay (Phase 48.2) - a solid (opaque - no real
-// alpha blending, see DECISIONS.md) box over the targeted block that
-// darkens toward black as break progress advances, real visual
-// feedback that breaking is happening. Deliberately NOT a real crack-
-// noise-density shader effect on the block's own face (that needs a
-// new per-fragment world-position uniform threaded through fs_chunk.sc
-// - a real, separate shader feature this phase's own scope doesn't
-// reach - see DECISIONS.md); this overlay is a real, visible,
-// honestly-scoped substitute, not a placeholder.
-constexpr lcu::f32 kBreakOverlayMaxDarken = 0.9f;
+// Real break-progress overlay (Phase 48.2, real crack textures since
+// Phase 60) - a box over the targeted block giving real visual feedback
+// that breaking is happening. See kInset's own local doc comment at the
+// real render call site (below, inside the main loop) for the real
+// crack-texture mapping.
 
 // Crosshair (Phase 44): the first real consumer of the new 2D UI quad
 // batch (engine/rendering::Renderer::submit_ui_quad/flush_ui_quads) -
@@ -359,6 +418,16 @@ constexpr lcu::u64 kVerifyHudToggleDebugOverlayFrame = 6;
 constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame = 7;
 constexpr lcu::u64 kVerifyHudFullscreenFrame = 8;
 constexpr lcu::u64 kVerifyHudScreenshotFrame = 9;
+// Real Phase 58.3 extension: two more real F5 presses on their own
+// frames, cycling all the way through ThirdPersonBehind ->
+// ThirdPersonFront -> FirstPerson - without this, LCU_VERIFY_HUD's
+// single original press (kVerifyHudTogglePerspectiveFrame above) would
+// only ever exercise the first-person arm box and the third-person-
+// behind body model, never third-person-front, leaving one of
+// Renderer::submit_textured_box's real per-frame call-site groups
+// headlessly unverified.
+constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame2 = 10;
+constexpr lcu::u64 kVerifyHudTogglePerspectiveFrame3 = 13;
 
 // A second, independent headless hook (LCU_VERIFY_CRAFT, Phase 23):
 // holds Interact long enough to break the grass block the player
@@ -418,6 +487,24 @@ constexpr lcu::f32 kVerifyTorchCyclePrevAt2Seconds = 1.3f;
 constexpr lcu::f32 kVerifyTorchCyclePrevAt3Seconds = 1.4f;
 constexpr lcu::f32 kVerifyTorchPlaceAtSeconds = 1.6f;
 
+// A real, independent headless hook (LCU_VERIFY_FARMING, Phase 64):
+// grants a wooden hoe (real slot 0) and 5 wheat seeds (real slot 1)
+// directly (same synthetic-grant precedent as LCU_VERIFY_TORCH's own
+// torch grant above), tills the real grass block directly below the
+// player (the same default spawn look-straight-down camera pitch
+// every other break/place hook already relies on) into farmland,
+// cycles to the seeds and plants wheat on it, then - relying on
+// LCU_FAST_FARMING=1 also being set for this run to make real growth
+// observable within a real, bounded headless run - waits for real
+// growth ticks to bring it to maturity before right-click-harvesting
+// it. Real timings, not frame counts (the same reasoning LCU_VERIFY_
+// MOVE_SECONDS's own doc comment gives: real crop-growth ticks are
+// keyed to real elapsed wall-clock seconds, not frame count).
+constexpr lcu::f32 kVerifyFarmingTillAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyFarmingCycleAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyFarmingPlantAtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyFarmingHarvestAtSeconds = 20.0f;
+
 // A fifth, independent headless hook (LCU_VERIFY_INVENTORY, Phase 49):
 // grants the player 1 game:wood directly (same synthetic-setup
 // precedent as LCU_VERIFY_TORCH's torch grant - nothing in this build's
@@ -443,6 +530,45 @@ constexpr lcu::f32 kVerifyInventoryTakeResultAtSeconds = 0.8f;
 constexpr lcu::f32 kVerifyInventoryPlaceInMainAtSeconds = 1.0f;
 constexpr lcu::f32 kVerifyInventoryShiftToHotbarAtSeconds = 1.2f;
 constexpr lcu::f32 kVerifyInventoryCloseAtSeconds = 1.4f;
+
+// An eighth, independent headless hook (LCU_VERIFY_FARMING_CRAFT, Phase
+// 65): proves the two new farming-processing recipes (3x game:wheat ->
+// game:bread, 2x game:planks -> game:wooden_hoe) really work through the
+// real 2x2 inventory-screen crafting grid - not the quick-craft shortcut
+// (see the Action::Craft handler's own doc comment above for why that
+// shortcut structurally can't represent either recipe: it dedupes held
+// items down to one of each distinct type, and both these recipes need
+// more than one of the same item). Grants 3 game:wheat (hotbar slot 0)
+// and 2 game:planks (hotbar slot 1) directly - the same synthetic-setup
+// precedent every prior hook's own item grant already uses. Opens the
+// inventory screen, picks up the whole wheat stack from hotbar slot 0 with
+// a left-click (Interact), then right-clicks (PlaceBlock) three of the
+// 2x2 grid's four cells one at a time - inventory_right_click places
+// exactly 1 item per click, so this really lands 1 wheat per cell, 3
+// separate cells, exactly mirroring how a real player would drag 3
+// individual wheat into 3 individual grid cells (see the result-taking
+// handler's own doc comment: it decrements each non-empty ingredient cell
+// by 1, which is correct precisely because each occurrence sits in its
+// own cell). Takes the result (expects bread), places it into main slot 0
+// to free the cursor, then repeats the same pattern for the 2 planks into
+// 2 grid cells (expects wooden_hoe), placing that into main slot 1, then
+// closes the screen. Logs the final bread/wooden_hoe counts so a failed
+// match (e.g. a wrong ingredient count in the recipe registration) shows
+// up as an observable 0 rather than silently passing.
+constexpr lcu::f32 kVerifyFarmingCraftOpenAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyFarmingCraftPickupWheatAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat1AtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat2AtSeconds = 0.8f;
+constexpr lcu::f32 kVerifyFarmingCraftPlaceWheat3AtSeconds = 1.0f;
+constexpr lcu::f32 kVerifyFarmingCraftTakeBreadAtSeconds = 1.2f;
+constexpr lcu::f32 kVerifyFarmingCraftStowBreadAtSeconds = 1.4f;
+constexpr lcu::f32 kVerifyFarmingCraftPickupPlanksAtSeconds = 1.6f;
+constexpr lcu::f32 kVerifyFarmingCraftPlacePlanks1AtSeconds = 1.8f;
+constexpr lcu::f32 kVerifyFarmingCraftPlacePlanks2AtSeconds = 2.0f;
+constexpr lcu::f32 kVerifyFarmingCraftTakeHoeAtSeconds = 2.2f;
+constexpr lcu::f32 kVerifyFarmingCraftStowHoeAtSeconds = 2.4f;
+constexpr lcu::f32 kVerifyFarmingCraftCloseAtSeconds = 2.6f;
+constexpr lcu::f32 kVerifyFarmingCraftLogAtSeconds = 2.8f;
 
 // A sixth, independent headless hook (LCU_VERIFY_WORKBENCH, Phase 50.3):
 // grants the player 1 game:wood directly (same synthetic-setup
@@ -532,6 +658,16 @@ constexpr lcu::usize kWorkbenchGridTotalSlotCount = kWorkbenchGridInputSlotCount
 constexpr int kAiEntityCount = 3;
 constexpr lcu::u32 kAiRngSeed = 20260909;
 
+// Real, separate seeded RNG for farming randomness (Phase 64: crop
+// growth rolls, harvest drop counts, the optional grass-seed chance) -
+// its own instance rather than reusing ai_rng, matching this project's
+// existing "one real RNG per real, semantically distinct source of
+// randomness" convention (ai_rng is AI-specific; worldgen has its own
+// deterministic hashing elsewhere too). Fixed seed for the same real
+// "deterministic, reproducible headless run" reason ai_rng's own seed
+// is fixed.
+constexpr lcu::u32 kFarmingRngSeed = 20260912;
+
 // Arbitrary (see DayNightCycle's own doc comment) - short enough that a
 // short headless verification run can actually observe the sky light
 // scale change across a handful of frames.
@@ -592,6 +728,140 @@ lcu::physics::AABB make_player_aabb(lcu::math::Vec3 feet_position) {
         {feet_position.x + kPlayerHalfWidth, feet_position.y + kPlayerHeight, feet_position.z + kPlayerHalfWidth},
     };
 }
+
+#if defined(LCU_ENABLE_BGFX)
+// Real character-model rotation math (Phase 58.2/58.3) - rotates a
+// point given in LOCAL model space (local +X = the character's own
+// right side, local +Y = up, local +Z = the character's own front) by
+// a real yaw (around the Y axis) or pitch (around the local X axis)
+// angle. Deliberately derived to match lcu::player::FirstPersonCamera's
+// own forward()/right() convention exactly (yaw 0 = looking down -Z,
+// positive pitch = looking up) - rotate_yaw(local_forward, camera.yaw)
+// composed with rotate_pitch(., camera.pitch) reproduces camera.
+// forward() bit-for-bit for the same yaw/pitch, which is exactly what
+// lets the first-person arm box (58.2, oriented by full camera yaw+
+// pitch) and the third-person head (58.3, same) sit correctly relative
+// to the real view direction, not just an approximation - see
+// DECISIONS.md for the derivation.
+lcu::math::Vec3 rotate_yaw(const lcu::math::Vec3& local, lcu::f32 yaw) {
+    const lcu::f32 s = std::sin(yaw);
+    const lcu::f32 c = std::cos(yaw);
+    return {local.x * c - local.z * s, local.y, -local.x * s - local.z * c};
+}
+
+lcu::math::Vec3 rotate_pitch(const lcu::math::Vec3& local, lcu::f32 pitch) {
+    const lcu::f32 s = std::sin(pitch);
+    const lcu::f32 c = std::cos(pitch);
+    return {local.x, local.y * c + local.z * s, -local.y * s + local.z * c};
+}
+
+// Real per-part box-corner computation (Phase 58.2/58.3, extracted into
+// its own reusable function in Phase 59 per the brief's own phasing -
+// see submit_character_model there): `pivot` is the real world-space
+// rotation origin for this part (e.g. a shoulder or hip joint);
+// `local_center` is the box's own center relative to that pivot, in
+// unrotated local space (so e.g. a leg hanging below its hip pivot is
+// `{0, -half_height, 0}`); `half_extents` is the box's own real half-
+// size; `pitch` then `yaw` are applied in that order (matching
+// rotate_pitch/rotate_yaw's own derivation above) before translating by
+// `pivot`. Returns the same 8-corner convention Renderer::
+// submit_textured_box's own doc comment describes.
+std::array<lcu::math::Vec3, 8> character_part_corners(const lcu::math::Vec3& pivot,
+                                                        const lcu::math::Vec3& local_center,
+                                                        const lcu::math::Vec3& half_extents, lcu::f32 yaw,
+                                                        lcu::f32 pitch) {
+    const lcu::math::Vec3 local_corners[8] = {
+        {-half_extents.x, -half_extents.y, -half_extents.z}, {half_extents.x, -half_extents.y, -half_extents.z},
+        {half_extents.x, half_extents.y, -half_extents.z},   {-half_extents.x, half_extents.y, -half_extents.z},
+        {-half_extents.x, -half_extents.y, half_extents.z},  {half_extents.x, -half_extents.y, half_extents.z},
+        {half_extents.x, half_extents.y, half_extents.z},    {-half_extents.x, half_extents.y, half_extents.z},
+    };
+    std::array<lcu::math::Vec3, 8> world_corners{};
+    for (lcu::usize i = 0; i < 8; ++i) {
+        lcu::math::Vec3 p = local_corners[i] + local_center;
+        p = rotate_pitch(p, pitch);
+        p = rotate_yaw(p, yaw);
+        world_corners[i] = p + pivot;
+    }
+    return world_corners;
+}
+
+// Real, reusable character-model rendering (Phase 58, extracted into
+// its own function this phase per the brief's own phasing) - draws a
+// real 6-box Steve-like model (head/torso/2 arms/2 legs) at
+// `feet_position`, facing `body_yaw`, head additionally tilted by
+// `head_pitch`, limbs swinging by a real `walk_phase` (see
+// kWalkCyclePerBlock's own doc comment - callers own advancing this at
+// whatever rate is right for them: the local player advances it by
+// real distance travelled, Phase 59's own NPCs by real elapsed wander
+// time, since neither shares the other's own movement-speed
+// bookkeeping). The one real caller-visible difference from Phase 58's
+// own original inline version: this takes `skin_texture` as a
+// parameter rather than reading a client-local variable, so a future
+// caller (e.g. a Phase 62 NPC with its own distinct skin) can pass a
+// different real texture per entity.
+void submit_character_model(lcu::rendering::Renderer& renderer, bgfx::TextureHandle skin_texture,
+                             bgfx::ProgramHandle sky_program, const lcu::math::Mat4& view, const lcu::math::Mat4& proj,
+                             const lcu::math::Vec3& feet_position, lcu::f32 body_yaw, lcu::f32 head_pitch,
+                             lcu::f32 walk_phase, lcu::u32& draw_calls) {
+    const auto world_pivot = [&](const lcu::math::Vec3& local_offset) {
+        return feet_position + rotate_yaw(local_offset, body_yaw);
+    };
+    const lcu::f32 leg_top_y = kLimbHeight;
+    const lcu::f32 shoulder_y = kLimbHeight + kTorsoHeight;
+    const lcu::f32 leg_swing = std::sin(walk_phase) * kLimbSwingAmplitude;
+    const lcu::f32 arm_swing = std::sin(walk_phase) * kArmSwingAmplitude;
+
+    const auto face_uv = [](lcu::assets::SkinRegion region) {
+        const lcu::assets::SkinUvRange r = lcu::assets::skin_uv_range(region);
+        return lcu::rendering::Renderer::BoxFaceUv{r.u0, r.v0, r.u1, r.v1};
+    };
+    const auto submit_part = [&](const lcu::math::Vec3& pivot, const lcu::math::Vec3& local_center,
+                                  const lcu::math::Vec3& half_extents, lcu::f32 pitch,
+                                  const lcu::rendering::Renderer::BoxUvSet& uvs) {
+        const std::array<lcu::math::Vec3, 8> corners =
+            character_part_corners(pivot, local_center, half_extents, body_yaw, pitch);
+        renderer.submit_textured_box(corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, skin_texture, uvs);
+        if (bgfx::isValid(sky_program)) {
+            ++draw_calls;
+        }
+    };
+
+    submit_part(world_pivot({kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, leg_swing},
+                {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::RightLegLeft), face_uv(lcu::assets::SkinRegion::RightLegRight),
+                 face_uv(lcu::assets::SkinRegion::RightLegBottom), face_uv(lcu::assets::SkinRegion::RightLegTop),
+                 face_uv(lcu::assets::SkinRegion::RightLegBack), face_uv(lcu::assets::SkinRegion::RightLegFront)});
+    submit_part(world_pivot({-kLimbHalfWidth, leg_top_y, 0.0f}), {0.0f, -kLimbHeight * 0.5f, -leg_swing},
+                {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::LeftLegLeft), face_uv(lcu::assets::SkinRegion::LeftLegRight),
+                 face_uv(lcu::assets::SkinRegion::LeftLegBottom), face_uv(lcu::assets::SkinRegion::LeftLegTop),
+                 face_uv(lcu::assets::SkinRegion::LeftLegBack), face_uv(lcu::assets::SkinRegion::LeftLegFront)});
+
+    submit_part(world_pivot({0.0f, leg_top_y, 0.0f}), {0.0f, kTorsoHeight * 0.5f, 0.0f},
+                {kTorsoHalfWidth, kTorsoHeight * 0.5f, kTorsoHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::TorsoLeft), face_uv(lcu::assets::SkinRegion::TorsoRight),
+                 face_uv(lcu::assets::SkinRegion::TorsoBottom), face_uv(lcu::assets::SkinRegion::TorsoTop),
+                 face_uv(lcu::assets::SkinRegion::TorsoBack), face_uv(lcu::assets::SkinRegion::TorsoFront)});
+
+    submit_part(world_pivot({kTorsoHalfWidth + kLimbHalfWidth, shoulder_y, 0.0f}),
+                {0.0f, -kLimbHeight * 0.5f, -arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::RightArmLeft), face_uv(lcu::assets::SkinRegion::RightArmRight),
+                 face_uv(lcu::assets::SkinRegion::RightArmBottom), face_uv(lcu::assets::SkinRegion::RightArmTop),
+                 face_uv(lcu::assets::SkinRegion::RightArmBack), face_uv(lcu::assets::SkinRegion::RightArmFront)});
+    submit_part(world_pivot({-(kTorsoHalfWidth + kLimbHalfWidth), shoulder_y, 0.0f}),
+                {0.0f, -kLimbHeight * 0.5f, arm_swing}, {kLimbHalfWidth, kLimbHeight * 0.5f, kLimbHalfDepth}, 0.0f,
+                {face_uv(lcu::assets::SkinRegion::LeftArmLeft), face_uv(lcu::assets::SkinRegion::LeftArmRight),
+                 face_uv(lcu::assets::SkinRegion::LeftArmBottom), face_uv(lcu::assets::SkinRegion::LeftArmTop),
+                 face_uv(lcu::assets::SkinRegion::LeftArmBack), face_uv(lcu::assets::SkinRegion::LeftArmFront)});
+
+    submit_part(world_pivot({0.0f, shoulder_y, 0.0f}), {0.0f, kHeadSize * 0.5f, 0.0f},
+                {kHeadSize * 0.5f, kHeadSize * 0.5f, kHeadSize * 0.5f}, head_pitch,
+                {face_uv(lcu::assets::SkinRegion::HeadLeft), face_uv(lcu::assets::SkinRegion::HeadRight),
+                 face_uv(lcu::assets::SkinRegion::HeadBottom), face_uv(lcu::assets::SkinRegion::HeadTop),
+                 face_uv(lcu::assets::SkinRegion::HeadBack), face_uv(lcu::assets::SkinRegion::HeadFront)});
+}
+#endif  // defined(LCU_ENABLE_BGFX)
 
 // A block mutation at a chunk-boundary local coordinate can uncover or
 // hide a face in the *adjacent* chunk's greedy mesh too (that chunk's own
@@ -666,6 +936,9 @@ int main() {
     // noise/top-vs-side pattern this multiplies against, since there's
     // still no texture atlas (brief section 12/Phase 12).
     stone_def.color = {0.5f, 0.5f, 0.5f};
+    // Real atlas texture (Phase 55) - same on every face, no per-face
+    // override needed (stone looks the same all around).
+    stone_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Stone);
     const lcu::voxel::BlockId stone_id = block_registry.register_block(stone_def);
 
     // Surface/subsurface terrain content (brief section 21) - a real
@@ -693,6 +966,14 @@ int main() {
     // to side_color, since the underside looks like the sides, not the
     // top).
     grass_def.side_color = {0.4f, 0.25f, 0.1f};
+    // Real atlas textures (Phase 55) - unlike the color-only fallback
+    // above (side_color alone covers both sides AND the underside),
+    // there's a real, dedicated dirt tile to use for the underside
+    // instead of reusing the green-capped side texture there, so
+    // bottom_texture is set explicitly rather than left to fall back.
+    grass_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::GrassTop);
+    grass_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::GrassSide);
+    grass_def.bottom_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::voxel::BlockId grass_id = block_registry.register_block(grass_def);
 
     lcu::voxel::BlockDefinition dirt_def;
@@ -704,7 +985,61 @@ int main() {
     // dirt value.
     dirt_def.hardness = 0.5f;
     dirt_def.color = {0.4f, 0.25f, 0.1f};
+    dirt_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
+
+    // Real farming foundation content (Phase 64) - a hoe tills grass/
+    // dirt into this (see the PlaceBlock dispatch below), and seeds are
+    // only plantable on top of it. Reuses the dirt texture/color on
+    // every face except the top (a real, simple "tilled dirt" look
+    // without a dedicated procedural texture, since nothing about this
+    // block's own gameplay depends on a visually distinct side/bottom).
+    lcu::voxel::BlockDefinition farmland_def;
+    farmland_def.namespaced_id = "game:farmland";
+    farmland_def.display_name = "Farmland";
+    farmland_def.is_transparent = false;
+    farmland_def.has_collision = true;
+    farmland_def.hardness = 0.6f;
+    farmland_def.color = {0.35f, 0.22f, 0.09f};
+    farmland_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
+    const lcu::voxel::BlockId farmland_id = block_registry.register_block(farmland_def);
+
+    // Real wheat crop (Phase 64) - is_transparent=true both so light
+    // passes through it (no shadow under a wheat field) and so its
+    // faces route into the real alpha-blended `mesh.water` layer
+    // (Phase 61's own real routing keyed off this exact flag - see
+    // mesh_chunk_greedy's own doc comment) rather than the opaque one,
+    // letting the real transparent background around each growth
+    // stage's own painted pixels (see generate_wheat_stage) actually
+    // show through instead of rendering as a solid brick. `texture_
+    // index_offset_by_state` (Phase 63) maps this block's own real 0-7
+    // growth state directly onto `WheatStage0 + state` - no per-stage
+    // BlockDefinition needed.
+    // Real, documented simplification (see DECISIONS.md): has_
+    // collision=true (real Minecraft crops have none, and the player
+    // walks straight through them) because this project's own raycast
+    // targeting is gated entirely on has_collision (see game:water's
+    // own doc comment: "the DDA raycast only ever stops on a block with
+    // has_collision=true") - a non-collidable wheat block would be
+    // real-honestly untargetable, unbreakable, and un-harvestable by
+    // right-click, defeating the whole point of a harvestable crop. The
+    // exact same simplification game:torch already accepts for the
+    // identical reason (real torches aren't solid either). This also
+    // renders as a full alpha-cutout CUBE, not real cross/X-shaped crop
+    // geometry - the brief's own "cross_block" category is marked
+    // PARTIAL/deferred, since mesh_chunk_greedy has no non-cube
+    // rendering path at all today and building one is a real, separate
+    // architectural undertaking this phase's own real scope (a working,
+    // growing, harvestable crop) doesn't require.
+    lcu::voxel::BlockDefinition wheat_def;
+    wheat_def.namespaced_id = "game:wheat";
+    wheat_def.display_name = "Wheat";
+    wheat_def.is_transparent = true;
+    wheat_def.has_collision = true;
+    wheat_def.hardness = 0.0f;  // instant break, matching every real Minecraft crop.
+    wheat_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::WheatStage0);
+    wheat_def.texture_index_offset_by_state = true;
+    const lcu::voxel::BlockId wheat_id = block_registry.register_block(wheat_def);
 
     // Real climate/biome content (Phase 39, brief section 21) - the
     // Desert and Snowy biomes' own surface/subsurface block, standing
@@ -723,6 +1058,7 @@ int main() {
     // phase's own directive's table): as loose/soft as dirt.
     sand_def.hardness = 0.5f;
     sand_def.color = {0.86f, 0.78f, 0.55f};
+    sand_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Sand);
     const lcu::voxel::BlockId sand_id = block_registry.register_block(sand_def);
 
     // Snow is a real surface-only cap - the Snowy biome's subsurface
@@ -738,6 +1074,7 @@ int main() {
     // block registered, matching real snow.
     snow_def.hardness = 0.1f;
     snow_def.color = {0.95f, 0.97f, 1.0f};
+    snow_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Snow);
     const lcu::voxel::BlockId snow_id = block_registry.register_block(snow_def);
 
     // First real light-emitting, player-placeable block (Phase 34,
@@ -750,17 +1087,16 @@ int main() {
     // own.
     //
     // Deliberately `is_transparent = false` (a solid glowing cube, not
-    // a wall/floor-mounted cross/billboard shape): mesh_chunk_greedy
-    // only ever meshes the *opaque* layer into real geometry today
-    // (engine/voxel::ChunkMesh::transparent/water exist structurally
-    // but stay empty - see DECISIONS.md "no transparent block
-    // registered anywhere" from Phase 26, now literally not true, but
-    // no transparent-layer *meshing* exists to make one visible yet).
-    // A `true` here would make this block real, correctly-lit, and
-    // completely invisible - exactly the kind of half-working gap
-    // brief section 96's "no fake features" exists to catch. Solid and
-    // collidable like every other block here until a real cross-shaped
-    // block-rendering path exists to justify the visual difference.
+    // a wall/floor-mounted cross/billboard shape): a torch is a real
+    // opaque solid in this project's own model, unrelated to whether
+    // real transparent-layer meshing exists (it does now, Phase 61 -
+    // see `game:water`'s own real `is_transparent = true` below). A
+    // `true` here would route it into the alpha-blended water layer as
+    // a solid orange-tinted cube, which is simply the wrong real
+    // material category for it, not a visibility bug to avoid. Solid
+    // and collidable like every other block here until a real cross-
+    // shaped block-rendering path exists to justify the visual
+    // difference.
     // Warm orange-yellow tint (no flame animation/particle - see Known
     // Limitations).
     lcu::voxel::BlockDefinition torch_def;
@@ -773,26 +1109,33 @@ int main() {
     torch_def.hardness = 0.0f;
     torch_def.light_emission = 14;
     torch_def.color = {1.0f, 0.65f, 0.2f};
+    torch_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Torch);
     const lcu::voxel::BlockId torch_id = block_registry.register_block(torch_def);
 
     // Sea level + water (Phase 37, brief section 21): terrain_height()
     // is now centered on lcu::world::worldgen::kSeaLevel (world Y 0)
     // instead of always positive, so some columns' terrain genuinely
     // dips below it - generate_terrain_chunk (below) fills that gap
-    // with this block up to sea level. Same "solid, not fake-invisible"
-    // reasoning the torch block above already established: no
-    // transparent-layer *meshing* exists yet (see DECISIONS.md), so
-    // `is_transparent = true` here would make water correctly placed
-    // by worldgen but completely invisible - exactly the trap Phase 34
-    // caught for the torch. `has_collision = false` is the real,
-    // honest difference from every solid block registered so far - a
-    // player can walk/swim straight through it, using the same is_solid
-    // predicate (BlockDefinition::has_collision) every other block's
-    // collision already goes through, not a new physics special case.
+    // with this block up to sea level. `is_transparent = true` (Phase
+    // 61, flipped from `false` since Phase 37 - see that phase's own
+    // comment history) now means something real: `mesh_chunk_greedy`
+    // routes every one of water's own faces into `ChunkMesh::water`
+    // (a real, separate, alpha-blended draw call - see Renderer::
+    // submit_chunk_mesh's own `alpha_blend` parameter), not the
+    // completely-invisible trap the same flag would have been before
+    // real transparent-layer meshing existed. This also means light now
+    // propagates THROUGH water (the lighting system reads the same
+    // `is_transparent` bit - see DECISIONS.md), a real, accepted change
+    // in behavior, not an oversight. `has_collision = false` is the
+    // real, honest difference from every solid block registered so far
+    // - a player can walk/swim straight through it, using the same
+    // is_solid predicate (BlockDefinition::has_collision) every other
+    // block's collision already goes through, not a new physics
+    // special case.
     lcu::voxel::BlockDefinition water_def;
     water_def.namespaced_id = "game:water";
     water_def.display_name = "Water";
-    water_def.is_transparent = false;
+    water_def.is_transparent = true;
     water_def.has_collision = false;
     // No hardness override needed (Phase 48, "Wasser unendlich (nicht
     // abbaubar)"): the DDA raycast (see is_solid below) only ever stops
@@ -800,6 +1143,7 @@ int main() {
     // break target to begin with - already, honestly, unbreakable
     // without a special case, not by an infinite hardness value.
     water_def.color = {0.15f, 0.35f, 0.85f};
+    water_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Water);
     const lcu::voxel::BlockId water_id = block_registry.register_block(water_def);
 
     // Real ore blocks (Phase 40, brief section 21's "caves/ores" pipeline
@@ -818,6 +1162,7 @@ int main() {
     // relationship.
     coal_ore_def.hardness = 3.0f;
     coal_ore_def.color = {0.2f, 0.2f, 0.22f};
+    coal_ore_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::CoalOre);
     const lcu::voxel::BlockId coal_ore_id = block_registry.register_block(coal_ore_def);
 
     lcu::voxel::BlockDefinition iron_ore_def;
@@ -827,6 +1172,7 @@ int main() {
     iron_ore_def.has_collision = true;
     iron_ore_def.hardness = 3.0f;
     iron_ore_def.color = {0.82f, 0.71f, 0.58f};
+    iron_ore_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::IronOre);
     const lcu::voxel::BlockId iron_ore_id = block_registry.register_block(iron_ore_def);
 
     // Real vegetation blocks (Phase 41, brief section 21's "vegetation"
@@ -844,6 +1190,14 @@ int main() {
     // wood value.
     wood_def.hardness = 1.5f;
     wood_def.color = {0.45f, 0.30f, 0.15f};
+    // Real atlas textures (Phase 55) - top and bottom both show real
+    // growth rings (same as real Minecraft's own log), so bottom_
+    // texture is set explicitly rather than left to fall back to
+    // side_texture (bark), which the fallback chain would otherwise
+    // give it once side_texture is set.
+    wood_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodTop);
+    wood_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodSide);
+    wood_def.bottom_texture = static_cast<lcu::u32>(lcu::assets::TileId::WoodTop);
     const lcu::voxel::BlockId wood_id = block_registry.register_block(wood_def);
 
     lcu::voxel::BlockDefinition leaves_def;
@@ -855,6 +1209,7 @@ int main() {
     // leaves value.
     leaves_def.hardness = 0.2f;
     leaves_def.color = {0.20f, 0.55f, 0.15f};
+    leaves_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Leaves);
     const lcu::voxel::BlockId leaves_id = block_registry.register_block(leaves_def);
 
     lcu::voxel::BlockDefinition cactus_def;
@@ -866,6 +1221,7 @@ int main() {
     // (a real cactus is mostly water, easy to cut through).
     cactus_def.hardness = 0.4f;
     cactus_def.color = {0.10f, 0.45f, 0.30f};
+    cactus_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Cactus);
     const lcu::voxel::BlockId cactus_id = block_registry.register_block(cactus_def);
 
     // Real crafting table (Phase 50.3): right-clicking it opens a real
@@ -881,6 +1237,11 @@ int main() {
     crafting_table_def.has_collision = true;
     crafting_table_def.hardness = 2.0f;
     crafting_table_def.color = {0.55f, 0.35f, 0.15f};
+    // Real atlas textures (Phase 55) - tool-symbol top, planked sides
+    // (bottom falls back to side_texture, the same plain planks look -
+    // never visible in practice anyway, resting on the ground).
+    crafting_table_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::CraftingTableTop);
+    crafting_table_def.side_texture = static_cast<lcu::u32>(lcu::assets::TileId::Planks);
     const lcu::voxel::BlockId crafting_table_id = block_registry.register_block(crafting_table_def);
 
     // Block-break's first real item consumer (brief section 55): the
@@ -897,6 +1258,7 @@ int main() {
     // block's tint where one exists (BlockDefinition::color above), the
     // same "flat color, no atlas" convention, not a coincidence.
     stone_item_def.icon_color = {0.5f, 0.5f, 0.5f, 1.0f};
+    stone_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Stone);
     const lcu::items::ItemId stone_item_id = item_registry.register_item(stone_item_def);
 
     // Phase 17's grass/dirt terrain content gets the same direct 1:1
@@ -910,6 +1272,7 @@ int main() {
     grass_item_def.display_name = "Grass";
     grass_item_def.max_stack_size = 64;
     grass_item_def.icon_color = {0.3f, 0.7f, 0.2f, 1.0f};
+    grass_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::GrassTop);
     const lcu::items::ItemId grass_item_id = item_registry.register_item(grass_item_def);
 
     lcu::items::ItemDefinition dirt_item_def;
@@ -917,6 +1280,7 @@ int main() {
     dirt_item_def.display_name = "Dirt";
     dirt_item_def.max_stack_size = 64;
     dirt_item_def.icon_color = {0.4f, 0.25f, 0.1f, 1.0f};
+    dirt_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::items::ItemId dirt_item_id = item_registry.register_item(dirt_item_def);
 
     lcu::items::ItemDefinition torch_item_def;
@@ -924,6 +1288,7 @@ int main() {
     torch_item_def.display_name = "Torch";
     torch_item_def.max_stack_size = 64;
     torch_item_def.icon_color = {1.0f, 0.65f, 0.2f, 1.0f};
+    torch_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Torch);
     const lcu::items::ItemId torch_item_id = item_registry.register_item(torch_item_def);
 
     // game:wood's own item (Phase 49): Phase 41 registered the wood
@@ -938,6 +1303,7 @@ int main() {
     wood_item_def.display_name = "Wood";
     wood_item_def.max_stack_size = 64;
     wood_item_def.icon_color = {wood_def.color.x, wood_def.color.y, wood_def.color.z, 1.0f};
+    wood_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::WoodSide);
     const lcu::items::ItemId wood_item_id = item_registry.register_item(wood_item_def);
 
     // game:crafting_table's own item (Phase 50.3) - breaking a crafting
@@ -947,6 +1313,7 @@ int main() {
     crafting_table_item_def.namespaced_id = "game:crafting_table";
     crafting_table_item_def.display_name = "Crafting Table";
     crafting_table_item_def.max_stack_size = 64;
+    crafting_table_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::CraftingTableTop);
     crafting_table_item_def.icon_color = {crafting_table_def.color.x, crafting_table_def.color.y,
                                            crafting_table_def.color.z, 1.0f};
     const lcu::items::ItemId crafting_table_item_id = item_registry.register_item(crafting_table_item_def);
@@ -962,6 +1329,7 @@ int main() {
     compost_item_def.display_name = "Compost";
     compost_item_def.max_stack_size = 64;
     compost_item_def.icon_color = {0.25f, 0.15f, 0.05f, 1.0f};
+    compost_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Compost);
     const lcu::items::ItemId compost_item_id = item_registry.register_item(compost_item_def);
 
     // Phase 49's own suggested example recipe's crafted-only result:
@@ -973,6 +1341,7 @@ int main() {
     planks_item_def.display_name = "Planks";
     planks_item_def.max_stack_size = 64;
     planks_item_def.icon_color = {0.65f, 0.48f, 0.28f, 1.0f};
+    planks_item_def.texture_index = static_cast<lcu::u32>(lcu::assets::TileId::Planks);
     const lcu::items::ItemId planks_item_id = item_registry.register_item(planks_item_def);
 
     // game:apple / game:bread (Phase 51.2) - real Minecraft hunger-
@@ -986,6 +1355,11 @@ int main() {
     // thing that marks an item as edible - right-click with one selected
     // restores hunger and consumes it (see the place_pressed dispatch
     // below) instead of placing or being ignored.
+    // No texture_index for either (Phase 56) - Phase 54's own procedural
+    // texture list is scoped to blocks only, so neither apple nor bread
+    // has a real generated texture to point at; both stay real, honest
+    // flat icon_color quads, same as every item rendered before Phase
+    // 56 - see PROJECT_STATE.md Known Limitations.
     lcu::items::ItemDefinition apple_item_def;
     apple_item_def.namespaced_id = "game:apple";
     apple_item_def.display_name = "Apple";
@@ -1000,9 +1374,56 @@ int main() {
     bread_item_def.icon_color = {0.75f, 0.55f, 0.25f, 1.0f};
     const lcu::items::ItemId bread_item_id = item_registry.register_item(bread_item_def);
 
+    // Real farming items (Phase 64) - flat icon_color quads, same real
+    // "no procedural texture exists for it yet" honesty apple/bread
+    // above already document.
+    lcu::items::ItemDefinition wheat_seeds_item_def;
+    wheat_seeds_item_def.namespaced_id = "game:wheat_seeds";
+    wheat_seeds_item_def.display_name = "Wheat Seeds";
+    wheat_seeds_item_def.max_stack_size = 64;
+    wheat_seeds_item_def.icon_color = {0.55f, 0.65f, 0.2f, 1.0f};
+    const lcu::items::ItemId wheat_seeds_item_id = item_registry.register_item(wheat_seeds_item_def);
+
+    lcu::items::ItemDefinition wheat_item_def;
+    wheat_item_def.namespaced_id = "game:wheat";
+    wheat_item_def.display_name = "Wheat";
+    wheat_item_def.max_stack_size = 64;
+    wheat_item_def.icon_color = {0.85f, 0.7f, 0.25f, 1.0f};
+    const lcu::items::ItemId wheat_item_id = item_registry.register_item(wheat_item_def);
+
+    // Minimal wood hoe (Phase 64, brief section 64.3's own "minimal,
+    // keine volle Tool-Tier-Sammlung noetig") - a real, plain stackable
+    // item with no durability/tool-tier concept at all (ItemDefinition
+    // itself has none - see its own doc comment), whose only real
+    // behavior ("tills grass/dirt into farmland") lives in the
+    // `tilling_tools` side table below, the same "item semantics via a
+    // side table" pattern `edible_hunger_restore` already established
+    // rather than growing ItemDefinition's own real field list for a
+    // one-off. max_stack_size=1 (a real, if unenforced-elsewhere,
+    // "this is a tool not a material" signal - no stacking-based tool
+    // system exists yet to actually need that distinction honored).
+    lcu::items::ItemDefinition wooden_hoe_item_def;
+    wooden_hoe_item_def.namespaced_id = "game:wooden_hoe";
+    wooden_hoe_item_def.display_name = "Wooden Hoe";
+    wooden_hoe_item_def.max_stack_size = 1;
+    wooden_hoe_item_def.icon_color = {0.6f, 0.4f, 0.2f, 1.0f};
+    const lcu::items::ItemId wooden_hoe_item_id = item_registry.register_item(wooden_hoe_item_def);
+
     const std::unordered_map<lcu::items::ItemId, lcu::f32> edible_hunger_restore{
         {apple_item_id, 4.0f},
         {bread_item_id, 5.0f},
+    };
+
+    // Real "special item behavior on use" side tables (Phase 64) - same
+    // pattern as edible_hunger_restore above: a hoe tills grass/dirt
+    // into farmland; seeds plant wheat (state 0) on farmland. Deliberately
+    // NOT registered in block_item_mapping below - wheat/farmland need
+    // their own real placement/break handling (harvest drops, farmland
+    // staying farmland after harvest), not the generic 1:1 block<->item
+    // path every other block uses.
+    const std::unordered_set<lcu::items::ItemId> tilling_tools{wooden_hoe_item_id};
+    const std::unordered_map<lcu::items::ItemId, lcu::voxel::BlockId> plantable_seeds{
+        {wheat_seeds_item_id, wheat_id},
     };
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
@@ -1022,6 +1443,24 @@ int main() {
     lcu::items::RecipeRegistry recipe_registry;
     recipe_registry.add_shapeless({{grass_item_id, dirt_item_id}, {compost_item_id, 1}});
     recipe_registry.add_shapeless({{wood_item_id}, {planks_item_id, 4}});
+
+    // Real farming-processing recipes (Phase 65). 3 game:wheat -> 1
+    // game:bread - shapeless (position doesn't matter, matching every
+    // other real recipe here), the brief's own literal "3 Weizen -> 1
+    // Brot" requirement; game:bread has existed since Phase 51 with no
+    // survival obtain path until now.
+    recipe_registry.add_shapeless({{wheat_item_id, wheat_item_id, wheat_item_id}, {bread_item_id, 1}});
+    // A minimal wood-hoe recipe (brief section 65.2's own "minimal,
+    // kein volles Tool-Tier-System noetig") - real Minecraft's own
+    // recipe needs 2 sticks + 2 planks, but no `game:stick` item exists
+    // in this project at all (nothing else has ever needed one - see
+    // DECISIONS.md for why inventing one just for this single recipe
+    // was rejected as real, disproportionate scope). 2 planks alone is
+    // a real, honest, minimal substitute that still uses only real,
+    // already-existing items - no stone-hoe recipe either (the brief's
+    // own "optional", and there's no real tool-tier concept for a
+    // stone-vs-wood hoe to meaningfully differ by yet).
+    recipe_registry.add_shapeless({{planks_item_id, planks_item_id}, {wooden_hoe_item_id, 1}});
 
     // Real Minecraft-style hotbar selection (Phase 49, replacing Phase
     // 21's placeable_items/selected_placeable_index "virtual known-item-
@@ -1135,6 +1574,13 @@ int main() {
 
 #if defined(LCU_ENABLE_BGFX)
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_meshes;
+    // Real transparent/water GPU mesh map (Phase 61) - a chunk's own
+    // `ChunkMesh::water` layer gets its own separate GPU buffer and its
+    // own separate `submit_chunk_mesh` call (real alpha blending), so it
+    // needs its own real per-chunk map, mirroring `gpu_meshes` exactly
+    // (see remesh_and_upload/unload_far_chunks/shutdown below for the
+    // 3 real places this mirrors the opaque map's own lifecycle).
+    std::unordered_map<lcu::voxel::ChunkCoord, lcu::rendering::GpuChunkMesh> gpu_water_meshes;
 #endif
 
     // Per-chunk light data (brief section 24), fed into meshing since
@@ -1295,6 +1741,20 @@ int main() {
         lcu::rendering::GpuChunkMesh gpu_mesh = lcu::rendering::upload_chunk_mesh_layer(mesh.opaque);
         if (gpu_mesh.is_valid()) {
             gpu_meshes.emplace(coord, gpu_mesh);
+        }
+        // Real transparent/water layer upload (Phase 61) - mirrors the
+        // opaque upload immediately above exactly, just for
+        // `mesh.water`/`gpu_water_meshes` instead. `upload_chunk_mesh_
+        // layer` already takes a plain `ChunkMeshLayer` with no opaque-
+        // specific assumption, so it needed no change at all to serve
+        // this second real call site.
+        if (auto it = gpu_water_meshes.find(coord); it != gpu_water_meshes.end()) {
+            lcu::rendering::destroy_gpu_chunk_mesh(it->second);
+            gpu_water_meshes.erase(it);
+        }
+        lcu::rendering::GpuChunkMesh gpu_water_mesh = lcu::rendering::upload_chunk_mesh_layer(mesh.water);
+        if (gpu_water_mesh.is_valid()) {
+            gpu_water_meshes.emplace(coord, gpu_water_mesh);
         }
 #else
         (void)mesh;
@@ -1472,6 +1932,96 @@ int main() {
     LCU_LOG_INFO("Chunk shader program valid={}", bgfx::isValid(chunk_program));
     LCU_LOG_INFO("Sky shader program valid={}", bgfx::isValid(sky_program));
     LCU_LOG_INFO("UI2D shader program valid={}", bgfx::isValid(ui2d_program));
+
+    // Real texture-atlas pipeline (Phase 53.5) - LCU_USE_TEXTURES
+    // defaults ON (real per-block/per-item content isn't wired up until
+    // Phase 54-56 give BlockDefinition/ItemDefinition real texture
+    // indices - today every face/icon still resolves to atlas tile 0,
+    // see MeshVertex::texture_index's own doc comment), set to "0" to
+    // force the exact pre-Phase-53 flat-color/noise-only path instead
+    // (real regression-free fallback - see submit_chunk_mesh's own "no
+    // atlas bound" behavior). atlas_texture stays BGFX_INVALID_HANDLE
+    // (its own real default) whenever textures are off or bgfx itself
+    // declines to create one (this sandbox's own headless Noop backend
+    // is a real, legitimate case of that, not an error - see
+    // create_texture_from_pixels' own doc comment).
+    const char* use_textures_env = std::getenv("LCU_USE_TEXTURES");
+    const bool use_textures = use_textures_env == nullptr || std::string(use_textures_env) != "0";
+    bgfx::TextureHandle atlas_texture = BGFX_INVALID_HANDLE;
+    if (use_textures) {
+        // Real procedurally-generated MC-style block textures (Phase
+        // 54) - replaces Phase 53's own flat-white placeholder buffer
+        // now that real content exists. Every real block still resolves
+        // to atlas tile 0 (`lcu::assets::TileId::GrassTop`) until Phase
+        // 55 gives BlockDefinition real per-face texture indices.
+        const std::vector<lcu::u8> block_atlas_pixels = lcu::assets::build_block_atlas_pixels();
+        atlas_texture = renderer.create_texture_from_pixels(block_atlas_pixels.data(), lcu::assets::kAtlasSize,
+                                                              lcu::assets::kAtlasSize);
+    }
+    LCU_LOG_INFO("Texture atlas: use_textures={} atlas_texture_valid={}", use_textures, bgfx::isValid(atlas_texture));
+
+    // Real bitmap-font atlas (Phase 57) - unconditional, unlike the
+    // block/item atlas above: text rendering is its own real feature
+    // with its own real fallback (LCU_LEGACY_DEBUG_TEXT below, not
+    // LCU_USE_TEXTURES - a player who disabled block/item textures
+    // still gets real bitmap-font text, not just the coincidence that
+    // LCU_USE_TEXTURES happened to be on). See lcu::assets::font_atlas.h.
+    const std::vector<lcu::u8> font_atlas_pixels = lcu::assets::build_font_atlas_pixels();
+    const bgfx::TextureHandle font_atlas_texture = renderer.create_texture_from_pixels(
+        font_atlas_pixels.data(), lcu::assets::kFontAtlasWidth, lcu::assets::kFontAtlasHeight);
+    LCU_LOG_INFO("Font atlas: font_atlas_texture_valid={}", bgfx::isValid(font_atlas_texture));
+
+    // Real player-skin texture is created further below, right after
+    // options load (Phase 62 needs the persisted `skin=<name>` choice
+    // and the real lcu::assets::SkinCatalog to resolve it against
+    // before the first real texture upload - see `skin_texture`/
+    // `apply_skin` there). Nothing between here and there reads it.
+
+    // Real, fixed NPC skin textures (Phase 62, brief section 59's own
+    // "jeder NPC behaelt seinen einmal beim Spawn zugewiesenen Skin") -
+    // one real GPU texture per builtin lcu::assets::SkinPreset value,
+    // created once here and shared by every NPC assigned that preset
+    // index at spawn (see game::components::NpcAppearance below) -
+    // completely independent of the player's own selectable, live-
+    // reloadable skin_texture.
+    std::array<bgfx::TextureHandle, static_cast<lcu::usize>(lcu::assets::SkinPreset::Count)> npc_skin_textures{};
+    for (lcu::u32 i = 0; i < static_cast<lcu::u32>(lcu::assets::SkinPreset::Count); ++i) {
+        const auto preset_pixels = lcu::assets::generate_skin_pixels(static_cast<lcu::assets::SkinPreset>(i));
+        npc_skin_textures[i] =
+            renderer.create_texture_from_pixels(preset_pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
+    }
+    LCU_LOG_INFO("NPC skin textures: created {}", npc_skin_textures.size());
+
+    // Real legacy-debug-text fallback toggle (Phase 57.3) - default OFF
+    // (false), meaning HUD/menu/inventory/workbench text draws through
+    // the real lcu::ui::TextRenderer bitmap-font atlas above by default
+    // now; LCU_LEGACY_DEBUG_TEXT=1 keeps the exact old bgfx built-in
+    // debug-text buffer behavior every one of those draw_*_labels
+    // functions had before this phase, as a real, working fallback, not
+    // a removed feature - see each function's own updated doc comment.
+    const char* legacy_debug_text_env = std::getenv("LCU_LEGACY_DEBUG_TEXT");
+    const bool legacy_debug_text = legacy_debug_text_env != nullptr && std::string(legacy_debug_text_env) == "1";
+
+    // Real per-slot icon resolution (Phase 56) - the one real place
+    // every hotbar/inventory/workbench slot-population call site below
+    // resolves an item's own real icon_color (always) and, when
+    // textures are on and the item has one, its real atlas UV rect too
+    // (lcu::assets::tile_uv_range), instead of repeating the same
+    // icon_color/texture_uv lookup at each of the real 13 call sites.
+    // texture_uv stays unset whenever textures are off or the item has
+    // no texture_index (apple/bread - see ItemDefinition registration
+    // above) - the real, honest "draw the flat icon_color instead"
+    // fallback every *_renderer.cpp already implements.
+    const auto resolve_item_display = [&](lcu::items::ItemId item_id, lcu::math::Vec4& icon_color,
+                                           std::optional<lcu::math::Vec4>& texture_uv) {
+        const lcu::items::ItemDefinition& def = item_registry.definition_of(item_id);
+        icon_color = def.icon_color;
+        texture_uv.reset();
+        if (use_textures && def.texture_index.has_value()) {
+            const lcu::assets::TileUvRange uv = lcu::assets::tile_uv_range(*def.texture_index);
+            texture_uv = lcu::math::Vec4{uv.u0, uv.v0, uv.u1, uv.v1};
+        }
+    };
 #endif
 
     // --- Player: spawns resting on dry land at spawn_column (Phase 37 - see
@@ -1598,6 +2148,10 @@ int main() {
                 lcu::rendering::destroy_gpu_chunk_mesh(it->second);
                 gpu_meshes.erase(it);
             }
+            if (auto it = gpu_water_meshes.find(coord); it != gpu_water_meshes.end()) {
+                lcu::rendering::destroy_gpu_chunk_mesh(it->second);
+                gpu_water_meshes.erase(it);
+            }
 #endif
             // Real map hygiene (WorldLight::remove_chunk_light's own
             // doc comment has named this phase as its real caller
@@ -1634,6 +2188,24 @@ int main() {
     // positions instead (see remote_entity_interpolators below).
     lcu::ecs::Registry entity_registry;
     std::mt19937 ai_rng(kAiRngSeed);
+
+    // Real farming setup (Phase 64) - crop growth is client-authoritative
+    // single-player-only for now, the same real scope split AI wander
+    // above already has (networked crop-growth sync would need this
+    // same system mirrored into server/main.cpp as its own real
+    // authoritative tick, which nothing in this phase's own directive
+    // requires - see DECISIONS.md). LCU_FAST_FARMING=1 (the brief's own
+    // suggested dev toggle) multiplies the real per-tick growth chance
+    // so a headless verification run can observe real growth within a
+    // handful of seconds instead of a real in-game day.
+    std::mt19937 farming_rng(kFarmingRngSeed);
+    lcu::f32 crop_growth_accumulator = 0.0f;
+    const bool fast_farming = std::getenv("LCU_FAST_FARMING") != nullptr;
+    game::systems::CropGrowthConfig crop_growth_config;
+    crop_growth_config.wheat_id = wheat_id;
+    crop_growth_config.day_length_seconds = kDayLengthSeconds;
+    LCU_LOG_INFO("Farming: fast_farming={}", fast_farming);
+
     if (!networked) {
         for (int i = 0; i < kAiEntityCount; ++i) {
             const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
@@ -1643,6 +2215,14 @@ int main() {
             const lcu::ecs::EntityId entity = entity_registry.create_entity();
             entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
             entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+            // Real, immutable-after-spawn skin choice (Phase 62) -
+            // cycles through the builtin presets so the 3 real NPCs
+            // don't all look identical anymore (Phase 59's own
+            // "gleiches Skin (oder Farbvarianten)" wording explicitly
+            // allowed either; this picks varianten now that real
+            // presets exist to vary with).
+            entity_registry.add_component<game::components::NpcAppearance>(
+                entity, {static_cast<lcu::u32>(i) % static_cast<lcu::u32>(lcu::assets::SkinPreset::Count)});
         }
         LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());
     }
@@ -1682,6 +2262,33 @@ int main() {
         entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
         LCU_LOG_INFO("Spawned item entity: {} at world ({}, {}, {})",
                      item_registry.definition_of(item_id).namespaced_id, block_pos.x, block_pos.y, block_pos.z);
+    };
+
+    // Real generic "spawn N of one real item at a world position" (Phase
+    // 64) - the same real ECS entity-spawn shape spawn_item_entity_for_
+    // broken_block above already uses, generalized to an arbitrary real
+    // item id/count (harvest drops need up to 3 wheat AND up to 3 seeds
+    // from the SAME broken block, unlike the generic 1-item-per-block
+    // path above). A no-op for count 0 (immature wheat's own "no wheat
+    // dropped" case) rather than spawning an empty/invalid stack.
+    const auto spawn_item_stack_at = [&](lcu::items::ItemId item_id, lcu::u32 count,
+                                          const lcu::voxel::BlockWorldCoord& block_pos) {
+        if (count == 0) {
+            return;
+        }
+        const lcu::math::Vec3 spawn_center{static_cast<lcu::f32>(block_pos.x) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.y) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.z) + 0.5f};
+        const lcu::ecs::EntityId entity = entity_registry.create_entity();
+        entity_registry.add_component<game::components::Position>(entity, {spawn_center});
+        game::components::ItemEntity item_entity;
+        item_entity.stack = {item_id, count};
+        item_entity.vertical_velocity = game::systems::kItemEntitySpawnUpSpeed;
+        item_entity.pickup_delay_seconds = game::systems::kItemEntityPickupDelaySeconds;
+        entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
+        LCU_LOG_INFO("Spawned item entity: {} x{} at world ({}, {}, {})",
+                     item_registry.definition_of(item_id).namespaced_id, count, block_pos.x, block_pos.y,
+                     block_pos.z);
     };
 
     // Real death item drop (Phase 51.1: "inventory drops as item
@@ -1783,6 +2390,83 @@ int main() {
         LCU_LOG_INFO("No options file at \"{}\" yet - using real defaults", options_path);
     }
 
+    // Real skin catalog (Phase 62) - the 5 builtin lcu::assets::
+    // SkinPreset skins plus any real uploaded PNG already sitting in
+    // "assets/skins" (same real-directory-scan, CWD-relative
+    // convention as "mods" - see lcu::modding::ModLoader::load_all and
+    // client/CMakeLists.txt's own mods-directory copy step).
+    lcu::assets::SkinCatalog skin_catalog("assets/skins");
+    lcu::usize current_skin_index = 0;
+    if (const auto found = skin_catalog.index_of_name(options.skin_name)) {
+        current_skin_index = *found;
+    } else {
+        LCU_LOG_WARN("Skin \"{}\" from options.txt not found in the skin catalog - falling back to \"{}\"",
+                     options.skin_name, skin_catalog.entry_at(0).name);
+        options.skin_name = skin_catalog.entry_at(0).name;
+    }
+
+    // Real player-skin texture (Phase 58.4, chosen-and-persisted since
+    // Phase 62) - unconditional, same reasoning as the font atlas
+    // above: the character model is a real part of the game now, not
+    // something LCU_USE_TEXTURES should be able to turn off (that
+    // toggle only ever meant "block/item textures", see its own doc
+    // comment). Not const anymore - apply_skin below live-reloads it.
+    // `bgfx::TextureHandle`/`renderer` only exist at all when
+    // LCU_ENABLE_BGFX is defined (see this file's own top-of-file
+    // `#if defined(LCU_ENABLE_BGFX)`-gated include block, and `renderer`
+    // itself being declared inside that same gate around main()'s own
+    // start) - so both the real texture and apply_skin's real GPU-
+    // touching body are gated the same way. The `#else` branch keeps
+    // apply_skin real for everything that ISN'T a GPU texture (catalog
+    // index, options.skin_name persistence) so the Skins menu screen's
+    // own selection/navigation logic and options.txt persistence stay
+    // fully exercised even in the non-bgfx "fast iteration" build.
+#if defined(LCU_ENABLE_BGFX)
+    bgfx::TextureHandle skin_texture = renderer.create_texture_from_pixels(
+        skin_catalog.pixels_for(skin_catalog.entry_at(current_skin_index)).data(), lcu::assets::kSkinWidth,
+        lcu::assets::kSkinHeight);
+    LCU_LOG_INFO("Player skin: \"{}\" skin_texture_valid={}", skin_catalog.entry_at(current_skin_index).name,
+                 bgfx::isValid(skin_texture));
+
+    // Real live-reload (Phase 62.4's own "Skin sofort wechseln, kein
+    // Neustart"): destroys the old GPU texture and uploads the newly
+    // selected skin's real pixels immediately - the player's own
+    // third-person model and first-person arm both pick this up with
+    // zero extra plumbing, since every real draw call below just reads
+    // this one `skin_texture` handle fresh every frame (see
+    // submit_character_model's own calls further down). Also updates
+    // `options.skin_name` in memory (persisted to disk the same way
+    // every other option already is - see options.save() calls below
+    // and the unconditional one at shutdown).
+    const auto apply_skin = [&](lcu::usize index) {
+        if (index >= skin_catalog.size()) {
+            return;
+        }
+        renderer.destroy_texture(skin_texture);
+        const lcu::assets::SkinEntry& entry = skin_catalog.entry_at(index);
+        const auto pixels = skin_catalog.pixels_for(entry);
+        skin_texture = renderer.create_texture_from_pixels(pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
+        current_skin_index = index;
+        options.skin_name = entry.name;
+        LCU_LOG_INFO("Skin changed to \"{}\" (skin_texture_valid={})", entry.name, bgfx::isValid(skin_texture));
+    };
+#else
+    const auto apply_skin = [&](lcu::usize index) {
+        if (index >= skin_catalog.size()) {
+            return;
+        }
+        current_skin_index = index;
+        options.skin_name = skin_catalog.entry_at(index).name;
+        LCU_LOG_INFO("Skin changed to \"{}\" (no real GPU texture in this non-bgfx build)", options.skin_name);
+    };
+#endif
+
+    // Real Phase 62.3 "Load own skin..." async result tracking - set
+    // true right after request_open_png_file_dialog() is called, polled
+    // once per frame (see the main loop below) until poll_open_png_
+    // file_dialog_result() returns a real answer.
+    bool skin_upload_pending = false;
+
     lcu::platform::DesktopInputBackend input_backend;
     lcu::platform::InputState input;
     lcu::platform::InputState previous_input;
@@ -1831,9 +2515,18 @@ int main() {
     const auto verify_torch_start = std::chrono::steady_clock::now();
     bool verify_torch_granted = false;
 
+    const bool verify_farming = std::getenv("LCU_VERIFY_FARMING") != nullptr;
+    const auto verify_farming_start = std::chrono::steady_clock::now();
+    bool verify_farming_granted = false;
+
     const bool verify_inventory = std::getenv("LCU_VERIFY_INVENTORY") != nullptr;
     const auto verify_inventory_start = std::chrono::steady_clock::now();
     bool verify_inventory_wood_granted = false;
+
+    const bool verify_farming_craft = std::getenv("LCU_VERIFY_FARMING_CRAFT") != nullptr;
+    const auto verify_farming_craft_start = std::chrono::steady_clock::now();
+    bool verify_farming_craft_granted = false;
+    bool verify_farming_craft_logged = false;
 
     const bool verify_workbench = std::getenv("LCU_VERIFY_WORKBENCH") != nullptr;
     const auto verify_workbench_start = std::chrono::steady_clock::now();
@@ -1842,6 +2535,21 @@ int main() {
     const bool verify_health = std::getenv("LCU_VERIFY_HEALTH") != nullptr;
     const auto verify_health_start = std::chrono::steady_clock::now();
     bool verify_health_setup_done = false;
+
+    // Headless verification hook for Phase 62 (skins): exercises
+    // apply_skin() (real live-reload/index/options.skin_name update)
+    // and SkinCatalog::add_from_file() (real stb_image decode + real
+    // file copy into "assets/skins") directly, bypassing the real OS
+    // file-open dialog entirely - SDL_ShowOpenFileDialog is a native
+    // platform dialog (GTK/Cocoa/Windows/XDG portal) with no real
+    // backend in this headless sandbox, so it cannot be scripted the
+    // way a key press can (see request_open_png_file_dialog's own doc
+    // comment) - **NOT VERIFIED — ENVIRONMENT LIMITATION** for the
+    // dialog itself; everything downstream of "a real file path was
+    // chosen" (validation, copy, catalog entry, live-reload,
+    // persistence) is exercised for real here.
+    const bool verify_skin = std::getenv("LCU_VERIFY_SKIN") != nullptr;
+    bool verify_skin_done = false;
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -1942,7 +2650,16 @@ int main() {
     // edge-detected Actions below, independent of pause state (a
     // display preference, not gameplay, so these work while the menu
     // is open too).
-    bool third_person = false;
+    //
+    // Real 3-way perspective cycle (Phase 58.3, extends Phase 47's own
+    // first-person/third-person-behind toggle): F5 now cycles First ->
+    // ThirdPersonBehind -> ThirdPersonFront -> First. ThirdPersonFront
+    // was a documented PARTIAL/gap before this phase (no player model
+    // existed to render in front of the camera) - the real character
+    // model this phase adds (see submit_textured_box calls below)
+    // closes it for real.
+    enum class Perspective { FirstPerson, ThirdPersonBehind, ThirdPersonFront };
+    Perspective perspective = Perspective::FirstPerson;
 
     // Real hold-to-break progress (Phase 48): accumulates real elapsed
     // hold time against whichever block is currently targeted;
@@ -1961,9 +2678,27 @@ int main() {
     };
 
     // Real hand swing animation (Phase 48) - real elapsed time since the
-    // last break/place action, used to offset the hand icon's own quad
-    // position over kHandSwingDuration then settle back to rest.
+    // last break/place action, used to offset the first-person arm
+    // box's own position (Phase 58.2, previously a flat 2D icon) over
+    // kHandSwingDuration then settle back to rest.
     lcu::f32 hand_swing_elapsed = kHandSwingDuration;
+
+    // Real walk-cycle phase (Phase 58.3) - see kWalkCyclePerBlock's own
+    // doc comment; advances only by real horizontal distance travelled,
+    // never by raw time, so it never "runs" while the player stands
+    // still.
+    lcu::f32 walk_cycle_phase = 0.0f;
+
+    // Real NPC animation clock (Phase 59.3) - unlike the player's own
+    // walk_cycle_phase (driven by real distance travelled, since the
+    // player's own per-frame movement delta is already computed
+    // locally), NPC wander movement happens inside
+    // game::systems::update_ai_wander with no per-entity distance
+    // bookkeeping exposed back to the renderer - a real elapsed-time
+    // clock is the honest alternative available here, advancing only
+    // while unpaused (so NPCs don't visibly "walk in place" while the
+    // menu/inventory is open and the simulation itself is frozen).
+    lcu::f32 npc_animation_time = 0.0f;
 
     // Real "press any key to rebind" capture (Phase 46's controls
     // screen): set by a row's on_activate, consumed by
@@ -2002,6 +2737,7 @@ int main() {
     std::function<lcu::ui::MenuScreen()> build_pause_screen;
     std::function<lcu::ui::MenuScreen()> build_options_screen;
     std::function<lcu::ui::MenuScreen()> build_controls_screen;
+    std::function<lcu::ui::MenuScreen()> build_skins_screen;
 
     build_pause_screen = [&]() -> lcu::ui::MenuScreen {
         lcu::ui::MenuScreen screen;
@@ -2014,6 +2750,8 @@ int main() {
         screen.items.push_back({"Steuerung", "",
                                  [&]() { pending_menu_action = [&]() { menu_stack.push(build_controls_screen()); }; },
                                  nullptr});
+        screen.items.push_back(
+            {"Skins", "", [&]() { pending_menu_action = [&]() { menu_stack.push(build_skins_screen()); }; }, nullptr});
         screen.items.push_back({"Beenden", "", [&]() { quit_requested = true; }, nullptr});
         return screen;
     };
@@ -2146,6 +2884,64 @@ int main() {
         return screen;
     };
 
+    build_skins_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Skins";
+
+        // Same real "record it, apply it after this callback returns"
+        // rebuild pattern build_options_screen's own schedule_rebuild
+        // uses - re-selecting the just-picked row so the refreshed
+        // "AUSGEWAEHLT" marker below lands next to whichever skin is
+        // now actually active, a real (if simple) form of live preview:
+        // the player's own third-person model (when visible behind this
+        // translucent pause screen) updates immediately too, since
+        // apply_skin() above touches the one real `skin_texture` handle
+        // every subsequent frame's render already reads.
+        const auto schedule_rebuild = [&]() {
+            pending_menu_action = [&]() {
+                const lcu::usize index = menu_stack.top().selected_index;
+                menu_stack.pop();
+                menu_stack.push(build_skins_screen());
+                menu_stack.select_index(index);
+            };
+        };
+
+        for (lcu::usize i = 0; i < skin_catalog.size(); ++i) {
+            const lcu::assets::SkinEntry& entry = skin_catalog.entry_at(i);
+            lcu::ui::MenuItem item;
+            item.label = entry.name;
+            item.value_text = (i == current_skin_index) ? "AUSGEWAEHLT" : "";
+            item.on_activate = [&, i, schedule_rebuild]() {
+                apply_skin(i);
+                schedule_rebuild();
+            };
+            screen.items.push_back(std::move(item));
+        }
+
+        lcu::ui::MenuItem load_own;
+        load_own.label = "Eigenen Skin laden...";
+        load_own.on_activate = [&]() {
+            if (skin_upload_pending) {
+                LCU_LOG_INFO("A skin upload dialog is already open");
+                return;
+            }
+            skin_upload_pending = true;
+            lcu::platform::request_open_png_file_dialog(window);
+        };
+        screen.items.push_back(std::move(load_own));
+
+        lcu::ui::MenuItem back;
+        back.label = "Zurueck";
+        back.on_activate = [&]() {
+            options.save(options_path);
+            LCU_LOG_INFO("Saved options to \"{}\"", options_path);
+            pending_menu_action = [&]() { menu_stack.pop(); };
+        };
+        screen.items.push_back(std::move(back));
+
+        return screen;
+    };
+
     // Real "You died" screen (Phase 51.3, brief section 87's own
     // directive: "brief 'You died' screen with respawn button") - a
     // MenuScreen like every other one above, pushed directly (not via
@@ -2240,7 +3036,9 @@ int main() {
         if (verify_hud) {
             input.set_down(lcu::platform::Action::ToggleHud, frame == kVerifyHudToggleHudFrame);
             input.set_down(lcu::platform::Action::ToggleDebugOverlay, frame == kVerifyHudToggleDebugOverlayFrame);
-            input.set_down(lcu::platform::Action::TogglePerspective, frame == kVerifyHudTogglePerspectiveFrame);
+            input.set_down(lcu::platform::Action::TogglePerspective,
+                            frame == kVerifyHudTogglePerspectiveFrame || frame == kVerifyHudTogglePerspectiveFrame2 ||
+                                frame == kVerifyHudTogglePerspectiveFrame3);
             input.set_down(lcu::platform::Action::Fullscreen, frame == kVerifyHudFullscreenFrame);
             input.set_down(lcu::platform::Action::Screenshot, frame == kVerifyHudScreenshotFrame);
         }
@@ -2319,6 +3117,100 @@ int main() {
             }
             input.set_down(lcu::platform::Action::Interact, interact_now);
             input.set_down(lcu::platform::Action::Crouch, shift_now);
+        }
+        if (verify_farming_craft) {
+            if (!verify_farming_craft_granted) {
+                // Synthetic setup (see kVerifyFarmingCraftOpenAtSeconds'
+                // own doc comment above) - lands in real inventory slots 0
+                // and 1 respectively, same "first items added to an empty
+                // inventory" precedent every prior hook's own item grant
+                // already relies on.
+                player_inventory.add_item(item_registry, {wheat_item_id, 3});
+                player_inventory.add_item(item_registry, {planks_item_id, 2});
+                verify_farming_craft_granted = true;
+            }
+            const lcu::f32 elapsed = std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() -
+                                                                      verify_farming_craft_start)
+                                          .count();
+            input.set_down(lcu::platform::Action::Inventory,
+                            (elapsed >= kVerifyFarmingCraftOpenAtSeconds &&
+                             elapsed < kVerifyFarmingCraftOpenAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingCraftCloseAtSeconds &&
+                                 elapsed < kVerifyFarmingCraftCloseAtSeconds + kVerifyEdgePulseSeconds));
+
+            const lcu::ui::InventoryScreenLayout verify_farming_craft_layout = lcu::ui::inventory_screen_layout(
+                static_cast<lcu::u32>(window.width()), static_cast<lcu::u32>(window.height()));
+            const auto verify_farming_craft_slot_center = [](const lcu::ui::InventorySlotRect& rect) {
+                return lcu::platform::Window::MousePosition{rect.x + rect.size * 0.5f, rect.y + rect.size * 0.5f};
+            };
+
+            bool left_now = false;
+            bool right_now = false;
+            if (elapsed >= kVerifyFarmingCraftPickupWheatAtSeconds &&
+                elapsed < kVerifyFarmingCraftPickupWheatAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.hotbar_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat1AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat1AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat2AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat2AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[1]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlaceWheat3AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlaceWheat3AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[2]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftTakeBreadAtSeconds &&
+                       elapsed < kVerifyFarmingCraftTakeBreadAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_result);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftStowBreadAtSeconds &&
+                       elapsed < kVerifyFarmingCraftStowBreadAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.main_slots[0]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPickupPlanksAtSeconds &&
+                       elapsed < kVerifyFarmingCraftPickupPlanksAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.hotbar_slots[1]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlacePlanks1AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlacePlanks1AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[0]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftPlacePlanks2AtSeconds &&
+                       elapsed < kVerifyFarmingCraftPlacePlanks2AtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_input[1]);
+                window.warp_mouse(pos.x, pos.y);
+                right_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftTakeHoeAtSeconds &&
+                       elapsed < kVerifyFarmingCraftTakeHoeAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.craft_result);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            } else if (elapsed >= kVerifyFarmingCraftStowHoeAtSeconds &&
+                       elapsed < kVerifyFarmingCraftStowHoeAtSeconds + kVerifyEdgePulseSeconds) {
+                const auto pos = verify_farming_craft_slot_center(verify_farming_craft_layout.main_slots[1]);
+                window.warp_mouse(pos.x, pos.y);
+                left_now = true;
+            }
+            input.set_down(lcu::platform::Action::Interact, left_now);
+            input.set_down(lcu::platform::Action::PlaceBlock, right_now);
+
+            if (!verify_farming_craft_logged && elapsed >= kVerifyFarmingCraftLogAtSeconds) {
+                LCU_LOG_INFO(
+                    "LCU_VERIFY_FARMING_CRAFT: bread={} wooden_hoe={} (expected 1 and 1)",
+                    player_inventory.count_item(bread_item_id), player_inventory.count_item(wooden_hoe_item_id));
+                verify_farming_craft_logged = true;
+            }
         }
         if (verify_workbench) {
             if (!verify_workbench_setup_done) {
@@ -2561,16 +3453,18 @@ int main() {
                                                ? result
                                                : lcu::items::ItemStack{cursor_stack.item, cursor_stack.count + result.count};
                             // Consumes exactly 1 of each non-empty
-                            // ingredient slot - correct for every real
-                            // shapeless recipe registered so far (each
-                            // lists each ingredient once - see
-                            // recipe_registry.add_shapeless above); a
-                            // recipe needing >1 of the same ingredient in
-                            // one cell would need per-recipe ingredient
-                            // counts this simple "decrement by 1" doesn't
-                            // model - a real, documented limit, not
-                            // silently wrong for anything actually
-                            // registered.
+                            // ingredient slot. This is correct even for
+                            // the Phase 65 recipes that need >1 of the
+                            // same item (3x game:wheat, 2x game:planks -
+                            // see recipe_registry.add_shapeless above), as
+                            // long as each occurrence sits in its own
+                            // grid cell (real Minecraft's own crafting
+                            // grid works the same way - a real recipe
+                            // needing 2 sticks is placed as 2 separate
+                            // stick cells, never 1 cell holding a stack of
+                            // 2). What this can't model is >1 of the same
+                            // ingredient stacked into a *single* cell -
+                            // not needed by anything registered so far.
                             for (lcu::usize i = 0; i < kCraftGridInputSlotCount; ++i) {
                                 const lcu::items::ItemStack ingredient = craft_grid_inventory.slot_at(i);
                                 if (!ingredient.is_empty()) {
@@ -2796,6 +3690,38 @@ int main() {
             action();
         }
 
+        // Real Phase 62.3 "Load own skin..." async result (see the
+        // Skins screen's own "Eigenen Skin laden..." row above) - polled
+        // every frame regardless of whether the Skins screen is still
+        // open (the real OS dialog can outlive a quick ESC/Zurueck), so
+        // a result that arrives after the player already left the
+        // screen still lands (just without live visual feedback there).
+        if (skin_upload_pending) {
+            if (const auto dialog_result = lcu::platform::poll_open_png_file_dialog_result()) {
+                skin_upload_pending = false;
+                if (dialog_result->has_value()) {
+                    const auto add_result = skin_catalog.add_from_file(**dialog_result);
+                    if (add_result.ok) {
+                        if (const auto index = skin_catalog.index_of_name(add_result.entry.name)) {
+                            apply_skin(*index);
+                        }
+                        LCU_LOG_INFO("Skin upload succeeded: \"{}\" from \"{}\"", add_result.entry.name,
+                                     **dialog_result);
+                        if (!menu_stack.empty() && menu_stack.top().title == "Skins") {
+                            const lcu::usize index = menu_stack.top().selected_index;
+                            menu_stack.pop();
+                            menu_stack.push(build_skins_screen());
+                            menu_stack.select_index(index);
+                        }
+                    } else {
+                        LCU_LOG_WARN("Skin upload rejected: {}", add_result.error);
+                    }
+                } else {
+                    LCU_LOG_INFO("Skin upload dialog cancelled, or no real dialog backend is available here");
+                }
+            }
+        }
+
         const bool paused = !menu_stack.empty();
 
         // Set inside the !paused block below (from the real raycast hit
@@ -2884,6 +3810,29 @@ int main() {
                             elapsed >= kVerifyTorchPlaceAtSeconds &&
                                 elapsed < kVerifyTorchPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
+        if (verify_farming) {
+            if (!verify_farming_granted) {
+                // Real synthetic grant (same precedent as LCU_VERIFY_
+                // TORCH above) - lands the hoe in real slot 0 and the
+                // seeds in real slot 1 (sequential fill of an otherwise-
+                // empty inventory).
+                player_inventory.add_item(item_registry, {wooden_hoe_item_id, 1});
+                player_inventory.add_item(item_registry, {wheat_seeds_item_id, 5});
+                verify_farming_granted = true;
+            }
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_farming_start).count();
+            input.set_down(lcu::platform::Action::PlaceBlock,
+                            (elapsed >= kVerifyFarmingTillAtSeconds &&
+                             elapsed < kVerifyFarmingTillAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingPlantAtSeconds &&
+                                 elapsed < kVerifyFarmingPlantAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingHarvestAtSeconds &&
+                                 elapsed < kVerifyFarmingHarvestAtSeconds + kVerifyEdgePulseSeconds));
+            input.set_down(lcu::platform::Action::CycleHotbar,
+                            elapsed >= kVerifyFarmingCycleAtSeconds &&
+                                elapsed < kVerifyFarmingCycleAtSeconds + kVerifyEdgePulseSeconds);
+        }
         if (verify_health) {
             if (!verify_health_setup_done) {
                 // Synthetic setup (see kVerifyHealthFallHeightBlocks' own
@@ -2913,6 +3862,61 @@ int main() {
                             elapsed >= kVerifyHealthEatAtSeconds &&
                                 elapsed < kVerifyHealthEatAtSeconds + kVerifyEdgePulseSeconds);
         }
+
+        if (verify_skin && !verify_skin_done) {
+            verify_skin_done = true;
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: initial skin=\"{}\" (index={})", options.skin_name, current_skin_index);
+
+            // Real apply_skin() live-reload exercise: switch to a
+            // different builtin preset.
+            if (const auto alex_index = skin_catalog.index_of_name("Alex")) {
+                apply_skin(*alex_index);
+                LCU_LOG_INFO("LCU_VERIFY_SKIN: after apply_skin(Alex) skin=\"{}\" (index={})", options.skin_name,
+                             current_skin_index);
+            }
+
+            // Real SkinCatalog::add_from_file() exercise - a real
+            // temporary PNG, written via stb_image_write (test/verify-
+            // only use, see third_party/CMakeLists.txt's own
+            // StbImageWriteImpl target), stands in for a real user-
+            // selected file (the OS dialog itself can't be scripted
+            // headlessly - see verify_skin's own doc comment above).
+            const std::filesystem::path verify_png =
+                std::filesystem::temp_directory_path() / "lcu_verify_skin_upload.png";
+            std::vector<lcu::u8> verify_pixels(static_cast<lcu::usize>(lcu::assets::kSkinWidth) *
+                                                lcu::assets::kSkinHeight * 4);
+            for (lcu::usize i = 0; i < verify_pixels.size(); i += 4) {
+                verify_pixels[i + 0] = 200;
+                verify_pixels[i + 1] = 40;
+                verify_pixels[i + 2] = 220;
+                verify_pixels[i + 3] = 255;
+            }
+            const int wrote =
+                stbi_write_png(verify_png.string().c_str(), static_cast<int>(lcu::assets::kSkinWidth),
+                                static_cast<int>(lcu::assets::kSkinHeight), 4, verify_pixels.data(),
+                                static_cast<int>(lcu::assets::kSkinWidth) * 4);
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: wrote synthetic upload PNG to \"{}\" (ok={})", verify_png.string(),
+                         wrote != 0);
+
+            const auto add_result = skin_catalog.add_from_file(verify_png.string());
+            if (add_result.ok) {
+                if (const auto uploaded_index = skin_catalog.index_of_name(add_result.entry.name)) {
+                    apply_skin(*uploaded_index);
+                }
+                LCU_LOG_INFO("LCU_VERIFY_SKIN: upload succeeded, skin=\"{}\" (index={}, catalog_size={})",
+                             options.skin_name, current_skin_index, skin_catalog.size());
+            } else {
+                LCU_LOG_WARN("LCU_VERIFY_SKIN: upload failed: {}", add_result.error);
+            }
+
+            // Real menu-screen construction exercise - proves the Skins
+            // screen actually builds a row per catalog entry (plus
+            // "Load own skin..." and "Zurueck") without crashing.
+            const lcu::ui::MenuScreen skins_screen = build_skins_screen();
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: Skins screen has {} rows (expected {})", skins_screen.items.size(),
+                         skin_catalog.size() + 2);
+        }
+
         const auto now = std::chrono::steady_clock::now();
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
@@ -3143,6 +4147,25 @@ int main() {
             }
         } else if (!paused) {
             game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
+            npc_animation_time += delta_seconds;
+
+            // Real crop growth (Phase 64) - single-player only (see
+            // crop_growth_config's own doc comment above). The same real
+            // "elapsed-seconds accumulator, while-loop drains it"
+            // pattern player_vitals_system's own interval timers use.
+            // LCU_FAST_FARMING scales real elapsed time itself (not the
+            // growth-chance math) - see kFastFarmingTimeScale's own doc
+            // comment.
+            crop_growth_accumulator += fast_farming ? delta_seconds * game::systems::kFastFarmingTimeScale
+                                                     : delta_seconds;
+            while (crop_growth_accumulator >= game::systems::kCropRandomTickIntervalSeconds) {
+                crop_growth_accumulator -= game::systems::kCropRandomTickIntervalSeconds;
+                const auto grown_chunks =
+                    game::systems::update_crop_growth(world, world_light, crop_growth_config, farming_rng);
+                for (const lcu::voxel::ChunkCoord& coord : grown_chunks) {
+                    remesh_and_upload(coord);
+                }
+            }
         }
         // Real pause (Phase 46, brief section 60's menu framework:
         // "game pauses (simulation, audio, network)"): everything from
@@ -3261,6 +4284,9 @@ int main() {
 
             const lcu::math::Vec3 move_dir = lcu::player::movement_direction_from_input(input, camera);
             const lcu::math::Vec3 horizontal_delta = move_dir * (kMoveSpeed * delta_seconds);
+            // Real walk-cycle advance (Phase 58.3) - see
+            // kWalkCyclePerBlock's own doc comment.
+            walk_cycle_phase += lcu::math::length(horizontal_delta) * kWalkCyclePerBlock;
 
             // Real per-jump hunger cost (Phase 51.2) - edge-detected
             // (a fresh Jump press, not held) and read BEFORE try_jump
@@ -3464,9 +4490,17 @@ int main() {
                 // not a graphical crafting-grid UI (no way to arrange items
                 // into specific cells exists yet - see DECISIONS.md). This
                 // only correctly represents a recipe needing exactly one of
-                // each distinct ingredient type (true of the one recipe
-                // registered above); it isn't a stand-in for a real grid
-                // that could hold >1 of the same item in different cells.
+                // each distinct ingredient type (true of the compost/planks
+                // recipes registered above); it isn't a stand-in for a real
+                // grid that could hold >1 of the same item in different
+                // cells. Real, documented limitation as of Phase 65: the
+                // two new recipes there (3x game:wheat -> bread, 2x
+                // game:planks -> wooden_hoe) need >1 of the same item, so
+                // this dedup-to-1 shortcut can never match them no matter
+                // how much wheat/planks are held - only the real 2x2
+                // inventory-screen grid or the 3x3 workbench grid (which
+                // query actual per-cell contents, not a deduped list) can
+                // craft them. See DECISIONS.md.
                 std::vector<lcu::items::ItemId> craft_grid;
                 for (lcu::usize slot = 0; slot < player_inventory.slot_count(); ++slot) {
                     const lcu::items::ItemId slot_item = player_inventory.slot_at(slot).item;
@@ -3530,6 +4564,16 @@ int main() {
                 const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                     const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                    // Real wheat harvest-by-breaking (Phase 64, brief
+                    // section 64.6): the growth state must be read here,
+                    // BEFORE set_block below clears it back to 0 (set_
+                    // block's own real "fresh placement has no state
+                    // history" behavior - see ChunkStorage's own doc
+                    // comment). Farmland underneath is never touched by
+                    // this at all, so it honestly stays farmland.
+                    const bool broke_wheat = old_id == wheat_id;
+                    const lcu::u8 wheat_state_before_break =
+                        broke_wheat ? target->state_at(split.local.x, split.local.y, split.local.z) : 0;
                     target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
                     const auto light_touched =
                         update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
@@ -3548,11 +4592,31 @@ int main() {
                             lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
                         audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
                     }
-                    // The broken block hands the player its item - block-break's
-                    // first real item consumer (see DECISIONS.md), a direct
-                    // 1:1 block->item mapping (stone/grass/dirt as of Phase
-                    // 17), not a loot-table system.
-                    spawn_item_entity_for_broken_block(hit->block, hit->world);
+                    if (broke_wheat) {
+                        const auto drops = game::systems::harvest_wheat(wheat_state_before_break, farming_rng);
+                        spawn_item_stack_at(wheat_item_id, drops.wheat_count, hit->world);
+                        spawn_item_stack_at(wheat_seeds_item_id, drops.seed_count, hit->world);
+                    } else {
+                        // The broken block hands the player its item -
+                        // block-break's first real item consumer (see
+                        // DECISIONS.md), a direct 1:1 block->item mapping
+                        // (stone/grass/dirt as of Phase 17), not a loot-
+                        // table system. Wheat/farmland are deliberately
+                        // NOT registered in block_item_mapping (see their
+                        // own registration comments), so this call would
+                        // safely no-op for wheat anyway - the explicit
+                        // branch above exists for the real multi-item
+                        // harvest drop, not to avoid a double-drop bug.
+                        spawn_item_entity_for_broken_block(hit->block, hit->world);
+                        // Optional real 5% seed-from-grass mechanic
+                        // (brief section 64.6's own "optional") - a
+                        // small real bonus chance, independent of the
+                        // grass block's own normal dirt-item drop above.
+                        if (old_id == grass_id &&
+                            std::uniform_real_distribution<lcu::f32>(0.0f, 1.0f)(farming_rng) < 0.05f) {
+                            spawn_item_stack_at(wheat_seeds_item_id, 1, hit->world);
+                        }
+                    }
                 } else {
                     LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
                 }
@@ -3583,6 +4647,79 @@ int main() {
                 window.set_relative_mouse_mode(false);
                 recompute_workbench_result();
                 LCU_LOG_INFO("Workbench opened");
+            } else if (place_pressed && !networked && hit && tilling_tools.count(selected_stack.item) > 0 &&
+                       (hit->block == grass_id || hit->block == dirt_id) && hit->normal.y > 0.0f) {
+                // Real hoe-till (Phase 64, brief section 64.3): only from
+                // the real TOP face (hit->normal.y > 0), matching real
+                // Minecraft's own hoe interaction - tilling from the side
+                // or below doesn't make sense for a block you're standing
+                // on top of tilling downward into. Single-player only
+                // (see crop_growth_config's own doc comment) - the hoe
+                // itself is never consumed (a real, minimal tool with no
+                // durability concept, matching this phase's own "kein
+                // volles Tool-Tier-System" scope).
+                const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                    target->set_block(split.local.x, split.local.y, split.local.z, farmland_id);
+                    const auto light_touched = update_lighting_for_edit(split.chunk, split.local, old_id, farmland_id);
+                    remesh_and_upload(split.chunk);
+                    remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                    hand_swing_elapsed = 0.0f;
+                    LCU_LOG_INFO("Tilled game:farmland at world ({}, {}, {})", hit->world.x, hit->world.y,
+                                 hit->world.z);
+                }
+            } else if (place_pressed && !networked && hit && plantable_seeds.count(selected_stack.item) > 0 &&
+                       hit->block == farmland_id && hit->normal.y > 0.0f) {
+                // Real seed-planting (Phase 64, brief section 64.3):
+                // plants directly above the targeted farmland's own top
+                // face, at real growth state 0. Single-player only, same
+                // real scope as tilling above.
+                const lcu::voxel::BlockId plant_block_id = plantable_seeds.at(selected_stack.item);
+                const lcu::voxel::BlockWorldCoord plant_pos{hit->world.x, hit->world.y + 1, hit->world.z};
+                const auto split = lcu::voxel::world_to_chunk_and_local(plant_pos, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    if (target->block_at(split.local.x, split.local.y, split.local.z) == lcu::voxel::kAirBlockId &&
+                        player_inventory.remove_item(selected_stack.item, 1) == 1) {
+                        target->set_block_with_state(split.local.x, split.local.y, split.local.z, plant_block_id, 0);
+                        const auto light_touched = update_lighting_for_edit(split.chunk, split.local,
+                                                                             lcu::voxel::kAirBlockId, plant_block_id);
+                        remesh_and_upload(split.chunk);
+                        remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                        hand_swing_elapsed = 0.0f;
+                        LCU_LOG_INFO("Planted game:wheat at world ({}, {}, {})", plant_pos.x, plant_pos.y,
+                                     plant_pos.z);
+                    }
+                }
+            } else if (place_pressed && !networked && hit && hit->block == wheat_id) {
+                // Real right-click harvest (Phase 64, brief section
+                // 64.6's own "Ernte (Abbau ODER Rechtsklick auf reifen
+                // Weizen)"): only mature wheat (state == max) actually
+                // harvests - right-clicking immature wheat is a real,
+                // deliberate no-op (falls into this branch and does
+                // nothing further, rather than falling through to
+                // placement/eating, matching real Minecraft's own "right-
+                // click on any wheat never places/eats through it").
+                // Harvesting replants a fresh state-0 wheat immediately
+                // (the real farmland underneath was never touched at
+                // all - "Farmland bleibt nach Ernte Farmland" is
+                // automatically true here since only the wheat block
+                // itself, not what's beneath it, is ever touched).
+                const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    const lcu::u8 state = target->state_at(split.local.x, split.local.y, split.local.z);
+                    if (state >= game::systems::kMaxWheatGrowthState) {
+                        const auto drops = game::systems::harvest_wheat(state, farming_rng);
+                        spawn_item_stack_at(wheat_item_id, drops.wheat_count, hit->world);
+                        spawn_item_stack_at(wheat_seeds_item_id, drops.seed_count, hit->world);
+                        target->set_block_with_state(split.local.x, split.local.y, split.local.z, wheat_id, 0);
+                        remesh_and_upload(split.chunk);  // Real state-only change - no lighting/neighbor fixup needed.
+                        hand_swing_elapsed = 0.0f;
+                        LCU_LOG_INFO(
+                            "Harvested mature game:wheat at world ({}, {}, {}) - {} wheat, {} seeds; replanted",
+                            hit->world.x, hit->world.y, hit->world.z, drops.wheat_count, drops.seed_count);
+                    }
+                }
             } else if (place_pressed && selected_edible != edible_hunger_restore.end()) {
                 // Real eating (Phase 51.2): unlike placement/the
                 // crafting-table intercept above, this deliberately
@@ -3697,8 +4834,13 @@ int main() {
         }
         if (input.is_down(lcu::platform::Action::TogglePerspective) &&
             !previous_input.is_down(lcu::platform::Action::TogglePerspective)) {
-            third_person = !third_person;
-            LCU_LOG_INFO("Perspective: {}", third_person ? "third-person (behind)" : "first-person");
+            perspective = perspective == Perspective::FirstPerson     ? Perspective::ThirdPersonBehind
+                          : perspective == Perspective::ThirdPersonBehind ? Perspective::ThirdPersonFront
+                                                                           : Perspective::FirstPerson;
+            const char* name = perspective == Perspective::FirstPerson       ? "first-person"
+                                : perspective == Perspective::ThirdPersonBehind ? "third-person (behind)"
+                                                                                 : "third-person (front)";
+            LCU_LOG_INFO("Perspective: {}", name);
         }
         if (input.is_down(lcu::platform::Action::Fullscreen) &&
             !previous_input.is_down(lcu::platform::Action::Fullscreen)) {
@@ -3719,20 +4861,26 @@ int main() {
         const lcu::f32 sky_t = day_night_cycle.sky_light_scale();
         const lcu::math::Vec3 sky_color = kNightSkyColor + (kDaySkyColor - kNightSkyColor) * sky_t;
         renderer.begin_frame(sky_color);
-        // Real third-person-behind camera (Phase 47, F5) - only the
-        // render eye position shifts backward along the real look
-        // direction; gameplay (raycast, movement, camera.position
-        // itself) is untouched, matching Minecraft's own "aim from
-        // where you're looking, not from the pulled-back eye" behavior.
-        // PARTIAL: no player model exists to render in front of the
-        // camera, so there is no real third-person-front mode - see
-        // DECISIONS.md.
-        const lcu::math::Vec3 render_eye =
-            third_person ? camera.position - camera.forward() * kThirdPersonDistance : camera.position;
-        const lcu::math::Mat4 view = third_person
-                                          ? lcu::math::Mat4::look_at(render_eye, render_eye + camera.forward(),
-                                                                      lcu::math::Vec3{0.0f, 1.0f, 0.0f})
-                                          : camera.view_matrix();
+        // Real 3-way perspective (Phase 47 third-person-behind, extended
+        // Phase 58.3 with a real third-person-front) - only the render
+        // eye position/view direction changes; gameplay (raycast,
+        // movement, camera.position itself) is untouched either way,
+        // matching Minecraft's own "aim from where you're looking, not
+        // from the pulled-back eye" behavior. Third-person-front places
+        // the render eye IN FRONT of the player, looking back at them -
+        // this is what actually needed the real character model (below)
+        // to have something worth looking at; the previous PARTIAL note
+        // about this is resolved, see DECISIONS.md.
+        lcu::math::Vec3 render_eye = camera.position;
+        lcu::math::Mat4 view = camera.view_matrix();
+        if (perspective == Perspective::ThirdPersonBehind) {
+            render_eye = camera.position - camera.forward() * kThirdPersonDistance;
+            view = lcu::math::Mat4::look_at(render_eye, render_eye + camera.forward(),
+                                             lcu::math::Vec3{0.0f, 1.0f, 0.0f});
+        } else if (perspective == Perspective::ThirdPersonFront) {
+            render_eye = camera.position + camera.forward() * kThirdPersonDistance;
+            view = lcu::math::Mat4::look_at(render_eye, camera.position, lcu::math::Vec3{0.0f, 1.0f, 0.0f});
+        }
         const lcu::f32 aspect =
             static_cast<lcu::f32>(renderer_desc.width) / static_cast<lcu::f32>(renderer_desc.height);
         // Real FOV (Phase 46 - closes the gap Phase 45 deliberately left
@@ -3819,28 +4967,61 @@ int main() {
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
                                                                          static_cast<lcu::f32>(coord.y * kEdge),
                                                                          static_cast<lcu::f32>(coord.z * kEdge)});
-            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale());
+            renderer.submit_chunk_mesh(gpu_mesh, chunk_program, model, view, proj, day_night_cycle.sky_light_scale(),
+                                        atlas_texture);
             if (gpu_mesh.is_valid() && bgfx::isValid(chunk_program)) {
                 ++draw_calls;
             }
         }
 
-        // Entity debug boxes (Phase 36, brief section 60) - a real
-        // AABB per visible entity, reusing make_player_aabb (the exact
-        // same box shape the player's own collision already uses; AI/
-        // remote entity Position is a feet position too, same
-        // convention the spawn code already established). Drawn via
-        // the sky program (position+flat-color, no lighting concept -
-        // see submit_wireframe_box's doc comment) since a dedicated
-        // debug shader would be the same shader twice for no reason.
+        // Real transparent/water pass (Phase 61) - submitted as a real
+        // SEPARATE draw call per chunk, AFTER every opaque chunk above,
+        // so translucent water always composites over already-drawn
+        // solid terrain (real depth TESTING still applies within this
+        // pass too, so water correctly hides behind a solid wall it's
+        // on the far side of). `alpha_blend=true` is the one real
+        // difference from the opaque loop above - see Renderer::
+        // submit_chunk_mesh's own doc comment. No real back-to-front
+        // sorting between different water chunks (`gpu_water_meshes` is
+        // iterated in arbitrary `unordered_map` order, same as
+        // `gpu_meshes` above) - a real, accepted limitation for large
+        // adjacent water bodies, see DECISIONS.md.
+        for (const auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
+            const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
+                                                                         static_cast<lcu::f32>(coord.y * kEdge),
+                                                                         static_cast<lcu::f32>(coord.z * kEdge)});
+            renderer.submit_chunk_mesh(gpu_water_mesh, chunk_program, model, view, proj,
+                                        day_night_cycle.sky_light_scale(), atlas_texture, /*alpha_blend=*/true);
+            if (gpu_water_mesh.is_valid() && bgfx::isValid(chunk_program)) {
+                ++draw_calls;
+            }
+        }
+
+        // Entity rendering (Phase 36 debug boxes, real visible NPC
+        // models since Phase 59) - `entity_count` itself (fed to the
+        // debug overlay's own stats) is always accurate regardless of
+        // what's actually drawn below; only the VISUALS are gated.
+        // Debug wireframe boxes (Phase 36) are now a real toggle,
+        // default off (Phase 59.4) - bundled into the existing
+        // `options.debug_overlay_enabled` (F3) flag rather than a new
+        // dedicated keybind, since it's already a real "show debug
+        // visualization" preference with exactly this default.
         lcu::u32 entity_count = 0;
         if (networked) {
+            // Real remote-player avatars are out of this phase's own
+            // scope (the brief's own "sichtbare NPCs" names AI wander
+            // entities specifically, not networked remote players -
+            // see DECISIONS.md); remote entities keep the same debug
+            // wireframe box every entity had before this phase, now
+            // gated behind the same real toggle.
             for (const auto& [entity_index, interpolator] : remote_entity_interpolators) {
                 const lcu::math::Vec3 pos = interpolator.interpolated_position(network_clock);
-                const lcu::physics::AABB box = make_player_aabb(pos);
-                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
-                if (bgfx::isValid(sky_program)) {
-                    ++draw_calls;
+                if (options.debug_overlay_enabled) {
+                    const lcu::physics::AABB box = make_player_aabb(pos);
+                    renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
                 }
                 ++entity_count;
             }
@@ -3848,19 +5029,60 @@ int main() {
             for (const lcu::ecs::EntityId& entity :
                  entity_registry.pool_for<game::components::AIWander>().dense_entities()) {
                 const lcu::math::Vec3 pos = entity_registry.get_component<game::components::Position>(entity)->value;
-                const lcu::physics::AABB box = make_player_aabb(pos);
-                renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
-                if (bgfx::isValid(sky_program)) {
-                    ++draw_calls;
+                const game::components::AIWander* wander = entity_registry.get_component<game::components::AIWander>(entity);
+
+                if (options.debug_overlay_enabled) {
+                    const lcu::physics::AABB box = make_player_aabb(pos);
+                    renderer.submit_wireframe_box(box.min, box.max, kEntityBoxColor, sky_program, view, proj);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
                 }
+
+                // Real NPC character model (Phase 59.1/59.2) - the exact
+                // same submit_character_model the local player's own
+                // third-person body uses (Phase 58's own extraction),
+                // just fed this NPC's own real position/facing instead.
+                const bool idle = wander != nullptr && wander->wait_seconds > 0.0f;
+                lcu::f32 npc_yaw = 0.0f;
+                if (wander != nullptr && !idle) {
+                    // Faces its own real wander target - see rotate_yaw's
+                    // own doc comment for the derivation (this is its
+                    // exact inverse: direction vector -> yaw).
+                    const lcu::f32 dx = wander->target.x - pos.x;
+                    const lcu::f32 dz = wander->target.z - pos.z;
+                    npc_yaw = std::atan2(-dx, -dz);
+                }
+                // Real idle animation (Phase 59.3: "leichtes Atmen,
+                // kleiner Kopf-Wackler") - a small real head-pitch
+                // oscillation while idling, driven by the same real
+                // npc_animation_time clock the walk cycle itself uses
+                // while moving, at a much slower/smaller amplitude.
+                const lcu::f32 idle_head_pitch =
+                    idle ? std::sin(npc_animation_time * kNpcIdleHeadWobbleFrequency) * kNpcIdleHeadWobbleAmplitude
+                         : 0.0f;
+                const lcu::f32 npc_walk_phase = idle ? 0.0f : npc_animation_time * kNpcWalkCycleFrequency;
+                // Real, per-entity fixed skin (Phase 62) - assigned once
+                // at spawn (see game::components::NpcAppearance's own
+                // doc comment), never the player's own live-reloadable
+                // skin_texture.
+                const auto* appearance = entity_registry.get_component<game::components::NpcAppearance>(entity);
+                const lcu::u32 preset_index =
+                    appearance != nullptr
+                        ? appearance->skin_preset_index % static_cast<lcu::u32>(npc_skin_textures.size())
+                        : 0;
+                submit_character_model(renderer, npc_skin_textures[preset_index], sky_program, view, proj, pos,
+                                        npc_yaw, idle_head_pitch, npc_walk_phase, draw_calls);
+
                 ++entity_count;
             }
         }
 
-        // Real item-entity rendering (Phase 50.1) - a small colored
-        // camera-facing quad per real dropped item (its own item's
-        // icon_color, same flat-color convention every other real icon
-        // in this project already follows), via the new depth-tested
+        // Real item-entity rendering (Phase 50.1, real atlas texture
+        // since Phase 56) - a small camera-facing quad per real dropped
+        // item, its own item's real atlas texture when it has one
+        // (else the same flat icon_color quad every dropped item
+        // rendered before Phase 56), via the depth-tested
         // submit_world_billboard (not submit_billboard's own sky view -
         // an item entity needs to be genuinely occluded by/occlude
         // terrain, not always render on top the way the sun/moon do -
@@ -3881,10 +5103,20 @@ int main() {
             const lcu::f32 sin_a = std::sin(item_entity.spin_angle);
             const lcu::math::Vec3 billboard_right{cos_a, 0.0f, sin_a};
             constexpr lcu::math::Vec3 kWorldUp{0.0f, 1.0f, 0.0f};
-            const lcu::math::Vec4 icon_color =
-                item_registry.definition_of(item_entity.stack.item).icon_color;
-            renderer.submit_world_billboard(pos, billboard_right, kWorldUp, game::components::kItemEntityHalfExtent,
-                                             {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj);
+            lcu::math::Vec4 icon_color{};
+            std::optional<lcu::math::Vec4> item_texture_uv;
+            resolve_item_display(item_entity.stack.item, icon_color, item_texture_uv);
+            if (item_texture_uv.has_value()) {
+                const lcu::math::Vec4& uv = *item_texture_uv;
+                renderer.submit_world_billboard(pos, billboard_right, kWorldUp,
+                                                 game::components::kItemEntityHalfExtent,
+                                                 {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj,
+                                                 atlas_texture, uv.x, uv.y, uv.z, uv.w);
+            } else {
+                renderer.submit_world_billboard(pos, billboard_right, kWorldUp,
+                                                 game::components::kItemEntityHalfExtent,
+                                                 {icon_color.x, icon_color.y, icon_color.z}, sky_program, view, proj);
+            }
             if (bgfx::isValid(sky_program)) {
                 ++draw_calls;
             }
@@ -3910,50 +5142,93 @@ int main() {
             }
 
             if (render_break_fraction > 0.0f) {
-                // Real, honestly-scoped substitute for a per-fragment
-                // crack-noise shader effect (see kBreakOverlayMaxAlpha's
-                // own doc comment) - a solid box that gets visually
-                // darker (toward black) as progress advances, drawn
-                // very slightly inset so it wins the depth test against
-                // the block's own face without z-fighting.
-                const lcu::math::Vec3 overlay_color =
-                    lcu::math::Vec3{1.0f, 1.0f, 1.0f} * (1.0f - render_break_fraction * kBreakOverlayMaxDarken);
+                // Real crack-texture overlay (Phase 60, replaces the
+                // Phase 48 flat-darkening box) - `render_break_fraction`
+                // (0..1) maps onto the real 10 crack stages
+                // (lcu::assets::TileId::Crack0..Crack9), drawn as a real
+                // alpha-blended textured box (all 6 faces get the same
+                // crack UV - a real, simpler reading than raycasting the
+                // exact hit face for a single oriented quad, see
+                // DECISIONS.md) very slightly inset so it wins the depth
+                // test against the block's own face without z-fighting.
+                const auto crack_stage =
+                    std::min<lcu::u32>(9, static_cast<lcu::u32>(render_break_fraction * 10.0f));
+                const lcu::assets::TileUvRange crack_uv = lcu::assets::tile_uv_range(
+                    static_cast<lcu::u32>(lcu::assets::TileId::Crack0) + crack_stage);
+                const lcu::rendering::Renderer::BoxFaceUv crack_face_uv{crack_uv.u0, crack_uv.v0, crack_uv.u1,
+                                                                          crack_uv.v1};
                 constexpr lcu::f32 kInset = 0.005f;
-                renderer.submit_solid_box(block_min + lcu::math::Vec3{kInset, kInset, kInset},
-                                           block_max - lcu::math::Vec3{kInset, kInset, kInset}, overlay_color,
-                                           sky_program, view, proj);
+                const std::array<lcu::math::Vec3, 8> crack_box_corners = {
+                    lcu::math::Vec3{block_min.x + kInset, block_min.y + kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_min.y + kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_max.y - kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_max.y - kInset, block_min.z + kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_min.y + kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_min.y + kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_max.x - kInset, block_max.y - kInset, block_max.z - kInset},
+                    lcu::math::Vec3{block_min.x + kInset, block_max.y - kInset, block_max.z - kInset},
+                };
+                renderer.submit_textured_box(
+                    crack_box_corners, {1.0f, 1.0f, 1.0f}, sky_program, view, proj, atlas_texture,
+                    {crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv, crack_face_uv},
+                    /*alpha_blend=*/true);
                 if (bgfx::isValid(sky_program)) {
                     ++draw_calls;
                 }
             }
         }
 
-        // Real hand icon (Phase 48.3, updated for Phase 49's real
-        // inventory-driven hotbar) - whatever item physically sits in
-        // the selected hotbar slot right now, own icon color (Phase 47's
-        // icon_color), bottom-right corner, swinging toward center-screen
-        // and back over kHandSwingDuration on every real break/place
-        // action (hand_swing_elapsed, reset to 0 by those - see above).
-        // An empty selected slot draws no hand icon at all - there's no
-        // real item color to show, the same honest "nothing to render"
-        // choice place_pressed's own kAirBlockId gate makes.
-        if (options.hud_enabled) {
-            const lcu::items::ItemStack& held_stack = player_inventory.slot_at(selected_hotbar_slot);
-            if (!held_stack.is_empty()) {
-                const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
-                // A real, simple ease: swings out over the first half, back
-                // over the second - std::sin(swing_t * pi) peaks at 1.0
-                // exactly at swing_t=0.5, is 0 at both ends.
-                const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
-                const lcu::f32 rest_x =
-                    static_cast<lcu::f32>(renderer_desc.width) - kHandIconSize - kHandRestMarginX;
-                const lcu::f32 rest_y =
-                    static_cast<lcu::f32>(renderer_desc.height) - kHandIconSize - kHandRestMarginY;
-                const lcu::f32 hand_x = rest_x - swing_amount * kHandSwingOffset;
-                const lcu::f32 hand_y = rest_y - swing_amount * kHandSwingOffset;
-                const lcu::math::Vec4 hand_color = item_registry.definition_of(held_stack.item).icon_color;
-                renderer.submit_ui_quad(hand_x, hand_y, kHandIconSize, kHandIconSize, hand_color);
+        // Real character model (Phase 58.2/58.3) - a first-person arm
+        // box holding the current hotbar item's own texture (replacing
+        // Phase 48's flat 2D hand icon), or, in either third-person
+        // perspective, the player's own full body (head/torso/2 arms/2
+        // legs), all built from Renderer::submit_textured_box via the
+        // real character_part_corners()/rotate_yaw()/rotate_pitch()
+        // math above. `options.hud_enabled` still gates the
+        // arm/hand-equivalent piece specifically (matching the old hand
+        // icon's own gate - a "hide gameplay HUD" preference
+        // plausibly also wants the held-item arm hidden), but NOT the
+        // third-person body itself, which is a real, always-visible part
+        // of that perspective, not a HUD element.
+        if (perspective == Perspective::FirstPerson) {
+            if (options.hud_enabled) {
+                const lcu::items::ItemStack& held_stack = player_inventory.slot_at(selected_hotbar_slot);
+                if (!held_stack.is_empty()) {
+                    const lcu::f32 swing_t = std::clamp(hand_swing_elapsed / kHandSwingDuration, 0.0f, 1.0f);
+                    // A real, simple ease: swings out over the first half,
+                    // back over the second - std::sin(swing_t * pi) peaks
+                    // at 1.0 exactly at swing_t=0.5, is 0 at both ends.
+                    const lcu::f32 swing_amount = std::sin(swing_t * 3.14159265358979323846f);
+                    const lcu::math::Vec3 arm_pivot = camera.position;
+                    const lcu::math::Vec3 arm_local_center{
+                        kArmRightOffset, -kArmDownOffset + swing_amount * kArmSwingUpBoost,
+                        kArmForwardOffset + swing_amount * kArmSwingForwardBoost};
+                    const std::array<lcu::math::Vec3, 8> arm_corners = character_part_corners(
+                        arm_pivot, arm_local_center, {kArmHalfWidth, kArmHalfHeight, kArmHalfDepth}, camera.yaw,
+                        camera.pitch);
+
+                    lcu::math::Vec4 hand_color{};
+                    std::optional<lcu::math::Vec4> hand_texture_uv;
+                    resolve_item_display(held_stack.item, hand_color, hand_texture_uv);
+                    bgfx::TextureHandle arm_texture = BGFX_INVALID_HANDLE;
+                    lcu::rendering::Renderer::BoxUvSet arm_uv{};
+                    if (hand_texture_uv.has_value()) {
+                        const lcu::math::Vec4& uv = *hand_texture_uv;
+                        const lcu::rendering::Renderer::BoxFaceUv f{uv.x, uv.y, uv.z, uv.w};
+                        arm_uv = {f, f, f, f, f, f};
+                        arm_texture = atlas_texture;
+                    }
+                    renderer.submit_textured_box(arm_corners, {hand_color.x, hand_color.y, hand_color.z}, sky_program,
+                                                  view, proj, arm_texture, arm_uv);
+                    if (bgfx::isValid(sky_program)) {
+                        ++draw_calls;
+                    }
+                }
             }
+        } else {
+            const lcu::math::Vec3 body_feet{player.aabb.center().x, player.aabb.min.y, player.aabb.center().z};
+            submit_character_model(renderer, skin_texture, sky_program, view, proj, body_feet, camera.yaw,
+                                    camera.pitch, walk_cycle_phase, draw_calls);
         }
 
         // Crosshair (Phase 44) - real 2D UI quad batch: two thin bars
@@ -3989,7 +5264,7 @@ int main() {
             const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
             hud_state.hotbar[i].has_item = !stack.is_empty();
             if (!stack.is_empty()) {
-                hud_state.hotbar[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                resolve_item_display(stack.item, hud_state.hotbar[i].icon_color, hud_state.hotbar[i].texture_uv);
                 hud_state.hotbar[i].count = stack.count;
             }
         }
@@ -4018,21 +5293,24 @@ int main() {
                 const lcu::items::ItemStack& stack = craft_grid_inventory.slot_at(i);
                 inventory_state.craft_input[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.craft_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.craft_input[i].icon_color,
+                                          inventory_state.craft_input[i].texture_uv);
                     inventory_state.craft_input[i].count = stack.count;
                 }
             }
             const lcu::items::ItemStack& result_stack = craft_grid_inventory.slot_at(kCraftGridResultSlotIndex);
             inventory_state.craft_result.has_item = !result_stack.is_empty();
             if (!result_stack.is_empty()) {
-                inventory_state.craft_result.icon_color = item_registry.definition_of(result_stack.item).icon_color;
+                resolve_item_display(result_stack.item, inventory_state.craft_result.icon_color,
+                                      inventory_state.craft_result.texture_uv);
                 inventory_state.craft_result.count = result_stack.count;
             }
             for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
                 inventory_state.main_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.main_slots[i].icon_color,
+                                          inventory_state.main_slots[i].texture_uv);
                     inventory_state.main_slots[i].count = stack.count;
                 }
             }
@@ -4040,13 +5318,15 @@ int main() {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
                 inventory_state.hotbar_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    inventory_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, inventory_state.hotbar_slots[i].icon_color,
+                                          inventory_state.hotbar_slots[i].texture_uv);
                     inventory_state.hotbar_slots[i].count = stack.count;
                 }
             }
             if (!cursor_stack.is_empty()) {
                 inventory_state.cursor.has_item = true;
-                inventory_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                resolve_item_display(cursor_stack.item, inventory_state.cursor.icon_color,
+                                      inventory_state.cursor.texture_uv);
                 inventory_state.cursor.count = cursor_stack.count;
                 const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
                 inventory_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
@@ -4068,7 +5348,8 @@ int main() {
                 const lcu::items::ItemStack& stack = workbench_grid_inventory.slot_at(i);
                 workbench_state.grid_input[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.grid_input[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.grid_input[i].icon_color,
+                                          workbench_state.grid_input[i].texture_uv);
                     workbench_state.grid_input[i].count = stack.count;
                 }
             }
@@ -4076,14 +5357,16 @@ int main() {
                 workbench_grid_inventory.slot_at(kWorkbenchGridResultSlotIndex);
             workbench_state.result.has_item = !wb_result_stack.is_empty();
             if (!wb_result_stack.is_empty()) {
-                workbench_state.result.icon_color = item_registry.definition_of(wb_result_stack.item).icon_color;
+                resolve_item_display(wb_result_stack.item, workbench_state.result.icon_color,
+                                      workbench_state.result.texture_uv);
                 workbench_state.result.count = wb_result_stack.count;
             }
             for (lcu::usize i = 0; i < lcu::ui::kInventoryMainSlotCount; ++i) {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(kHotbarSlotCount + i);
                 workbench_state.main_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.main_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.main_slots[i].icon_color,
+                                          workbench_state.main_slots[i].texture_uv);
                     workbench_state.main_slots[i].count = stack.count;
                 }
             }
@@ -4091,13 +5374,15 @@ int main() {
                 const lcu::items::ItemStack& stack = player_inventory.slot_at(i);
                 workbench_state.hotbar_slots[i].has_item = !stack.is_empty();
                 if (!stack.is_empty()) {
-                    workbench_state.hotbar_slots[i].icon_color = item_registry.definition_of(stack.item).icon_color;
+                    resolve_item_display(stack.item, workbench_state.hotbar_slots[i].icon_color,
+                                          workbench_state.hotbar_slots[i].texture_uv);
                     workbench_state.hotbar_slots[i].count = stack.count;
                 }
             }
             if (!cursor_stack.is_empty()) {
                 workbench_state.cursor.has_item = true;
-                workbench_state.cursor.icon_color = item_registry.definition_of(cursor_stack.item).icon_color;
+                resolve_item_display(cursor_stack.item, workbench_state.cursor.icon_color,
+                                      workbench_state.cursor.texture_uv);
                 workbench_state.cursor.count = cursor_stack.count;
                 const lcu::platform::Window::MousePosition mouse_pos = lcu::platform::Window::mouse_position();
                 workbench_state.cursor_x = static_cast<lcu::f32>(mouse_pos.x);
@@ -4110,7 +5395,7 @@ int main() {
         }
 
         const bool ui_had_quads = renderer.pending_ui_quad_count() > 0;
-        renderer.flush_ui_quads(ui2d_program);
+        renderer.flush_ui_quads(ui2d_program, atlas_texture, font_atlas_texture);
         if (ui_had_quads && bgfx::isValid(ui2d_program)) {
             ++draw_calls;
         }
@@ -4134,30 +5419,34 @@ int main() {
             lcu::ui::draw_debug_overlay(
                 renderer, renderer_desc.width, renderer_desc.height, last_known_fps,
                 {static_cast<lcu::u32>(world.loaded_chunk_count()), entity_count, draw_calls,
-                 job_system.unfinished_job_count()});
+                 job_system.unfinished_job_count()},
+                legacy_debug_text);
         }
         // Real hotbar item-count labels (Phase 47) - same options.
         // hud_enabled gate as queue_hud_quads above.
         if (options.hud_enabled) {
-            lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height);
+            lcu::ui::draw_hud_labels(renderer, hud_state, renderer_desc.width, renderer_desc.height,
+                                      legacy_debug_text);
         }
         // Real inventory screen slot-count labels (Phase 49.1) - drawn
         // after the debug overlay/HUD text for the same reason menu row
         // labels are (see below): the inventory screen is meant to be
         // readable while it's open.
         if (inventory_open) {
-            lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state);
+            lcu::ui::draw_inventory_screen_labels(renderer, inventory_layout, inventory_state, legacy_debug_text);
         }
         // Real workbench screen slot-count labels (Phase 50.3) - same
         // reasoning as the inventory screen's own labels above.
         if (workbench_open) {
-            lcu::ui::draw_crafting_table_screen_labels(renderer, workbench_layout, workbench_state);
+            lcu::ui::draw_crafting_table_screen_labels(renderer, workbench_layout, workbench_state,
+                                                        legacy_debug_text);
         }
         // Menu row labels last - drawn on top of (after) the debug
         // overlay/HUD text, since the pause menu is meant to be the one
         // thing actually readable while it's open.
         if (!menu_stack.empty()) {
-            lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height);
+            lcu::ui::draw_menu_labels(renderer, menu_stack, renderer_desc.width, renderer_desc.height,
+                                       legacy_debug_text);
         }
         renderer.end_frame();
 #endif
@@ -4193,6 +5482,15 @@ int main() {
     }
     for (auto& [coord, gpu_mesh] : gpu_meshes) {
         lcu::rendering::destroy_gpu_chunk_mesh(gpu_mesh);
+    }
+    for (auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
+        lcu::rendering::destroy_gpu_chunk_mesh(gpu_water_mesh);
+    }
+    renderer.destroy_texture(atlas_texture);
+    renderer.destroy_texture(font_atlas_texture);
+    renderer.destroy_texture(skin_texture);
+    for (const bgfx::TextureHandle& npc_skin_texture : npc_skin_textures) {
+        renderer.destroy_texture(npc_skin_texture);
     }
 #endif
 

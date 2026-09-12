@@ -48,6 +48,21 @@ As of the most recent phase, the game has:
   `mods/example_mod`).
 - Mobile touch input and quality-tier chunk-loading profiles, plus a
   benchmark suite (`tools/benchmark`) against real engine hot paths.
+- A real block/item texture atlas backed by procedurally-generated
+  MC-style textures, and a real procedurally-generated bitmap-font
+  atlas driving every HUD/menu/inventory label.
+- A real, Minecraft-proportioned player model (visible first-person arm
+  and third-person body) and matching visible NPCs, both wearing a real
+  skin system: 5 built-in procedural presets, a "Load own skin..." file
+  picker, and persistence/live-reload — see `PROJECT_STATE.md` for the
+  one environment-limited piece (the native file dialog itself can't be
+  driven headlessly).
+- Real alpha-blended, see-through water rendering and a real, growing
+  crack-texture overlay while breaking blocks.
+- Real farming: till farmland, plant wheat, watch it grow through 8
+  real stages under sufficient light, harvest it, and craft the wheat
+  into bread or planks into a wooden hoe via the real crafting grid
+  (not the quick-craft shortcut — see the Controls table below).
 
 See `CHANGELOG.md` for the full, phase-by-phase history of how this was
 built, and `DECISIONS.md` for the reasoning behind the non-obvious

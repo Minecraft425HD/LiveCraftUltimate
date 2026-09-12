@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -19,16 +20,26 @@ struct ItemDefinition {
     std::string namespaced_id;  // e.g. "game:stone", "example_mod:magic_wand"
     std::string display_name;
     u32 max_stack_size = 64;
-    // Real hotbar/inventory icon color (Phase 47, RGBA) - deferred back
-    // in Phase 44 ("no inventory/hotbar widget exists yet to consume
-    // it" - see DECISIONS.md) until a real consumer existed; the HUD
-    // hotbar is that consumer. No texture atlas exists (see
-    // BlockDefinition::color's own doc comment for why), so an item's
-    // "icon" is a flat colored quad, the same approach block tinting
-    // already uses. Default white so an item that never sets this still
+    // Real hotbar/inventory icon color (Phase 47, RGBA) - the real
+    // fallback tint an icon quad renders as when texture_index (below)
+    // is unset, and still the real alpha-multiplying tint even when it
+    // is set (see engine/ui's own *_renderer.cpp for the exact mix).
+    // Default white so an item that never sets either field still
     // renders as a real, visible (if undistinguished) icon rather than
     // invisible/black.
     math::Vec4 icon_color{1.0f, 1.0f, 1.0f, 1.0f};
+    // Real atlas texture index (Phase 56, lcu::assets::TileId) - unset
+    // (the real default) means "no real icon texture for this item
+    // yet", drawing the flat icon_color quad above instead, same as
+    // every item did before this phase. A plain std::optional<u32>, not
+    // lcu::assets::TileId directly - engine/items is EngineCore-level
+    // (built for VoxelServer too, see ARCHITECTURE.md), so it can't
+    // depend on engine/assets (LCU_BUILD_CLIENT-only) - each real
+    // item's own registration site in client/main.cpp is the only place
+    // that actually knows about lcu::assets::TileId, casting to u32
+    // there (mirrors BlockDefinition::top_texture's own reasoning
+    // exactly).
+    std::optional<u32> texture_index;
 };
 
 // Central, namespaced item type registry (mirrors BlockRegistry). ItemId

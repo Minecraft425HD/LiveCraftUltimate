@@ -45,7 +45,62 @@ block/rendering)**, **Phase 38 (continental/mountain terrain)**,
 48 (block highlight + hold-to-break + hand)**, **Phase 49
 (inventory screen + drag/drop + crafting grid)**, **Phase 50
 (item entities + crafting table)**, **Phase 51 (health, hunger,
-fall damage, respawn)**, and **Phase 52 (documentation)** are done; see
+fall damage, respawn)**, **Phase 52 (documentation)**, **Phase 53
+(texture-atlas pipeline - infrastructure only, no real textures yet)**,
+**Phase 54 (17 real procedurally-generated MC-style textures,
+not yet wired to any block/item at that point)**,
+**Phase 55 (blocks now reference real Phase-54 textures per-face)**,
+**Phase 56 (items - inventory, hotbar, hand, dropped items - now
+reference the same atlas, reusing a block's own texture where an item
+represents a block)**, and **Phase 57 (a real, own-design procedurally-
+generated bitmap-font atlas + `engine::ui::TextRenderer`, now the
+default way HUD/menu/inventory/workbench labels draw, with bgfx's old
+debug-text buffer kept as a real `LCU_LEGACY_DEBUG_TEXT=1` fallback)**
+are done - this closed out the fourth user-directed program (Phases
+53-57: texture atlas, procedural MC-style textures, blocks/items on the
+atlas, a bitmap font + real text renderer) in full. A fifth
+user-directed program (Phases 58-66: player model, visible NPCs, crack
+textures, transparent water, a real skin system, and full farming) is
+now in progress - **Phase 58 (a real Minecraft-proportioned 6-box
+Steve-like character model, a real procedurally-generated 64x64 skin in
+the actual MC UV layout, a first-person item-textured arm box replacing
+the old flat hand icon, and a real 3-way F5 perspective cycle)** and
+**Phase 59 (the 3 real `AIWander` entities now render as real visible
+Steve-like NPCs via `submit_character_model` - Phase 58's own body
+rendering, extracted and reused - with real wander-direction facing and
+walk/idle animation; debug wireframe boxes became a real toggle,
+default off)**, and **Phase 60 (the Phase 48.2 flat-darkening break-
+progress box is now a real alpha-blended, procedurally-generated
+crack-texture overlay, 10 real growing-damage stages sharing the
+existing block atlas)**, **Phase 61 (the long-dormant
+`ChunkMesh::water` layer is now real - water renders real
+alpha-blended, see-through geometry via a new face-visibility branch
+for transparent-vs-transparent boundaries, layer routing that reuses
+the existing `BlockDefinition::is_transparent` flag, and a real
+per-texel-alpha `fs_chunk.sc` change)**, **Phase 62 (the full skin
+system: 5 real procedural skins, a real `SkinCatalog` that also
+discovers uploaded PNG files, a real "Skins" menu screen with a real
+"Load own skin..." file-picker button wired to `SDL_ShowOpenFileDialog`,
+real options.txt persistence with startup fallback, real live-reload,
+and real independent per-NPC fixed skins)**, **Phase 63 (the real
+farming-foundation block-state system: a parallel per-voxel state
+array on `ChunkStorage`, chunk format v2 with real v1-file backward
+compatibility, a network `ChunkData` wire format that needed zero
+changes since it already carries whatever the upgraded serializer
+produces, and real state-awareness in `mesh_chunk_greedy` - no
+merging across different states, plus an opt-in state-to-texture-index
+mechanism no block uses yet)**, and **Phase 64 (real farming: `game:
+farmland`/`game:wheat` with 8 real growth stages, real procedural
+growth-stage textures, a real per-random-tick growth system gated on
+light and calibrated to +1 stage per real in-game day, real till/
+plant/harvest interactions, and real harvest drops)**, and **Phase 65
+(real farming-processing recipes: 3x `game:wheat` -> `game:bread` and
+2x `game:planks` -> a minimal `game:wooden_hoe`, both verified through
+the real 2x2/3x3 crafting grid via a new click-driven headless hook,
+plus the real discovery and documentation that the older Phase-23
+quick-craft shortcut structurally can't represent either recipe)** are
+done - see TASK_QUEUE.md for per-phase detail as each of the remaining
+1 phase lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2346,20 +2401,24 @@ None currently tracked.
   layers exist structurally but are always empty (no transparent block
   registered anywhere, and transparent-vs-transparent face rules are
   deliberately unimplemented until one exists — see DECISIONS.md).
-- No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
+- ~~No texture atlas/UV mapping validation — `MeshVertex.u`/`.v` are
   populated (quad-local, in block units) but nothing downstream
-  consumes or checks them yet, since there's no atlas (Phase 12).
+  consumes or checks them yet, since there's no atlas (Phase 12).~~
+  **Fixed** (Phases 53-56): a real 256x256 procedural-texture atlas
+  exists, `MeshVertex` gained `texture_index`, and every real block/item
+  in the game now renders through it - see CHANGELOG.md/BUILD_STATUS.md.
 - Shader compilation (`LCU_BUILD_SHADER_TOOLS`) is opt-in and OFF by
   default — most builds/CI runs won't have a real draw call unless this
   is explicitly turned on, since it adds real build time (shaderc +
   glslang/SPIRV-Tools/SPIRV-Cross/Dawn-Tint).
-- ~~Chunk shaders have no texturing — flat lit color only~~ **Partially
-  fixed** (Phase 26): real per-block/per-face color plus a subtle
-  procedural noise pattern now varies the surface, but it's still not
-  texturing - no texture atlas exists (Phase 12), `MeshVertex.u`/`.v`
-  are populated but unused downstream, and there's no per-block visual
-  detail beyond a flat tint + generic noise (no grain/bump/pattern
-  distinguishing e.g. stone from a hypothetical different gray block).
+- ~~Chunk shaders have no texturing — flat lit color only~~ **Fixed**
+  (Phases 26, then 53-55): Phase 26 added per-block/per-face color plus
+  procedural noise; Phases 53-55 added real atlas texturing on top - the
+  chunk shader now samples `s_atlas` per face using each block's own
+  top/side/bottom texture, mixed with the existing light factor.
+  `LCU_USE_TEXTURES=0` still keeps the Phase 26 color-only path working
+  as a real fallback (not just theoretically - both paths are exercised
+  by real headless runs every phase since 53).
 - No visual verification of any rendering exists or can exist in this
   sandbox — every claim above about the draw call is about the API
   calls succeeding (valid handles, no crash, bgfx accepts the shader
@@ -2407,9 +2466,11 @@ None currently tracked.
   would currently be dragging/tapping blind.
 - `QualityProfile` only controls chunk-load radius/vertical range so
   far — no render-distance-vs-loaded-distance split (both are the same
-  number today), no texture/shadow/particle quality tiers, since none
-  of those systems have more than one quality level to choose between
-  yet (no texture atlas, no shadows, no particles).
+  number today), no texture/shadow/particle quality tiers; a real
+  texture atlas exists now (Phase 53) but it's a single fixed
+  256x256 resolution with no lower-quality tier to switch to, and
+  there's still no shadow/particle system of any kind to have a
+  quality tier for.
 - Android/iOS: only `CMakePresets.json` entries exist and were
   re-verified structurally reachable (`android-arm64` fails only at
   NDK detection, as expected without one installed). No Gradle project,
@@ -2444,38 +2505,163 @@ None currently tracked.
   exist anywhere (`break_sound`/`place_sound` in `VoxelClient`), both
   procedurally generated sine tones — no real sound-effect content
   pipeline (loading/authoring actual game audio) exists yet.
-- `engine/ui::draw_debug_overlay` uses bgfx's built-in VGA-style
-  debug-text character buffer, not a real font/texture-atlas text
-  renderer — no texture atlas exists yet (brief section 12's content
-  pipeline is separate, larger work with no player-facing text to
-  justify it before this). Text is monospace ASCII only, fixed 8x16 (or
-  8x8) character cells, no styling beyond the VGA 16-color palette.
+- ~~`engine/ui::draw_debug_overlay` (and every other debug-text call
+  site - HUD item counts, menu labels, inventory/workbench slot counts)
+  still uses bgfx's built-in VGA-style debug-text character buffer, not
+  a real font/texture-atlas text renderer~~ **Fixed** (Phase 57): a
+  real, own-design procedurally-generated bitmap-font atlas
+  (`engine/assets::font_atlas.h`, ASCII 32-126, separate from the
+  Phase 53 block atlas) plus `engine::ui::TextRenderer` is now the
+  DEFAULT text-drawing path for all five of those functions, at real
+  pixel positions (no more character-cell rounding). bgfx's own
+  debug-text buffer stays available as a real, working fallback via
+  `LCU_LEGACY_DEBUG_TEXT=1` - not removed, just no longer the default.
+  Text is still monospace-only (no kerning) and limited to the same
+  ASCII 32-126 range the font atlas covers (a character outside that
+  falls back to '?').
 - The on-screen touch-control legend has no interactive elements of its
   own (no buttons a mouse/gamepad can click) — it draws where
   `TouchInputBackend`'s real touch-button rects are, for a player to
   see, but a desktop/gamepad player can't interact with it as a menu;
   `engine/ui` is presentation-only so far, not an input-routing/focus
   system for non-touch input devices.
-- No content pipeline exists for models/textures/sounds beyond what's
-  procedurally generated in code (worldgen's terrain, the greedy
-  mesher's geometry, `generate_sine_wave`'s tones) — "content" in brief
-  section 96's Phase 12 sense (imported/authored game assets) is still
-  entirely absent; every visual/audio element in this project today is
-  generated, not loaded.
+- No content pipeline exists for *imported/authored* models/textures/
+  sounds — "content" in brief section 96's Phase 12 sense (real files
+  authored outside this codebase and loaded at runtime) is still
+  entirely absent; every visual/audio element in this project remains
+  generated in code, not loaded from an asset file. This is now a
+  deliberate, standing scope decision, not just an unaddressed gap: the
+  Phase 53-57 directive itself fixed procedurally-generated 16x16
+  MC-style textures (Phase 54, `engine/assets::procedural_textures`)
+  and a procedurally-generated bitmap font (Phase 57) as the *real*
+  content pipeline for this project, specifically to avoid real MC
+  texture/font assets and their licensing - see DECISIONS.md. Phase
+  53's optional stb_image-based PNG loader (for a debug atlas dump only,
+  never a real content-loading path) was itself deliberately not
+  implemented either - see that phase's own DECISIONS.md entry.
+- The `vs_sky.sc`/`fs_sky.sc` shader family (skybox, wireframe/solid
+  boxes, and world billboards - `submit_world_billboard`, used for
+  dropped item entities) has no alpha blending (Phase 56 added real
+  texture sampling to this family but deliberately did not add
+  blending, out of that phase's own scope). A dropped item whose
+  texture has transparent pixels (e.g. `game:torch`'s flame/stem
+  cutout) renders those pixels solid black on its world billboard
+  rather than see-through - a real, accepted visual gap, not a bug, see
+  DECISIONS.md. Real leaf transparency has the identical shape of gap
+  (`game:leaves`'s alpha-0 holes render solid in-chunk too, unaffected
+  by Phase 56 since chunk rendering is a separate shader).
+- The Phase 58 character model's body yaw reads directly from
+  `camera.yaw` (the body always faces exactly where the camera looks,
+  horizontally) rather than a real independent, movement-driven facing
+  direction that lags behind the camera the way actual Minecraft's own
+  body/head yaw system does - a real, deliberate simplification (no
+  gameplay system in this project yet distinguishes "look direction"
+  from "movement direction" in any way a player could notice), see
+  DECISIONS.md. The player gets no idle/breathing animation (Phase 59
+  adds that for NPCs specifically, per the brief's own phasing - the
+  player itself still doesn't get one). Third-person camera distance
+  (`kThirdPersonDistance`) still has no real wall-collision pull-in - a
+  pre-existing gap from Phase 47, unchanged by Phase 58's own real
+  third-person-front addition.
+- The Phase 59 NPC walk-cycle animation speed is a fixed real constant
+  (`kNpcWalkCycleFrequency`), not scaled by each real `AIWander::
+  speed` - every NPC's legs swing at the same rate regardless of how
+  fast that specific NPC is actually moving, a real, deliberate
+  simplification (see DECISIONS.md; adding a real per-NPC rate would
+  mean exposing gameplay movement state to rendering purely for a
+  cosmetic need). Real networked remote-player avatars still have no
+  visible character model (only local `AIWander` NPCs do) - a remote
+  player still renders as, at most, a debug wireframe box when
+  `options.debug_overlay_enabled` is on, nothing at all otherwise.
+- The Phase 60 crack overlay covers all 6 faces of the targeted block
+  uniformly, not only the specific face the player is actually
+  breaking - a real, documented simplification (see DECISIONS.md;
+  `render_hit` doesn't currently expose which face was hit, and the
+  effect is still real and visible from every angle, just not face-
+  specific).
+- Phase 61 water transparency has no back-to-front sort between
+  separate water chunks' draw calls (a real, low-risk limitation - a
+  single contiguous water body renders correctly regardless of
+  inter-chunk draw order; only adjacent/overlapping separate
+  transparent volumes could show minor sorting artifacts, unverifiable
+  in this headless sandbox anyway). Leaves are still opaque (not
+  alpha-tested) - out of this phase's own water-only scope, a real
+  open choice per the brief's own wording (see DECISIONS.md). Light now
+  also passes through water, a real, accepted, directionally-correct
+  side effect of reusing `is_transparent` as both the water
+  visibility/layer-routing key and the pre-existing lighting-opacity
+  flag (see DECISIONS.md).
+- Phase 62's real "Load own skin..." button's native OS file-open
+  dialog (`SDL_ShowOpenFileDialog`) is still **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**: this headless sandbox has no desktop/portal
+  service for it to show, and being async/platform-native, it can't be
+  scripted the way a key press can. Everything downstream of "a real
+  file was chosen" (validation, copy into `assets/skins`, catalog
+  entry, live-reload, options.txt persistence) is exercised for real
+  via the `LCU_VERIFY_SKIN` hook instead (a real temp PNG stands in for
+  the user's own pick). A legacy 64x32 skin upload's synthesized left-
+  arm/left-leg pixels are an unmirrored copy of the same file's own
+  right-arm/right-leg pixels (real Minecraft flips this copy; a real,
+  documented simplification, see DECISIONS.md).
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No
   enchantments/anvil/potions** — no enchanting table, anvil repair, or
   brewing. **No Nether/End** — a single overworld dimension only. **No
   villagers/trading**. **No structures** (out of scope since Phase
-  38-41's own worldgen phases, still true). **No farming** — no crops,
-  no way to grow/harvest food; `game:apple`/`game:bread` (Phase 51)
-  therefore have no survival obtain path, only a direct debug-style
-  grant (`LCU_VERIFY_HEALTH`'s own setup). **No chat/server browser** —
+  38-41's own worldgen phases, still true). **No chat/server browser** —
   networked mode is still connect-by-port only, no in-game text
-  communication. **No skin customization**. All of these are explicit,
-  standing exclusions from the current multi-phase directive, not
-  phases that were attempted and fell short.
+  communication. All of these are explicit, standing exclusions from
+  the current multi-phase directive, not phases that were attempted
+  and fell short. (~~No skin customization~~ **Fixed** (Phase 62).
+  ~~No farming~~ **Fixed** (Phase 64) - wheat/farmland now exist; see
+  their own Known Limitations entries below and DECISIONS.md. `game:
+  apple`'s own debug-style-grant-only obtain path is unaffected -
+  apples still have no real survival source.)
+- Phase 64's real farming has real, documented scope limits: **wheat
+  is solid** (`has_collision=true`, not real Minecraft's walk-through
+  crop) - this project's raycast targeting is gated entirely on that
+  flag (see `game:water`'s own doc comment), so a non-collidable wheat
+  block would be untargetable/unharvestable; the same trade-off `game:
+  torch` already accepts. **Rendering is a full alpha-cutout cube, not
+  real cross/X-shaped crop geometry** - `mesh_chunk_greedy` has no
+  non-cube rendering path at all; the brief's own "cross_block"
+  category is real **PARTIAL**. **Growth is single-player/client-
+  authoritative only** - a networked player can't till/plant/harvest
+  at all yet (no server-side mirror exists, matching local `AIWander`'s
+  own scope split - see DECISIONS.md). A real, newly-discovered timing
+  caveat: this project's standard `LCU_VERIFY_*` regression sweep uses
+  `LCU_MAX_FRAMES=60`, which (confirmed by direct measurement while
+  building `LCU_VERIFY_FARMING`) can complete in well under 1 real
+  wall-clock second in this sandbox - meaning some EXISTING verify
+  hooks' own later real-time-gated pulses may never actually fire
+  within that standard sweep window (a real gap in the established
+  convention, not something Phase 64 caused; retroactively re-auditing
+  every prior hook's own frame count is out of this phase's own scope -
+  see DECISIONS.md). `LCU_VERIFY_FARMING` itself was confirmed for real
+  with a dedicated, much higher frame count instead (see BUILD_STATUS.
+  md for the exact command).
+- Phase 65's two new recipes (3 wheat -> bread, 2 planks -> wooden_hoe)
+  **cannot be crafted via the Phase 23 "quick-craft" shortcut**
+  (`Action::Craft`) — that shortcut dedupes held items down to one of
+  each distinct type before querying `RecipeRegistry`, so it
+  structurally cannot represent a recipe needing more than one of the
+  same item, no matter how much wheat/planks are held. Both recipes
+  work correctly through the real 2x2 inventory-screen grid and 3x3
+  workbench grid instead (place each unit into its own cell, same as a
+  real player would) — confirmed via a new `LCU_VERIFY_FARMING_CRAFT`
+  headless hook driving real mouse clicks. See DECISIONS.md for the
+  full reasoning. The wooden-hoe recipe is also a real, documented
+  simplification of Minecraft's own 2-stick-2-plank shape (2 planks
+  alone) since no `game:stick` item exists anywhere in this project.
+  Separately, re-measuring real per-frame wall-clock cost while
+  calibrating this hook's own `LCU_MAX_FRAMES` found the `dev-bgfx` and
+  `dev-nobgfx` build configs run the same scene at roughly a 20-40x
+  different real fps (bgfx much slower, even against the Noop backend,
+  since it still does real per-frame chunk-mesh/texture work the
+  non-bgfx path skips) — a real, newly-confirmed data point extending
+  Phase 64's own timing caveat above, not previously broken out by
+  build config anywhere in this project's docs.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

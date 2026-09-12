@@ -29,6 +29,7 @@ add_executable(VoxelTests
     game/systems/replication_protocol_test.cpp
     game/systems/item_entity_system_test.cpp
     game/systems/player_vitals_system_test.cpp
+    game/systems/crop_growth_system_test.cpp
     game/items/block_item_mapping_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp
@@ -56,6 +57,11 @@ target_link_libraries(VoxelTests PRIVATE
     Lcu::EngineCore
     Lcu::Game
     GTest::gtest_main
+    # chunk_serializer_test.cpp builds a real, standalone legacy v1
+    # payload by hand (Phase 63's own backward-compatibility test) -
+    # LcuSerialization itself only links zstd PRIVATE, so this needs its
+    # own direct link to reach <zstd.h>.
+    libzstd_static
 )
 
 # InputState is pure data (no SDL needed to test set_down/is_down); only
@@ -90,6 +96,24 @@ if(TARGET Lcu::Ui)
     target_sources(VoxelTests PRIVATE ui/menu_stack_test.cpp ui/hud_test.cpp ui/inventory_screen_test.cpp
                                        ui/crafting_table_screen_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Ui)
+endif()
+
+# TextureAtlas (Phase 53) is pure logic - no SDL/bgfx dependency at all
+# (see engine/assets/CMakeLists.txt) - built and tested in both the
+# bgfx and non-bgfx configs, same as Lcu::Ui above.
+if(TARGET Lcu::Assets)
+    target_sources(VoxelTests PRIVATE assets/texture_atlas_test.cpp assets/procedural_textures_test.cpp
+                                       assets/font_atlas_test.cpp assets/skin_texture_test.cpp
+                                       assets/skin_catalog_test.cpp)
+    target_link_libraries(VoxelTests PRIVATE Lcu::Assets)
+    # skin_catalog_test.cpp writes a real temporary PNG (via stb_image_
+    # write, declarations only - Lcu::StbImageWriteImpl is the one real
+    # translation unit compiling its implementation, kept out of this
+    # strict-warnings target, see third_party/CMakeLists.txt) to feed
+    # back into SkinCatalog::add_from_file() under test.
+    if(TARGET Lcu::StbImageWriteImpl)
+        target_link_libraries(VoxelTests PRIVATE Lcu::Stb Lcu::StbImageWriteImpl)
+    endif()
 endif()
 
 # Waveform/positional-audio math is pure logic (no real audio device

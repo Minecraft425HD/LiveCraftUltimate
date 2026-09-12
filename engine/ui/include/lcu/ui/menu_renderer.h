@@ -16,19 +16,22 @@ namespace lcu::ui {
 // Call before Renderer::flush_ui_quads(). No-op if `stack` is empty.
 void queue_menu_backdrop(rendering::Renderer& renderer, const MenuStack& stack, u32 screen_width, u32 screen_height);
 
-// Draws the current top screen's title plus each row's label/value as
-// real bgfx debug text (the same mechanism draw_debug_overlay already
-// uses - see its own doc comment for why no font/atlas renderer exists
-// yet). Does NOT call Renderer::clear_debug_text() itself (Phase 47
-// change - see debug_overlay.h's own updated doc comment: client/
-// main.cpp now owns the one real clear per frame, since up to three
-// systems share this buffer). Call this LAST among them, after
-// draw_debug_overlay()/draw_hud_labels(), so the menu's own rows are
-// the ones actually left on screen while it's open. Deliberately
-// separate from queue_menu_backdrop above: the quads need to be queued
-// before this frame's one flush_ui_quads() call, while the text is
-// drawn later, after the debug-text buffer is cleared - see
-// client/main.cpp for the real ordering. No-op if `stack` is empty.
-void draw_menu_labels(rendering::Renderer& renderer, const MenuStack& stack, u32 screen_width, u32 screen_height);
+// Draws the current top screen's title plus each row's label/value -
+// via the real lcu::ui::TextRenderer bitmap-font atlas by default, or
+// bgfx's built-in debug-text buffer when `legacy_debug_text` is true
+// (Phase 57 - see draw_debug_overlay's own doc comment and client/
+// main.cpp's LCU_LEGACY_DEBUG_TEXT). When `legacy_debug_text` is true,
+// this shares bgfx's debug-text buffer with draw_debug_overlay/
+// draw_hud_labels (client/main.cpp owns the one real
+// Renderer::clear_debug_text() call per frame, before any of them run -
+// call this one LAST among them so the menu's own rows are what's
+// actually left on screen while it's open); TextRenderer has no shared
+// buffer to clear or fight over, so that ordering constraint doesn't
+// apply when `legacy_debug_text` is false. Deliberately separate from
+// queue_menu_backdrop above: the quads need to be queued before this
+// frame's one flush_ui_quads() call, while the text is drawn after -
+// see client/main.cpp for the real ordering. No-op if `stack` is empty.
+void draw_menu_labels(rendering::Renderer& renderer, const MenuStack& stack, u32 screen_width, u32 screen_height,
+                       bool legacy_debug_text);
 
 }  // namespace lcu::ui

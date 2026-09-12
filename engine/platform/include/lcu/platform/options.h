@@ -24,10 +24,21 @@ struct Options {
     bool debug_overlay_enabled = false;
     KeyBindings key_bindings;
 
+    // Real, persisted player-skin choice (Phase 62, brief section
+    // 62.4) - either one of the 5 builtin lcu::assets::SkinPreset
+    // names or a custom uploaded skin's own file stem, resolved
+    // against a real lcu::assets::SkinCatalog at startup (client/
+    // main.cpp), falling back to "Steve" there if this name isn't
+    // found in that catalog (a skins-folder file the player deleted
+    // since, or a stale/corrupt value) - Options itself stays a plain
+    // string holder with no SkinCatalog dependency at all, the same
+    // separation KeyBindings already keeps from any real input device.
+    std::string skin_name = "Steve";
+
     // Real, human-editable `key=value` text format, one setting per
     // line, `#`-prefixed comment lines ignored - see options.cpp for
     // the exact key names (`mouse_sensitivity`, `fov`, `hud_enabled`,
-    // `debug_overlay_enabled`, and one `key.<action_name>`/
+    // `debug_overlay_enabled`, `skin`, and one `key.<action_name>`/
     // `key.<action_name>.alt` pair per rebindable Action, `.alt` only
     // written when that Action's second binding slot is actually
     // bound).

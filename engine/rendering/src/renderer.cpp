@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "lcu/assets/texture_atlas.h"
 #include "lcu/core/assert.h"
 #include "lcu/core/log.h"
 
@@ -44,6 +45,21 @@ Renderer::~Renderer() {
     if (initialized_) {
         if (bgfx::isValid(sky_light_scale_uniform_)) {
             bgfx::destroy(sky_light_scale_uniform_);
+        }
+        if (bgfx::isValid(use_textures_uniform_)) {
+            bgfx::destroy(use_textures_uniform_);
+        }
+        if (bgfx::isValid(tile_step_uniform_)) {
+            bgfx::destroy(tile_step_uniform_);
+        }
+        if (bgfx::isValid(tile_inset_uniform_)) {
+            bgfx::destroy(tile_inset_uniform_);
+        }
+        if (bgfx::isValid(atlas_sampler_)) {
+            bgfx::destroy(atlas_sampler_);
+        }
+        if (bgfx::isValid(font_sampler_)) {
+            bgfx::destroy(font_sampler_);
         }
         bgfx::shutdown();
     }
@@ -105,6 +121,23 @@ bool Renderer::init(const RendererDesc& desc) {
     // fs_chunk.sc.
     sky_light_scale_uniform_ = bgfx::createUniform("u_skyLightScale", bgfx::UniformType::Vec4);
 
+    // Phase 53 - texture-atlas uniforms/sampler. u_tileStep.xy is one
+    // atlas grid cell's pitch (1/kTilesPerRow), .zw its real inset
+    // (anti-bleed) visible width/height - both fixed atlas geometry, set
+    // once here rather than recomputed per submit_chunk_mesh call.
+    // u_tileInset.xy is the same inset expressed as a UV offset (added
+    // to each tile's own grid origin) - see fs_chunk.sc for the exact
+    // formula this feeds. See lcu::assets::texture_atlas.h for where
+    // these numbers come from.
+    use_textures_uniform_ = bgfx::createUniform("u_useTextures", bgfx::UniformType::Vec4);
+    tile_step_uniform_ = bgfx::createUniform("u_tileStep", bgfx::UniformType::Vec4);
+    tile_inset_uniform_ = bgfx::createUniform("u_tileInset", bgfx::UniformType::Vec4);
+    atlas_sampler_ = bgfx::createUniform("s_atlas", bgfx::UniformType::Sampler);
+
+    // Phase 57 - the font atlas's own separate sampler slot (bound to
+    // slot 1 by flush_ui_quads, `atlas_sampler_` above stays slot 0).
+    font_sampler_ = bgfx::createUniform("s_font", bgfx::UniformType::Sampler);
+
     initialized_ = true;
     return true;
 }
@@ -139,7 +172,7 @@ void Renderer::begin_frame(const math::Vec3& clear_color, f32 alpha) {
 
 void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle program,
                                   const math::Mat4& model, const math::Mat4& view, const math::Mat4& proj,
-                                  f32 sky_light_scale) {
+                                  f32 sky_light_scale, bgfx::TextureHandle atlas_texture, bool alpha_blend) {
     LCU_ASSERT(initialized_);
     if (!mesh.is_valid() || !bgfx::isValid(program)) {
         return;
@@ -149,10 +182,56 @@ void Renderer::submit_chunk_mesh(const GpuChunkMesh& mesh, bgfx::ProgramHandle p
     bgfx::setTransform(model.data());
     bgfx::setVertexBuffer(0, mesh.vertex_buffer);
     bgfx::setIndexBuffer(mesh.index_buffer);
-    bgfx::setState(BGFX_STATE_DEFAULT);
+    // Real translucent state (Phase 61) - see this function's own doc
+    // comment in renderer.h. BGFX_STATE_DEFAULT (every opaque chunk
+    // draw, unchanged) already includes WRITE_Z/DEPTH_TEST_LESS/CULL_CW/
+    // MSAA; the alpha-blended path keeps depth TESTING (so water still
+    // correctly hides behind solid terrain) but drops depth WRITING and
+    // adds real alpha blending instead.
+    const u64 state = alpha_blend ? (BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS |
+                                      BGFX_STATE_CULL_CW | BGFX_STATE_BLEND_ALPHA)
+                                   : BGFX_STATE_DEFAULT;
+    bgfx::setState(state);
     const f32 uniform_value[4] = {sky_light_scale, 0.0f, 0.0f, 0.0f};
     bgfx::setUniform(sky_light_scale_uniform_, uniform_value);
+
+    // Phase 53 - real atlas sampling, only when the caller actually
+    // bound one this draw (see this function's own doc comment on why
+    // atlas_texture's own validity IS u_useTextures, not a second,
+    // separately-tracked toggle).
+    const bool use_textures = bgfx::isValid(atlas_texture);
+    const f32 use_textures_value[4] = {use_textures ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    bgfx::setUniform(use_textures_uniform_, use_textures_value);
+    if (use_textures) {
+        constexpr f32 kPitch = 1.0f / static_cast<f32>(assets::kTilesPerRow);
+        constexpr f32 kInset = assets::kTileInsetTexels / static_cast<f32>(assets::kAtlasSize);
+        constexpr f32 kInner = (static_cast<f32>(assets::kTileSize) - 2.0f * assets::kTileInsetTexels) /
+                                static_cast<f32>(assets::kAtlasSize);
+        const f32 tile_step_value[4] = {kPitch, kPitch, kInner, kInner};
+        const f32 tile_inset_value[4] = {kInset, kInset, 0.0f, 0.0f};
+        bgfx::setUniform(tile_step_uniform_, tile_step_value);
+        bgfx::setUniform(tile_inset_uniform_, tile_inset_value);
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
+
     bgfx::submit(0, program);
+}
+
+bgfx::TextureHandle Renderer::create_texture_from_pixels(const u8* pixels, u32 width, u32 height) {
+    LCU_ASSERT(initialized_);
+    const bgfx::Memory* mem = bgfx::copy(pixels, width * height * 4);
+    // BGFX_SAMPLER_POINT (nearest filtering) + BGFX_SAMPLER_[UVW_]CLAMP
+    // baked into the texture itself, per Phase 53.1's own "Nearest-
+    // Filter, Clamp-Mode" requirement - see this function's own doc
+    // comment in renderer.h.
+    return bgfx::createTexture2D(static_cast<u16>(width), static_cast<u16>(height), false, 1,
+                                  bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP, mem);
+}
+
+void Renderer::destroy_texture(bgfx::TextureHandle handle) {
+    if (bgfx::isValid(handle)) {
+        bgfx::destroy(handle);
+    }
 }
 
 void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
@@ -163,14 +242,20 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
         return;
     }
 
-    // Position + color only - a dedicated minimal vertex format (see
-    // client/shaders/{vs_sky,fs_sky}.sc), deliberately not
-    // voxel::MeshVertex: the sky quad has no normal/UV/lighting concept,
-    // and reusing the chunk shader's format+lighting for it would be
-    // wrong (a light source rendering itself as "lit" makes no sense).
+    // Position + color, plus a real atlas UV/"use texture" pair (Phase
+    // 56) - always zero for this function (the sun/moon are never
+    // textured), but part of the one shared vertex format/layout every
+    // real vs_sky.sc/fs_sky.sc caller here uses (see fs_sky.sc and
+    // submit_world_billboard's own doc comment for the one real caller
+    // that DOES set these to something real). Deliberately not
+    // voxel::MeshVertex: this quad has no normal/lighting concept, and
+    // reusing the chunk shader's format+lighting for it would be wrong
+    // (a light source rendering itself as "lit" makes no sense).
     struct SkyVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 v0 = center - right * half_size - up * half_size;
@@ -178,10 +263,10 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
     const math::Vec3 v2 = center + right * half_size + up * half_size;
     const math::Vec3 v3 = center - right * half_size + up * half_size;
     const SkyVertex vertices[4] = {
-        {v0.x, v0.y, v0.z, color.x, color.y, color.z},
-        {v1.x, v1.y, v1.z, color.x, color.y, color.z},
-        {v2.x, v2.y, v2.z, color.x, color.y, color.z},
-        {v3.x, v3.y, v3.z, color.x, color.y, color.z},
+        {v0.x, v0.y, v0.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v1.x, v1.y, v1.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v2.x, v2.y, v2.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
+        {v3.x, v3.y, v3.z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f},
     };
     // Built from the camera's own right/up (see the billboard's caller),
     // so this winding already faces the camera - no backface culling is
@@ -194,6 +279,8 @@ void Renderer::submit_billboard(const math::Vec3& center, const math::Vec3& righ
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     // Transient buffers (Phase 27): this quad's position changes every
@@ -230,10 +317,13 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     }
 
     // Same minimal vertex format submit_billboard's SkyVertex already
-    // uses - position + flat color, no normal/UV/lighting concept.
+    // uses - position + flat color + a real, always-zero atlas UV/flag
+    // pair (Phase 56, see SkyVertex's own doc comment).
     struct LineVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 corners[8] = {
@@ -242,7 +332,7 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     };
     LineVertex vertices[8];
     for (u32 i = 0; i < 8; ++i) {
-        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f};
     }
     // 12 edges of a box, each as one line-list segment (2 indices) -
     // bottom face, top face, then the 4 verticals connecting them.
@@ -256,6 +346,8 @@ void Renderer::submit_wireframe_box(const math::Vec3& min, const math::Vec3& max
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     // Transient buffers, same reasoning as submit_billboard: an
@@ -294,6 +386,8 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     struct BoxVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
     const math::Vec3 corners[8] = {
@@ -302,7 +396,7 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     };
     BoxVertex vertices[8];
     for (u32 i = 0; i < 8; ++i) {
-        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z};
+        vertices[i] = {corners[i].x, corners[i].y, corners[i].z, color.x, color.y, color.z, 0.0f, 0.0f, 0.0f};
     }
     // 12 triangles, 2 per face, standard box winding (outward-facing,
     // though no backface culling is set below, matching
@@ -321,6 +415,8 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     if (bgfx::getAvailTransientVertexBuffer(8, layout) < 8 || bgfx::getAvailTransientIndexBuffer(36) < 36) {
@@ -345,9 +441,101 @@ void Renderer::submit_solid_box(const math::Vec3& min, const math::Vec3& max, co
     bgfx::submit(0, program);
 }
 
+void Renderer::submit_textured_box(const std::array<math::Vec3, 8>& corners, const math::Vec3& color,
+                                    bgfx::ProgramHandle program, const math::Mat4& view, const math::Mat4& proj,
+                                    bgfx::TextureHandle atlas_texture, const BoxUvSet& uvs, bool alpha_blend) {
+    LCU_ASSERT(initialized_);
+    if (!bgfx::isValid(program)) {
+        return;
+    }
+
+    struct BoxVertex {
+        f32 x, y, z;
+        f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
+    };
+
+    const bool use_texture = bgfx::isValid(atlas_texture);
+    const f32 use_texture_value = use_texture ? 1.0f : 0.0f;
+
+    // Same corner indices/winding submit_solid_box's own min/max-derived
+    // table uses, but 4 fresh vertices per face (not 8 shared corners)
+    // so each face can carry its own independent UV rect - see this
+    // function's own doc comment in renderer.h.
+    const auto face = [&](u32 i0, u32 i1, u32 i2, u32 i3, const BoxFaceUv& uv) {
+        const math::Vec3& p0 = corners[i0];
+        const math::Vec3& p1 = corners[i1];
+        const math::Vec3& p2 = corners[i2];
+        const math::Vec3& p3 = corners[i3];
+        return std::array<BoxVertex, 4>{
+            BoxVertex{p0.x, p0.y, p0.z, color.x, color.y, color.z, uv.u0, uv.v0, use_texture_value},
+            BoxVertex{p1.x, p1.y, p1.z, color.x, color.y, color.z, uv.u1, uv.v0, use_texture_value},
+            BoxVertex{p2.x, p2.y, p2.z, color.x, color.y, color.z, uv.u1, uv.v1, use_texture_value},
+            BoxVertex{p3.x, p3.y, p3.z, color.x, color.y, color.z, uv.u0, uv.v1, use_texture_value},
+        };
+    };
+
+    const std::array<std::array<BoxVertex, 4>, 6> faces = {
+        face(0, 1, 2, 3, uvs.neg_z),  // -Z (min.z) face
+        face(5, 4, 7, 6, uvs.pos_z),  // +Z (max.z) face
+        face(4, 0, 3, 7, uvs.neg_x),  // -X (min.x) face
+        face(1, 5, 6, 2, uvs.pos_x),  // +X (max.x) face
+        face(4, 5, 1, 0, uvs.neg_y),  // -Y (min.y) face
+        face(3, 2, 6, 7, uvs.pos_y),  // +Y (max.y) face
+    };
+
+    std::array<BoxVertex, 24> vertices{};
+    for (u32 f = 0; f < 6; ++f) {
+        for (u32 v = 0; v < 4; ++v) {
+            vertices[f * 4 + v] = faces[f][v];
+        }
+    }
+    std::array<u16, 36> indices{};
+    for (u32 f = 0; f < 6; ++f) {
+        const u16 base = static_cast<u16>(f * 4);
+        const u16 face_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                      base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+        std::memcpy(&indices[f * 6], face_indices, sizeof(face_indices));
+    }
+
+    bgfx::VertexLayout layout;
+    layout.begin()
+        .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
+        .end();
+
+    if (bgfx::getAvailTransientVertexBuffer(24, layout) < 24 || bgfx::getAvailTransientIndexBuffer(36) < 36) {
+        return;
+    }
+    bgfx::TransientVertexBuffer tvb;
+    bgfx::TransientIndexBuffer tib;
+    bgfx::allocTransientVertexBuffer(&tvb, 24, layout);
+    bgfx::allocTransientIndexBuffer(&tib, 36);
+    std::memcpy(tvb.data, vertices.data(), vertices.size() * sizeof(BoxVertex));
+    std::memcpy(tib.data, indices.data(), indices.size() * sizeof(u16));
+
+    bgfx::setViewTransform(0, view.data(), proj.data());
+    bgfx::setVertexBuffer(0, &tvb);
+    bgfx::setIndexBuffer(&tib);
+    if (use_texture) {
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
+    // Real alpha blending (Phase 60) for the one real caller that needs
+    // it (the break-progress crack overlay) - see this function's own
+    // doc comment in renderer.h. No depth write either way, matching
+    // every other real per-frame world-space primitive here.
+    const u64 blend_state = alpha_blend ? BGFX_STATE_BLEND_ALPHA : 0;
+    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_DEPTH_TEST_LESS | blend_state);
+    bgfx::submit(0, program);
+}
+
 void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3& right, const math::Vec3& up,
                                        f32 half_size, const math::Vec3& color, bgfx::ProgramHandle program,
-                                       const math::Mat4& view, const math::Mat4& proj) {
+                                       const math::Mat4& view, const math::Mat4& proj,
+                                       bgfx::TextureHandle atlas_texture, f32 u0, f32 v0, f32 u1, f32 v1) {
     LCU_ASSERT(initialized_);
     if (!bgfx::isValid(program)) {
         return;
@@ -355,21 +543,29 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
 
     // Same minimal vertex format every other flat-color debug/world
     // primitive here already uses (see submit_billboard's own doc
-    // comment on why not voxel::MeshVertex).
+    // comment on why not voxel::MeshVertex) - the one real caller (this
+    // function) that ever sets the trailing UV/use_texture pair to
+    // something other than all-zero (Phase 56 - see this function's own
+    // doc comment in renderer.h).
     struct BillboardVertex {
         f32 x, y, z;
         f32 r, g, b;
+        f32 u, v;
+        f32 use_texture;
     };
 
-    const math::Vec3 v0 = center - right * half_size - up * half_size;
-    const math::Vec3 v1 = center + right * half_size - up * half_size;
-    const math::Vec3 v2 = center + right * half_size + up * half_size;
-    const math::Vec3 v3 = center - right * half_size + up * half_size;
+    const bool use_texture = bgfx::isValid(atlas_texture);
+    const f32 use_texture_value = use_texture ? 1.0f : 0.0f;
+
+    const math::Vec3 v0_pos = center - right * half_size - up * half_size;
+    const math::Vec3 v1_pos = center + right * half_size - up * half_size;
+    const math::Vec3 v2_pos = center + right * half_size + up * half_size;
+    const math::Vec3 v3_pos = center - right * half_size + up * half_size;
     const BillboardVertex vertices[4] = {
-        {v0.x, v0.y, v0.z, color.x, color.y, color.z},
-        {v1.x, v1.y, v1.z, color.x, color.y, color.z},
-        {v2.x, v2.y, v2.z, color.x, color.y, color.z},
-        {v3.x, v3.y, v3.z, color.x, color.y, color.z},
+        {v0_pos.x, v0_pos.y, v0_pos.z, color.x, color.y, color.z, u0, v0, use_texture_value},
+        {v1_pos.x, v1_pos.y, v1_pos.z, color.x, color.y, color.z, u1, v0, use_texture_value},
+        {v2_pos.x, v2_pos.y, v2_pos.z, color.x, color.y, color.z, u1, v1, use_texture_value},
+        {v3_pos.x, v3_pos.y, v3_pos.z, color.x, color.y, color.z, u0, v1, use_texture_value},
     };
     const u16 indices[6] = {0, 1, 2, 0, 2, 3};
 
@@ -377,6 +573,8 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
     layout.begin()
         .add(bgfx::Attrib::Position, 3, bgfx::AttribType::Float)
         .add(bgfx::Attrib::Color0, 3, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
+        .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
         .end();
 
     if (bgfx::getAvailTransientVertexBuffer(4, layout) < 4 || bgfx::getAvailTransientIndexBuffer(6) < 6) {
@@ -392,6 +590,9 @@ void Renderer::submit_world_billboard(const math::Vec3& center, const math::Vec3
     bgfx::setViewTransform(0, view.data(), proj.data());
     bgfx::setVertexBuffer(0, &tvb);
     bgfx::setIndexBuffer(&tib);
+    if (use_texture) {
+        bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+    }
     // Real depth test against terrain, no depth write - same reasoning
     // submit_wireframe_box/submit_solid_box's own comments give for a
     // per-frame, moving object; drawn into view 0 (terrain), not
@@ -407,10 +608,10 @@ void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::V
     const f32 right = x + width;
     const f32 top = y;
     const f32 bottom = y + height;
-    const UiVertex2D v0{left, top, 0.0f, 0.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v1{right, top, 1.0f, 0.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v2{right, bottom, 1.0f, 1.0f, color.x, color.y, color.z, color.w};
-    const UiVertex2D v3{left, bottom, 0.0f, 1.0f, color.x, color.y, color.z, color.w};
+    const UiVertex2D v0{left, top, 0.0f, 0.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v1{right, top, 1.0f, 0.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v2{right, bottom, 1.0f, 1.0f, color.x, color.y, color.z, color.w, 0.0f};
+    const UiVertex2D v3{left, bottom, 0.0f, 1.0f, color.x, color.y, color.z, color.w, 0.0f};
 
     const auto base = static_cast<u16>(ui_vertices_.size());
     ui_vertices_.push_back(v0);
@@ -422,7 +623,54 @@ void Renderer::submit_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::V
     ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
 }
 
-void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
+void Renderer::submit_textured_ui_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0,
+                                        f32 u1, f32 v1) {
+    LCU_ASSERT(initialized_);
+
+    const f32 left = x;
+    const f32 right = x + width;
+    const f32 top = y;
+    const f32 bottom = y + height;
+    const UiVertex2D tv0{left, top, u0, v0, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv1{right, top, u1, v0, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv2{right, bottom, u1, v1, color.x, color.y, color.z, color.w, 1.0f};
+    const UiVertex2D tv3{left, bottom, u0, v1, color.x, color.y, color.z, color.w, 1.0f};
+
+    const auto base = static_cast<u16>(ui_vertices_.size());
+    ui_vertices_.push_back(tv0);
+    ui_vertices_.push_back(tv1);
+    ui_vertices_.push_back(tv2);
+    ui_vertices_.push_back(tv3);
+    const u16 quad_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                  base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+    ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
+}
+
+void Renderer::submit_text_glyph_quad(f32 x, f32 y, f32 width, f32 height, const math::Vec4& color, f32 u0, f32 v0,
+                                       f32 u1, f32 v1) {
+    LCU_ASSERT(initialized_);
+
+    const f32 left = x;
+    const f32 right = x + width;
+    const f32 top = y;
+    const f32 bottom = y + height;
+    const UiVertex2D gv0{left, top, u0, v0, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv1{right, top, u1, v0, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv2{right, bottom, u1, v1, color.x, color.y, color.z, color.w, 2.0f};
+    const UiVertex2D gv3{left, bottom, u0, v1, color.x, color.y, color.z, color.w, 2.0f};
+
+    const auto base = static_cast<u16>(ui_vertices_.size());
+    ui_vertices_.push_back(gv0);
+    ui_vertices_.push_back(gv1);
+    ui_vertices_.push_back(gv2);
+    ui_vertices_.push_back(gv3);
+    const u16 quad_indices[6] = {base, static_cast<u16>(base + 1), static_cast<u16>(base + 2),
+                                  base, static_cast<u16>(base + 2), static_cast<u16>(base + 3)};
+    ui_indices_.insert(ui_indices_.end(), std::begin(quad_indices), std::end(quad_indices));
+}
+
+void Renderer::flush_ui_quads(bgfx::ProgramHandle program, bgfx::TextureHandle atlas_texture,
+                               bgfx::TextureHandle font_atlas_texture) {
     LCU_ASSERT(initialized_);
 
     if (bgfx::isValid(program) && !ui_vertices_.empty()) {
@@ -431,6 +679,7 @@ void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
             .add(bgfx::Attrib::Position, 2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::TexCoord0, 2, bgfx::AttribType::Float)
             .add(bgfx::Attrib::Color0, 4, bgfx::AttribType::Float)
+            .add(bgfx::Attrib::TexCoord1, 1, bgfx::AttribType::Float)
             .end();
 
         const auto vertex_count = static_cast<u32>(ui_vertices_.size());
@@ -452,6 +701,22 @@ void Renderer::flush_ui_quads(bgfx::ProgramHandle program) {
             bgfx::setViewTransform(kUi2dViewId, math::Mat4::identity().data(), proj.data());
             bgfx::setVertexBuffer(0, &tvb);
             bgfx::setIndexBuffer(&tib);
+            // Real atlas binding (Phase 56) - only when actually handed
+            // one; every queued quad's own per-vertex use_texture flag
+            // (set by submit_ui_quad vs. submit_textured_ui_quad) is
+            // what actually decides whether fs_ui2d.sc samples it, same
+            // "invalid handle, never sampled" contract every other real
+            // atlas_texture parameter in this class establishes.
+            if (bgfx::isValid(atlas_texture)) {
+                bgfx::setTexture(0, atlas_sampler_, atlas_texture);
+            }
+            // Real font-atlas binding (Phase 57) - same "only bound
+            // when actually handed one" contract as atlas_texture
+            // above, its own separate slot (1, s_font) so both atlases
+            // can be sampled within this one draw call.
+            if (bgfx::isValid(font_atlas_texture)) {
+                bgfx::setTexture(1, font_sampler_, font_atlas_texture);
+            }
             // No depth test/write (2D overlay, always on top - see
             // kUi2dViewId's own comment), real alpha blending (a menu
             // background or a semi-transparent slot highlight is real,
