@@ -152,6 +152,58 @@ if(LCU_BUILD_SCRIPTING)
 endif()
 
 # ---------------------------------------------------------------------------
+# stb (stb_image.h + stb_image_write.h) — real PNG decode for Phase 62 skin
+# file uploads (engine/assets::SkinCatalog::add_from_file) and PNG encode
+# for this project's own test fixtures (tests/assets/skin_catalog_test.cpp
+# writes a real temporary PNG to feed back into the decoder it's testing).
+# Public-domain/MIT single-header libraries with no build system of their
+# own, so FetchContent_Populate() just fetches the source and a plain
+# INTERFACE include-only target exposes it - same pattern as Lua's onelua.c
+# above, minus the compiled library (nothing to compile: callers include the
+# .h directly and define *_IMPLEMENTATION themselves, exactly once, in
+# skin_catalog.cpp). Pinned to master's tip commit (stb has no version tags
+# at all - transcribed via `git ls-remote --tags`, confirming none exist).
+# ---------------------------------------------------------------------------
+if(LCU_BUILD_CLIENT)
+    FetchContent_Declare(
+        stb
+        GIT_REPOSITORY https://github.com/nothings/stb.git
+        GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(stb)
+    if(NOT stb_POPULATED)
+        FetchContent_Populate(stb)
+    endif()
+
+    add_library(Stb INTERFACE)
+    add_library(Lcu::Stb ALIAS Stb)
+    target_include_directories(Stb INTERFACE ${stb_SOURCE_DIR})
+
+    # The one real translation unit that actually compiles stb_image's
+    # implementation (STB_IMAGE_IMPLEMENTATION), kept in its OWN target
+    # deliberately never passed through lcu_apply_common_options() - see
+    # stb_image_impl.cpp's own doc comment for why. Every other target
+    # only ever sees stb_image.h's declarations (via Lcu::Stb's include
+    # dir), which are warning-clean.
+    add_library(StbImageImpl STATIC ${CMAKE_CURRENT_SOURCE_DIR}/stb_image_impl.cpp)
+    add_library(Lcu::StbImageImpl ALIAS StbImageImpl)
+    target_link_libraries(StbImageImpl PUBLIC Stb)
+
+    # Same isolation, for stb_image_write.h - this project's own test
+    # fixtures (tests/assets/skin_catalog_test.cpp) encode a real PNG to
+    # feed back into the decoder under test, and VoxelClient's own
+    # LCU_VERIFY_SKIN headless hook (client/main.cpp) does the same to
+    # stand in for a real user-selected file (the real OS file-open
+    # dialog can't be scripted in a headless sandbox).
+    if(LCU_BUILD_TESTS OR LCU_BUILD_CLIENT)
+        add_library(StbImageWriteImpl STATIC ${CMAKE_CURRENT_SOURCE_DIR}/stb_image_write_impl.cpp)
+        add_library(Lcu::StbImageWriteImpl ALIAS StbImageWriteImpl)
+        target_link_libraries(StbImageWriteImpl PUBLIC Stb)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Google Benchmark — micro-benchmarks (tools/benchmark, Phase 11). Same
 # vendor/ecosystem as GoogleTest, so it needs no separate justification -
 # it's the standard tool for exactly this job. BENCHMARK_ENABLE_TESTING/

@@ -52,26 +52,46 @@ constexpr SkinRect kRegionRects[static_cast<u32>(SkinRegion::Count)] = {
     {44, 52, 4, 12}, // LeftArmBack
 };
 
-constexpr std::array<u8, 4> kSkinTone{225, 170, 130, 255};
-constexpr std::array<u8, 4> kHairBrown{90, 60, 35, 255};
-constexpr std::array<u8, 4> kShirtGreen{60, 140, 60, 255};
-constexpr std::array<u8, 4> kPantsBlue{50, 70, 150, 255};
+// One preset's 4 flat material colors - hair, exposed skin (face/
+// hands), shirt (torso + both arms, long-sleeved), pants (both legs).
+// The one flat material color per region stays a real, deliberately
+// simple choice (brief section 58.4 asks for "Hautfarbe, blaue Hose,
+// grünes Shirt, braune Haare", not per-pixel detail) - Phase 62 only
+// adds more palettes of the same 4 colors, not new per-pixel pattern
+// logic.
+struct SkinPalette {
+    std::array<u8, 4> hair;
+    std::array<u8, 4> skin_tone;
+    std::array<u8, 4> shirt;
+    std::array<u8, 4> pants;
+};
 
-// The one flat material color painted across each region's own full
-// rect - a real, deliberately simple first pass (brief section 58.4
-// asks for "Hautfarbe, blaue Hose, grünes Shirt, braune Haare", not
-// per-pixel detail); Phase 62's own additional skins can add real
-// pattern/noise later if wanted, this default stays flat and legible.
-constexpr std::array<u8, 4> material_for(SkinRegion region) {
+// Steve (Phase 58's own default), Alex (real MC's own second default
+// skin - strawberry-blonde hair, paler skin, lime shirt, tan pants),
+// two further color variants (Red/Cyan - same Steve-like skin tone and
+// hair, different shirt/pants colors, the brief's own "2 Farbvarianten"
+// literally just needing two more colors), and a Ninja skin (all-black
+// hair/shirt/pants, dark skin_tone so the whole head reads as a
+// covered mask rather than an exposed face - the same 4-region split,
+// just every material darkened, no new region carve-out needed).
+constexpr std::array<SkinPalette, static_cast<u32>(SkinPreset::Count)> kPalettes{{
+    /* Steve */ {{90, 60, 35, 255}, {225, 170, 130, 255}, {60, 140, 60, 255}, {50, 70, 150, 255}},
+    /* Alex  */ {{190, 110, 60, 255}, {235, 190, 160, 255}, {60, 170, 130, 255}, {120, 90, 60, 255}},
+    /* Red   */ {{40, 30, 25, 255}, {210, 160, 120, 255}, {170, 40, 40, 255}, {60, 60, 65, 255}},
+    /* Cyan  */ {{40, 30, 25, 255}, {210, 160, 120, 255}, {40, 150, 170, 255}, {35, 55, 90, 255}},
+    /* Ninja */ {{15, 15, 18, 255}, {45, 45, 50, 255}, {20, 20, 24, 255}, {15, 15, 18, 255}},
+}};
+
+constexpr const std::array<u8, 4>& material_for(const SkinPalette& palette, SkinRegion region) {
     switch (region) {
         case SkinRegion::HeadTop:
         case SkinRegion::HeadBack:
-            return kHairBrown;
+            return palette.hair;
         case SkinRegion::HeadBottom:
         case SkinRegion::HeadRight:
         case SkinRegion::HeadFront:
         case SkinRegion::HeadLeft:
-            return kSkinTone;
+            return palette.skin_tone;
         case SkinRegion::RightLegTop:
         case SkinRegion::RightLegBottom:
         case SkinRegion::RightLegRight:
@@ -84,10 +104,10 @@ constexpr std::array<u8, 4> material_for(SkinRegion region) {
         case SkinRegion::LeftLegFront:
         case SkinRegion::LeftLegLeft:
         case SkinRegion::LeftLegBack:
-            return kPantsBlue;
+            return palette.pants;
         default:
             // Torso + both arms (long-sleeved shirt covers the whole arm).
-            return kShirtGreen;
+            return palette.shirt;
     }
 }
 
@@ -108,14 +128,23 @@ SkinUvRange skin_uv_range(SkinRegion region) {
     return range;
 }
 
-std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_default_skin_pixels() {
+SkinPixelRect skin_pixel_rect(SkinRegion region) {
+    LCU_ASSERT(region != SkinRegion::Count);
+    const SkinRect& rect = kRegionRects[static_cast<u32>(region)];
+    return {rect.x, rect.y, rect.w, rect.h};
+}
+
+std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_skin_pixels(SkinPreset preset) {
+    LCU_ASSERT(preset != SkinPreset::Count);
+    const SkinPalette& palette = kPalettes[static_cast<u32>(preset)];
+
     std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> pixels{};
     pixels.fill(0);
 
     for (u32 i = 0; i < static_cast<u32>(SkinRegion::Count); ++i) {
         const auto region = static_cast<SkinRegion>(i);
         const SkinRect& rect = kRegionRects[i];
-        const std::array<u8, 4> color = material_for(region);
+        const std::array<u8, 4>& color = material_for(palette, region);
 
         for (u32 y = rect.y; y < rect.y + rect.h; ++y) {
             for (u32 x = rect.x; x < rect.x + rect.w; ++x) {
@@ -129,6 +158,39 @@ std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_defaul
     }
 
     return pixels;
+}
+
+std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_default_skin_pixels() {
+    return generate_skin_pixels(SkinPreset::Steve);
+}
+
+const char* skin_preset_name(SkinPreset preset) {
+    switch (preset) {
+        case SkinPreset::Steve:
+            return "Steve";
+        case SkinPreset::Alex:
+            return "Alex";
+        case SkinPreset::Red:
+            return "Red";
+        case SkinPreset::Cyan:
+            return "Cyan";
+        case SkinPreset::Ninja:
+            return "Ninja";
+        default:
+            LCU_ASSERT(false && "unreachable SkinPreset");
+            return "";
+    }
+}
+
+bool parse_skin_preset_name(std::string_view name, SkinPreset& out) {
+    for (u32 i = 0; i < static_cast<u32>(SkinPreset::Count); ++i) {
+        const auto preset = static_cast<SkinPreset>(i);
+        if (name == skin_preset_name(preset)) {
+            out = preset;
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace lcu::assets

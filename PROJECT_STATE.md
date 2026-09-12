@@ -72,14 +72,19 @@ walk/idle animation; debug wireframe boxes became a real toggle,
 default off)**, and **Phase 60 (the Phase 48.2 flat-darkening break-
 progress box is now a real alpha-blended, procedurally-generated
 crack-texture overlay, 10 real growing-damage stages sharing the
-existing block atlas)**, and **Phase 61 (the long-dormant
+existing block atlas)**, **Phase 61 (the long-dormant
 `ChunkMesh::water` layer is now real - water renders real
 alpha-blended, see-through geometry via a new face-visibility branch
 for transparent-vs-transparent boundaries, layer routing that reuses
 the existing `BlockDefinition::is_transparent` flag, and a real
-per-texel-alpha `fs_chunk.sc` change)** are done - see TASK_QUEUE.md
+per-texel-alpha `fs_chunk.sc` change)**, and **Phase 62 (the full skin
+system: 5 real procedural skins, a real `SkinCatalog` that also
+discovers uploaded PNG files, a real "Skins" menu screen with a real
+"Load own skin..." file-picker button wired to `SDL_ShowOpenFileDialog`,
+real options.txt persistence with startup fallback, real live-reload,
+and real independent per-NPC fixed skins)** are done - see TASK_QUEUE.md
 for per-phase detail as each of the remaining
-5 phases lands. See
+4 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2570,6 +2575,18 @@ None currently tracked.
   side effect of reusing `is_transparent` as both the water
   visibility/layer-routing key and the pre-existing lighting-opacity
   flag (see DECISIONS.md).
+- Phase 62's real "Load own skin..." button's native OS file-open
+  dialog (`SDL_ShowOpenFileDialog`) is still **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**: this headless sandbox has no desktop/portal
+  service for it to show, and being async/platform-native, it can't be
+  scripted the way a key press can. Everything downstream of "a real
+  file was chosen" (validation, copy into `assets/skins`, catalog
+  entry, live-reload, options.txt persistence) is exercised for real
+  via the `LCU_VERIFY_SKIN` hook instead (a real temp PNG stands in for
+  the user's own pick). A legacy 64x32 skin upload's synthesized left-
+  arm/left-leg pixels are an unmirrored copy of the same file's own
+  right-arm/right-leg pixels (real Minecraft flips this copy; a real,
+  documented simplification, see DECISIONS.md).
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No
@@ -2581,9 +2598,11 @@ None currently tracked.
   therefore have no survival obtain path, only a direct debug-style
   grant (`LCU_VERIFY_HEALTH`'s own setup). **No chat/server browser** —
   networked mode is still connect-by-port only, no in-game text
-  communication. **No skin customization**. All of these are explicit,
-  standing exclusions from the current multi-phase directive, not
-  phases that were attempted and fell short.
+  communication. All of these are explicit, standing exclusions from
+  the current multi-phase directive, not phases that were attempted
+  and fell short. (~~No skin customization~~ **Fixed** (Phase 62): a
+  real, full skin system now exists - see its own Known Limitations
+  entry below.)
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

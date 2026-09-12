@@ -97,8 +97,17 @@ endif()
 # bgfx and non-bgfx configs, same as Lcu::Ui above.
 if(TARGET Lcu::Assets)
     target_sources(VoxelTests PRIVATE assets/texture_atlas_test.cpp assets/procedural_textures_test.cpp
-                                       assets/font_atlas_test.cpp assets/skin_texture_test.cpp)
+                                       assets/font_atlas_test.cpp assets/skin_texture_test.cpp
+                                       assets/skin_catalog_test.cpp)
     target_link_libraries(VoxelTests PRIVATE Lcu::Assets)
+    # skin_catalog_test.cpp writes a real temporary PNG (via stb_image_
+    # write, declarations only - Lcu::StbImageWriteImpl is the one real
+    # translation unit compiling its implementation, kept out of this
+    # strict-warnings target, see third_party/CMakeLists.txt) to feed
+    # back into SkinCatalog::add_from_file() under test.
+    if(TARGET Lcu::StbImageWriteImpl)
+        target_link_libraries(VoxelTests PRIVATE Lcu::Stb Lcu::StbImageWriteImpl)
+    endif()
 endif()
 
 # Waveform/positional-audio math is pure logic (no real audio device

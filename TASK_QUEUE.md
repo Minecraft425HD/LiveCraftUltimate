@@ -2546,6 +2546,45 @@ gap); light now also passes through water as a real, accepted,
 directionally-correct side effect of reusing `is_transparent` for both
 layer routing and lighting opacity (see DECISIONS.md).
 
+## Phase 62 — Skins (full version)
+
+- [x] 5 real procedural skins (`SkinPreset::{Steve,Alex,Red,Cyan,
+  Ninja}`), `Steve` byte-identical to Phase 58's old default.
+- [x] New `lcu::assets::SkinCatalog` - the 5 builtins plus every real
+  `*.png` in `assets/skins` (real `std::filesystem` scan); `add_from_
+  file()` validates via real stb_image (decodable, 64x64 or legacy
+  64x32), copies into `assets/skins/<stem>.png`, adds/updates a real
+  entry - never crashes on an invalid file.
+- [x] New dependency: stb_image + stb_image_write, each compiled in
+  its own dedicated, unstrict-warnings target (`StbImageImpl`/
+  `StbImageWriteImpl`).
+- [x] Real "Skins" pause-menu screen (same `MenuStack` framework as
+  Options/Controls) - one row per catalog entry, "Eigenen Skin
+  laden...", "Zurueck".
+- [x] Real "Load own skin..." file picker - new `lcu::platform::
+  request_open_png_file_dialog`/`poll_open_png_file_dialog_result`
+  wrapping the real async `SDL_ShowOpenFileDialog`.
+- [x] Real persistence: `Options::skin_name` (`skin=<name>` in
+  options.txt), resolved against the catalog at startup with a logged
+  fallback to Steve.
+- [x] Real live-reload: `apply_skin(index)` destroys the old GPU
+  texture and uploads the new one immediately.
+- [x] Real per-NPC fixed skins: new `game::components::NpcAppearance`
+  assigned once at spawn, independent of the player's own skin.
+- [x] New `LCU_VERIFY_SKIN` hook (apply_skin, a real upload round trip
+  via a real temp PNG, real Skins-screen construction) plus the full
+  regression sweep, all complete cleanly.
+
+`ctest` 614/614 (bgfx, up from 591) / 606/606 (non-bgfx, up from 586).
+
+Honestly scoped: the real native OS file-open dialog itself is still
+**NOT VERIFIED — ENVIRONMENT LIMITATION** (no desktop/portal service in
+this headless sandbox, and it can't be scripted the way a key press
+can) - everything downstream of "a real file was chosen" is exercised
+for real via `LCU_VERIFY_SKIN`. A legacy 64x32 upload's synthesized
+left-limb pixels are an unmirrored copy of the file's own right-limb
+pixels (a real, documented simplification, see DECISIONS.md).
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

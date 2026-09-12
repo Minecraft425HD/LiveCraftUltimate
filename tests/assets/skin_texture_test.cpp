@@ -3,10 +3,15 @@
 #include <gtest/gtest.h>
 
 using lcu::assets::generate_default_skin_pixels;
+using lcu::assets::generate_skin_pixels;
 using lcu::assets::kSkinHeight;
 using lcu::assets::kSkinInsetTexels;
 using lcu::assets::kSkinWidth;
+using lcu::assets::parse_skin_preset_name;
+using lcu::assets::SkinPreset;
 using lcu::assets::SkinRegion;
+using lcu::assets::skin_pixel_rect;
+using lcu::assets::skin_preset_name;
 using lcu::assets::skin_uv_range;
 
 TEST(SkinTextureConstants, RealSizeMatchesTheMinecraftModernSkinFormat) {
@@ -125,4 +130,68 @@ TEST(GenerateDefaultSkinPixels, EveryRealRegionIsFullyOpaqueAndNonBlack) {
         const bool non_black = pixels[offset + 0] != 0 || pixels[offset + 1] != 0 || pixels[offset + 2] != 0;
         EXPECT_TRUE(non_black) << "region " << i;
     }
+}
+
+TEST(SkinPixelRect, MatchesTheSameRealRectSkinUvRangeInsetsFrom) {
+    // Real MC layout: torso front is an 8x12 rect at (20,20) - same
+    // brief-given example coordinate skin_uv_range's own test above
+    // checks, confirming both functions read the one real shared table.
+    const auto rect = skin_pixel_rect(SkinRegion::TorsoFront);
+    EXPECT_EQ(rect.x, 20u);
+    EXPECT_EQ(rect.y, 20u);
+    EXPECT_EQ(rect.w, 8u);
+    EXPECT_EQ(rect.h, 12u);
+}
+
+TEST(SkinPreset, NameRoundTripsForEveryRealPreset) {
+    for (lcu::u32 i = 0; i < static_cast<lcu::u32>(SkinPreset::Count); ++i) {
+        const auto preset = static_cast<SkinPreset>(i);
+        const char* name = skin_preset_name(preset);
+        EXPECT_NE(name[0], '\0') << "preset " << i;
+        SkinPreset parsed{};
+        EXPECT_TRUE(parse_skin_preset_name(name, parsed)) << "preset " << i;
+        EXPECT_EQ(parsed, preset) << "preset " << i;
+    }
+}
+
+TEST(SkinPreset, UnknownNameFailsToParse) {
+    SkinPreset parsed{};
+    EXPECT_FALSE(parse_skin_preset_name("NotARealSkin", parsed));
+    EXPECT_FALSE(parse_skin_preset_name("", parsed));
+}
+
+TEST(SkinPreset, SteveMatchesTheRealDefaultSkinByteForByte) {
+    EXPECT_EQ(generate_skin_pixels(SkinPreset::Steve), generate_default_skin_pixels());
+}
+
+TEST(GenerateSkinPixels, EveryRealPresetProducesARealFixedFullyOpaqueBuffer) {
+    for (lcu::u32 i = 0; i < static_cast<lcu::u32>(SkinPreset::Count); ++i) {
+        const auto preset = static_cast<SkinPreset>(i);
+        const auto pixels = generate_skin_pixels(preset);
+        EXPECT_EQ(pixels.size(), static_cast<lcu::usize>(64) * 64 * 4) << "preset " << i;
+        for (lcu::u32 r = 0; r < static_cast<lcu::u32>(SkinRegion::Count); ++r) {
+            const auto region = static_cast<SkinRegion>(r);
+            const auto range = skin_uv_range(region);
+            const auto x = static_cast<lcu::u32>((range.u0 + range.u1) * 0.5f * 64.0f);
+            const auto y = static_cast<lcu::u32>((range.v0 + range.v1) * 0.5f * 64.0f);
+            const lcu::usize offset = (static_cast<lcu::usize>(y) * 64 + x) * 4;
+            EXPECT_EQ(pixels[offset + 3], 255) << "preset " << i << " region " << r;
+        }
+    }
+}
+
+TEST(GenerateSkinPixels, DifferentPresetsProduceDifferentBytes) {
+    // Every real preset must actually look different from every other
+    // one - a real regression guard against two palettes accidentally
+    // ending up identical.
+    for (lcu::u32 i = 0; i < static_cast<lcu::u32>(SkinPreset::Count); ++i) {
+        for (lcu::u32 j = i + 1; j < static_cast<lcu::u32>(SkinPreset::Count); ++j) {
+            EXPECT_NE(generate_skin_pixels(static_cast<SkinPreset>(i)), generate_skin_pixels(static_cast<SkinPreset>(j)))
+                << "preset " << i << " vs " << j;
+        }
+    }
+}
+
+TEST(GenerateSkinPixels, DeterministicSameCallAlwaysProducesTheSameBytes) {
+    EXPECT_EQ(generate_skin_pixels(SkinPreset::Ninja), generate_skin_pixels(SkinPreset::Ninja));
 }

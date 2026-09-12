@@ -2,7 +2,78 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62
+
+### Phase 62
+
+- **Real skin system (full version)**: 5 procedural skins
+  (`lcu::assets::SkinPreset::{Steve,Alex,Red,Cyan,Ninja}`) - each a
+  flat 4-material palette (hair/skin-tone/shirt/pants) painted across
+  the exact same real MC region layout Phase 58's `Steve` default
+  already used; `Steve` matches the old `generate_default_skin_pixels()`
+  byte-for-byte.
+- **Real `lcu::assets::SkinCatalog`**: the 5 builtins plus every real
+  `*.png` file sitting in `assets/skins` (same CWD-relative,
+  real-directory-scan convention as `mods`), discovered via a real
+  `std::filesystem` scan. `add_from_file()` validates a real file via
+  stb_image (must decode, must be 64x64 or the legacy 64x32 format),
+  copies it into `assets/skins/<stem>.png`, and adds/updates its real
+  catalog entry - never crashes on an invalid file (unreadable, wrong
+  size, or a name colliding with a builtin), always returns a real
+  `{ok, error}` result instead. A legacy 64x32 upload's missing real
+  left-arm/left-leg regions are synthesized by copying the same file's
+  own already-decoded right-arm/right-leg pixels (unmirrored - a real,
+  documented simplification, see DECISIONS.md).
+- **Real new dependency**: stb_image (decode) + stb_image_write
+  (test/verify-fixture encode only), fetched via `FetchContent`
+  (no version tags exist upstream, pinned to a real commit), each
+  compiled in its own dedicated, unstrict-warnings target
+  (`StbImageImpl`/`StbImageWriteImpl`) to keep this project's own
+  zero-warning `-Werror` build clean of third-party warning noise.
+- **Real "Skins" menu screen**: reachable from the pause menu, one row
+  per real catalog entry (marked `AUSGEWAEHLT` when selected) plus a
+  real "Eigenen Skin laden..." row and "Zurueck" - built with the same
+  `MenuStack`/`MenuScreen` framework Phase 46's Options/Controls
+  screens already use.
+- **Real "Load own skin..." file picker**: new `lcu::platform::
+  request_open_png_file_dialog`/`poll_open_png_file_dialog_result`
+  wrap the real, async, platform-native `SDL_ShowOpenFileDialog` (its
+  own callback may run on a different thread - handled via a real
+  thread-safe, module-local mailbox in `window.cpp`), polled once per
+  frame; a successful pick runs through the same real
+  `SkinCatalog::add_from_file` + live-reload path as everything else.
+- **Real persistence**: `Options` gains `skin_name` (persisted as
+  `skin=<name>` in options.txt, default `"Steve"`), resolved against
+  the real `SkinCatalog` at startup with a logged fallback to Steve if
+  the saved name isn't found (a deleted custom skin file, a stale/
+  corrupt value).
+- **Real live-reload**: `apply_skin(index)` destroys the old GPU
+  texture and uploads the new skin's real pixels immediately - the
+  player's own third-person model and first-person arm both pick it up
+  next frame with zero extra plumbing, since they already read the one
+  `skin_texture` handle fresh every frame.
+- **Real per-NPC fixed skins**: new `game::components::NpcAppearance`
+  (`skin_preset_index`) assigned once at spawn, cycling through the 5
+  builtin presets - the 3 real `AIWander` NPCs no longer share the
+  player's own selectable skin, and never change even if the player
+  later changes or uploads their own (a new, independent
+  `npc_skin_textures` array of 5 real GPU textures, created once at
+  startup).
+- New `LCU_VERIFY_SKIN` headless hook: exercises `apply_skin`, a real
+  `SkinCatalog::add_from_file` round trip (via a real temp PNG written
+  through stb_image_write, standing in for a real user-picked file -
+  `SDL_ShowOpenFileDialog` itself has no real backend in this headless
+  sandbox and can't be scripted), and real `build_skins_screen()`
+  construction. Full regression sweep (`HEALTH`/`MENU`/`INVENTORY`/
+  `WORKBENCH`/`CRAFT`/`TORCH`/`HUD`/`BREAK_PLACE`/`SKIN`) all complete
+  cleanly. `ctest` 614/614 (bgfx, up from 591) / 606/606 (non-bgfx, up
+  from 586).
+- Honestly scoped: the real native OS file-open dialog itself is
+  **NOT VERIFIED — ENVIRONMENT LIMITATION** (no desktop/portal service
+  in this headless sandbox); everything downstream of "a real file path
+  was chosen" is exercised for real via `LCU_VERIFY_SKIN`. A legacy
+  64x32 upload's synthesized left-limb pixels are unmirrored (see
+  DECISIONS.md).
 
 ### Phase 61
 

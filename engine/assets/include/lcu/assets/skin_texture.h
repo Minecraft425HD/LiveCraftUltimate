@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <string_view>
 #include <vector>
 
 #include "lcu/core/types.h"
@@ -87,12 +88,59 @@ struct SkinUvRange {
 // existing tile_uv_range()/glyph_uv_range() convention).
 SkinUvRange skin_uv_range(SkinRegion region);
 
+// `region`'s real, un-inset pixel rectangle in the 64x64 skin texture
+// (top-left origin) - the same table skin_uv_range() itself reads from,
+// exposed directly for SkinCatalog's own real pixel-level work (legacy
+// 64x32 skin-file expansion, see skin_catalog.cpp) that needs literal
+// pixel coordinates, not a sampling UV rect.
+struct SkinPixelRect {
+    u32 x = 0;
+    u32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+};
+SkinPixelRect skin_pixel_rect(SkinRegion region);
+
 // The single, real, procedurally-generated default skin (Phase 58) - a
 // Steve-like character (skin-tone head/hands, brown hair, green shirt,
 // blue pants), deterministic (same bytes every call, no RNG state,
 // matching every other procedural-texture generator in this project).
 // Phase 62 adds several more named skins plus real file upload; this
-// stays the one always-available fallback those build on.
+// stays the one always-available fallback those build on. Equivalent
+// to generate_skin_pixels(SkinPreset::Steve) below - kept as its own
+// function so every Phase 58 caller/test keeps working unchanged.
 std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_default_skin_pixels();
+
+// Real, always-available procedural skins (Phase 62, brief section
+// 62.1's "3-5 Skins: Steve, Alex, 2 Farbvarianten, ein Ninja-Skin") -
+// each one a flat 4-material palette (hair/skin-tone/shirt/pants)
+// painted across the same real MC region layout `kRegionRects` already
+// uses, exactly like the Phase 58 default (see skin_texture.cpp's own
+// `material_for`/`kPalettes`) - no new per-pixel pattern logic needed,
+// only the 4 colors change per preset. `Steve` matches
+// generate_default_skin_pixels() byte-for-byte.
+enum class SkinPreset : u32 {
+    Steve,
+    Alex,
+    Red,
+    Cyan,
+    Ninja,
+    Count,
+};
+
+// Deterministic, same reasoning as generate_default_skin_pixels().
+std::array<u8, static_cast<usize>(kSkinWidth) * kSkinHeight * 4> generate_skin_pixels(SkinPreset preset);
+
+// Stable, human-readable names (also this preset's real SkinCatalog
+// entry name and its real options.txt `skin=<name>` persisted value -
+// see skin_catalog.h) - "Steve"/"Alex"/"Red"/"Cyan"/"Ninja".
+const char* skin_preset_name(SkinPreset preset);
+
+// Reverse of skin_preset_name() - a case-sensitive exact match against
+// one of the 5 real names above. Returns false (leaving `out`
+// unchanged) for anything else, including a custom uploaded skin's own
+// name - SkinCatalog is the one real place that resolves a name that
+// could be either a builtin preset or a custom file.
+bool parse_skin_preset_name(std::string_view name, SkinPreset& out);
 
 }  // namespace lcu::assets

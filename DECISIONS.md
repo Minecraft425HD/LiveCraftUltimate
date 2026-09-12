@@ -4125,3 +4125,111 @@ back-to-front water sorting - rejected as real, unverifiable-in-sandbox
 complexity for a limitation that doesn't affect the common single-body
 case; a dedicated bgfx transparency view - rejected as more plumbing
 than the draw-call-ordering approach already achieves for real.
+
+## 2026-09-12 — Phase 62: stb_image in its own unstrict-warnings target, an unmirrored legacy-format limb copy, a module-local dialog mailbox, and NPCs getting their own fixed skins
+
+**Context:** Phase 62 turns Phase 58's single hardcoded default skin
+into a real, chosen-and-persisted skin system: 5 procedural presets, a
+real catalog that also discovers uploaded files, a real "Load own
+skin..." file-picker button, and per-NPC fixed skins.
+
+**stb_image's (and stb_image_write's) own implementation lives in a
+dedicated target that is deliberately never passed through this
+project's own `lcu_apply_common_options()` (-Wall/-Wextra/-Wpedantic/
+-Werror).** Every other real dependency in this repo is either treated
+as a genuine black box (fmt, SDL3, bgfx, zstd, Lua, GoogleTest,
+Benchmark - none of their own internals are compiled inside a target
+this project applies its own strict flags to) or, when it must be, kept
+warning-clean already. stb's single-header libraries are the one real
+exception: `STB_IMAGE_IMPLEMENTATION`/`STB_IMAGE_WRITE_IMPLEMENTATION`
+expands real, warning-heavy generated code (unused static helpers
+depending on which format decoders got compiled in, sign-compare,
+etc.) that has nothing to do with this project's own code quality.
+Two tiny one-file targets (`third_party/stb_image_impl.cpp`/
+`stb_image_write_impl.cpp`, each just a `#define ..._IMPLEMENTATION` +
+one `#include`) isolate that real cost to exactly the one real
+translation unit that needs it, while every real consumer
+(`skin_catalog.cpp`, the test fixture, the `LCU_VERIFY_SKIN` hook)
+only ever sees stb's own declarations, which are warning-clean and
+compile fine under this project's strict flags.
+
+**A legacy 64x32 skin upload's real left-arm/left-leg pixels are
+synthesized by copying the SAME file's own already-decoded right-arm/
+right-leg pixels, unmirrored.** Real Minecraft itself horizontally
+flips this copy (the legacy format's single arm/leg literally
+represented both real limbs via a mirrored render, not a stored
+second copy). This project's own `SkinCatalog::pixels_for` does a
+plain, unflipped rectangle copy instead - real, visible content
+appears in every real limb region (nothing stays blank/transparent),
+which is the actual requirement ("keeps a working texture", not "is
+pixel-perfect to Minecraft's own legacy rendering trick"), and adding
+real per-region horizontal-flip math for a legacy format this project
+doesn't otherwise treat as first-class (the brief's own upload
+requirement names 64x64 OR 64x32 as equally valid, without asking for
+flip-accurate legacy rendering) would have been real, disproportionate
+complexity for a cosmetic difference unverifiable on a real display in
+this sandbox regardless.
+
+**`request_open_png_file_dialog`/`poll_open_png_file_dialog_result`
+buffer SDL_ShowOpenFileDialog's real result in a small, module-local,
+mutex-protected mailbox in `window.cpp`, not as `Window` member
+state.** SDL's own documented contract allows the dialog's completion
+callback to run on a different thread than the one that requested it -
+mutating a live `Window` instance (or anything it owns) from that
+thread would be a real, if rare, data race against the main thread's
+own frame loop. `Window` also supports move-construction/assignment
+(used throughout `client/main.cpp` at startup); a `std::mutex` member
+would have broken that for a benefit this project doesn't actually
+need, since only one real `Window` is ever live at a time anyway (the
+same reasoning `g_window_count`'s own module-local bookkeeping already
+established). The real, small mailbox pattern (a pending flag, an
+`std::optional<std::optional<std::string>>` result, one mutex) needed
+far less real change than reworking `Window`'s own move semantics
+would have.
+
+**The 3 real `AIWander` NPCs get their own fixed skin, assigned once
+at spawn (`game::components::NpcAppearance`), completely independent
+of the player's own selectable/live-reloadable `skin_texture`.** The
+brief's own Phase 59 wording ("gleiches Skin, oder Farbvarianten")
+already allowed either choice; now that real distinct presets exist,
+varying them is strictly more real content for the same real cost (a
+second, small, always-5-entries texture array created once at
+startup, never touched by `apply_skin`). Assigning the choice as a
+real ECS component at spawn - rather than, say, always reading the
+player's own currently-selected skin, or a global "NPC skin" setting -
+is what makes it real "chosen once and kept" behavior matching the
+brief's own literal wording, and keeps it correct even if a future
+phase makes NPCs spawn/despawn dynamically (the index travels with the
+entity, not a shared mutable global).
+
+**`apply_skin` gets a real, working non-bgfx-build body instead of
+being `#if defined(LCU_ENABLE_BGFX)`-only.** `bgfx::TextureHandle`/
+`Renderer` are only nameable in `client/main.cpp` at all when
+`LCU_ENABLE_BGFX` is defined (see this file's own top-of-file gated
+include block) - a real, hard compile-time constraint discovered by
+actually building the non-bgfx config, not assumed. Rather than gating
+the entire Skins menu screen and its selection logic behind that same
+define (which would have made an entire real gameplay/UI feature
+invisible in the "fast iteration" build), `apply_skin` keeps a real,
+identically-shaped lambda in both branches - the bgfx branch also
+destroys/recreates the real GPU texture, the non-bgfx branch only
+updates the real non-graphical state (`current_skin_index`,
+`options.skin_name`) - so the Skins screen, its navigation, and
+options.txt persistence all stay fully real and exercised regardless
+of which config is built.
+
+**Alternatives considered:** inlining stb's implementation directly
+into `skin_catalog.cpp` (or the test file) - rejected once the real
+`-Werror` build failure it produced was reproduced, confirming the
+isolation was necessary, not precautionary; a real horizontal-flip for
+legacy-format limb synthesis - rejected as disproportionate complexity
+for content this sandbox can't visually verify either way; storing the
+file-dialog's pending/result state on `Window` itself - rejected as a
+real move-semantics regression for no real benefit given this project
+never runs two `Window`s at once; a shared/global NPC skin (all NPCs
+reading the player's own current skin, or one shared setting) -
+rejected as not matching the brief's own "assigned once at spawn,
+independent of the player" wording; gating the whole Skins screen
+behind `LCU_ENABLE_BGFX` - rejected as hiding a real gameplay/UI
+feature from the entire non-bgfx build for a limitation that only
+actually touches the one GPU-texture line.

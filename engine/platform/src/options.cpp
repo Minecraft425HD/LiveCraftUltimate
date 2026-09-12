@@ -90,6 +90,13 @@ bool Options::load(const std::string& path) {
             parse_bool(value, hud_enabled);
         } else if (key == "debug_overlay_enabled") {
             parse_bool(value, debug_overlay_enabled);
+        } else if (key == "skin") {
+            // A blank value is a corrupt line (Phase 45's own "leave
+            // unchanged" rule) - never persisted by save() below, so
+            // only a hand-edited file could produce it.
+            if (!value.empty()) {
+                skin_name = value;
+            }
         } else if (key.rfind("key.", 0) == 0) {
             std::string action_part = key.substr(4);
             usize slot = 0;
@@ -129,6 +136,7 @@ void Options::save(const std::string& path) const {
     file << "fov=" << fov << "\n";
     file << "hud_enabled=" << (hud_enabled ? "true" : "false") << "\n";
     file << "debug_overlay_enabled=" << (debug_overlay_enabled ? "true" : "false") << "\n";
+    file << "skin=" << skin_name << "\n";
 
     for (usize i = 0; i < static_cast<usize>(Action::Count); ++i) {
         const auto action = static_cast<Action>(i);

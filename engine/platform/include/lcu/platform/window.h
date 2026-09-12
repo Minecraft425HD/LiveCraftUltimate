@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "lcu/core/types.h"
@@ -117,5 +118,31 @@ class Window : public NonCopyable {
     bool focus_lost_ = false;
     bool fullscreen_ = false;
 };
+
+// Real Phase 62.3 "Load own skin..." file picker - a thin async wrapper
+// around SDL_ShowOpenFileDialog (native platform dialog: a GTK/Cocoa/
+// Windows picker, or the XDG desktop portal on Linux) so gameplay code
+// stays free of a direct SDL3 dependency, matching Window's own role
+// for every other SDL surface this project touches. Not a Window
+// method: SDL's own documented contract allows the real callback to
+// run on a different thread than the one that requested it, so the
+// real result is buffered in a small thread-safe, module-local mailbox
+// (window.cpp) rather than mutating a live Window instance from a
+// background thread. Ignored (with a logged warning) if a request is
+// already pending - this project never needs more than one open file
+// dialog at a time.
+void request_open_png_file_dialog(Window& window);
+
+// Non-blocking poll for request_open_png_file_dialog()'s own real
+// result. Returns std::nullopt while no answer is available yet (no
+// request was ever made, or one is still open) - keep polling once per
+// frame. Once available, the outer std::optional is consumed (a second
+// poll right after goes back to "nothing pending"); the *inner*
+// std::optional is the real answer: a value is the user's chosen
+// file's real path, std::nullopt means the user cancelled or the
+// platform has no dialog backend available at all (this project's own
+// headless sandbox - a real, expected, already-logged environment
+// limitation, not a caller-visible error).
+std::optional<std::optional<std::string>> poll_open_png_file_dialog_result();
 
 }  // namespace lcu::platform

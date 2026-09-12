@@ -12,8 +12,11 @@
 #include <functional>
 #include <random>
 
+#include <stb_image_write.h>
+
 #include "game/components/ai_wander.h"
 #include "game/components/item_entity.h"
+#include "game/components/npc_appearance.h"
 #include "game/components/player_health.h"
 #include "game/components/player_hunger.h"
 #include "game/components/position.h"
@@ -25,6 +28,7 @@
 #include "game/systems/replication_protocol.h"
 #include "lcu/assets/font_atlas.h"
 #include "lcu/assets/procedural_textures.h"
+#include "lcu/assets/skin_catalog.h"
 #include "lcu/assets/skin_texture.h"
 #include "lcu/assets/texture_atlas.h"
 #include "lcu/audio/audio_engine.h"
@@ -1781,17 +1785,26 @@ int main() {
         font_atlas_pixels.data(), lcu::assets::kFontAtlasWidth, lcu::assets::kFontAtlasHeight);
     LCU_LOG_INFO("Font atlas: font_atlas_texture_valid={}", bgfx::isValid(font_atlas_texture));
 
-    // Real player-skin texture (Phase 58.4) - unconditional, same
-    // reasoning as the font atlas above: the character model is a real
-    // part of the game now, not something LCU_USE_TEXTURES should be
-    // able to turn off (that toggle only ever meant "block/item
-    // textures", see its own doc comment). Phase 62 replaces this
-    // single always-default skin with a real, chosen-and-persisted one;
-    // this stays the fallback that always exists.
-    const auto default_skin_pixels = lcu::assets::generate_default_skin_pixels();
-    const bgfx::TextureHandle skin_texture =
-        renderer.create_texture_from_pixels(default_skin_pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
-    LCU_LOG_INFO("Player skin: skin_texture_valid={}", bgfx::isValid(skin_texture));
+    // Real player-skin texture is created further below, right after
+    // options load (Phase 62 needs the persisted `skin=<name>` choice
+    // and the real lcu::assets::SkinCatalog to resolve it against
+    // before the first real texture upload - see `skin_texture`/
+    // `apply_skin` there). Nothing between here and there reads it.
+
+    // Real, fixed NPC skin textures (Phase 62, brief section 59's own
+    // "jeder NPC behaelt seinen einmal beim Spawn zugewiesenen Skin") -
+    // one real GPU texture per builtin lcu::assets::SkinPreset value,
+    // created once here and shared by every NPC assigned that preset
+    // index at spawn (see game::components::NpcAppearance below) -
+    // completely independent of the player's own selectable, live-
+    // reloadable skin_texture.
+    std::array<bgfx::TextureHandle, static_cast<lcu::usize>(lcu::assets::SkinPreset::Count)> npc_skin_textures{};
+    for (lcu::u32 i = 0; i < static_cast<lcu::u32>(lcu::assets::SkinPreset::Count); ++i) {
+        const auto preset_pixels = lcu::assets::generate_skin_pixels(static_cast<lcu::assets::SkinPreset>(i));
+        npc_skin_textures[i] =
+            renderer.create_texture_from_pixels(preset_pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
+    }
+    LCU_LOG_INFO("NPC skin textures: created {}", npc_skin_textures.size());
 
     // Real legacy-debug-text fallback toggle (Phase 57.3) - default OFF
     // (false), meaning HUD/menu/inventory/workbench text draws through
@@ -1998,6 +2011,14 @@ int main() {
             const lcu::ecs::EntityId entity = entity_registry.create_entity();
             entity_registry.add_component<game::components::Position>(entity, {spawn_pos});
             entity_registry.add_component<game::components::AIWander>(entity, {spawn_pos, 1.5f, 0.0f});
+            // Real, immutable-after-spawn skin choice (Phase 62) -
+            // cycles through the builtin presets so the 3 real NPCs
+            // don't all look identical anymore (Phase 59's own
+            // "gleiches Skin (oder Farbvarianten)" wording explicitly
+            // allowed either; this picks varianten now that real
+            // presets exist to vary with).
+            entity_registry.add_component<game::components::NpcAppearance>(
+                entity, {static_cast<lcu::u32>(i) % static_cast<lcu::u32>(lcu::assets::SkinPreset::Count)});
         }
         LCU_LOG_INFO("Spawned {} wandering AI entities", entity_registry.entity_count());
     }
@@ -2138,6 +2159,83 @@ int main() {
         LCU_LOG_INFO("No options file at \"{}\" yet - using real defaults", options_path);
     }
 
+    // Real skin catalog (Phase 62) - the 5 builtin lcu::assets::
+    // SkinPreset skins plus any real uploaded PNG already sitting in
+    // "assets/skins" (same real-directory-scan, CWD-relative
+    // convention as "mods" - see lcu::modding::ModLoader::load_all and
+    // client/CMakeLists.txt's own mods-directory copy step).
+    lcu::assets::SkinCatalog skin_catalog("assets/skins");
+    lcu::usize current_skin_index = 0;
+    if (const auto found = skin_catalog.index_of_name(options.skin_name)) {
+        current_skin_index = *found;
+    } else {
+        LCU_LOG_WARN("Skin \"{}\" from options.txt not found in the skin catalog - falling back to \"{}\"",
+                     options.skin_name, skin_catalog.entry_at(0).name);
+        options.skin_name = skin_catalog.entry_at(0).name;
+    }
+
+    // Real player-skin texture (Phase 58.4, chosen-and-persisted since
+    // Phase 62) - unconditional, same reasoning as the font atlas
+    // above: the character model is a real part of the game now, not
+    // something LCU_USE_TEXTURES should be able to turn off (that
+    // toggle only ever meant "block/item textures", see its own doc
+    // comment). Not const anymore - apply_skin below live-reloads it.
+    // `bgfx::TextureHandle`/`renderer` only exist at all when
+    // LCU_ENABLE_BGFX is defined (see this file's own top-of-file
+    // `#if defined(LCU_ENABLE_BGFX)`-gated include block, and `renderer`
+    // itself being declared inside that same gate around main()'s own
+    // start) - so both the real texture and apply_skin's real GPU-
+    // touching body are gated the same way. The `#else` branch keeps
+    // apply_skin real for everything that ISN'T a GPU texture (catalog
+    // index, options.skin_name persistence) so the Skins menu screen's
+    // own selection/navigation logic and options.txt persistence stay
+    // fully exercised even in the non-bgfx "fast iteration" build.
+#if defined(LCU_ENABLE_BGFX)
+    bgfx::TextureHandle skin_texture = renderer.create_texture_from_pixels(
+        skin_catalog.pixels_for(skin_catalog.entry_at(current_skin_index)).data(), lcu::assets::kSkinWidth,
+        lcu::assets::kSkinHeight);
+    LCU_LOG_INFO("Player skin: \"{}\" skin_texture_valid={}", skin_catalog.entry_at(current_skin_index).name,
+                 bgfx::isValid(skin_texture));
+
+    // Real live-reload (Phase 62.4's own "Skin sofort wechseln, kein
+    // Neustart"): destroys the old GPU texture and uploads the newly
+    // selected skin's real pixels immediately - the player's own
+    // third-person model and first-person arm both pick this up with
+    // zero extra plumbing, since every real draw call below just reads
+    // this one `skin_texture` handle fresh every frame (see
+    // submit_character_model's own calls further down). Also updates
+    // `options.skin_name` in memory (persisted to disk the same way
+    // every other option already is - see options.save() calls below
+    // and the unconditional one at shutdown).
+    const auto apply_skin = [&](lcu::usize index) {
+        if (index >= skin_catalog.size()) {
+            return;
+        }
+        renderer.destroy_texture(skin_texture);
+        const lcu::assets::SkinEntry& entry = skin_catalog.entry_at(index);
+        const auto pixels = skin_catalog.pixels_for(entry);
+        skin_texture = renderer.create_texture_from_pixels(pixels.data(), lcu::assets::kSkinWidth, lcu::assets::kSkinHeight);
+        current_skin_index = index;
+        options.skin_name = entry.name;
+        LCU_LOG_INFO("Skin changed to \"{}\" (skin_texture_valid={})", entry.name, bgfx::isValid(skin_texture));
+    };
+#else
+    const auto apply_skin = [&](lcu::usize index) {
+        if (index >= skin_catalog.size()) {
+            return;
+        }
+        current_skin_index = index;
+        options.skin_name = skin_catalog.entry_at(index).name;
+        LCU_LOG_INFO("Skin changed to \"{}\" (no real GPU texture in this non-bgfx build)", options.skin_name);
+    };
+#endif
+
+    // Real Phase 62.3 "Load own skin..." async result tracking - set
+    // true right after request_open_png_file_dialog() is called, polled
+    // once per frame (see the main loop below) until poll_open_png_
+    // file_dialog_result() returns a real answer.
+    bool skin_upload_pending = false;
+
     lcu::platform::DesktopInputBackend input_backend;
     lcu::platform::InputState input;
     lcu::platform::InputState previous_input;
@@ -2197,6 +2295,21 @@ int main() {
     const bool verify_health = std::getenv("LCU_VERIFY_HEALTH") != nullptr;
     const auto verify_health_start = std::chrono::steady_clock::now();
     bool verify_health_setup_done = false;
+
+    // Headless verification hook for Phase 62 (skins): exercises
+    // apply_skin() (real live-reload/index/options.skin_name update)
+    // and SkinCatalog::add_from_file() (real stb_image decode + real
+    // file copy into "assets/skins") directly, bypassing the real OS
+    // file-open dialog entirely - SDL_ShowOpenFileDialog is a native
+    // platform dialog (GTK/Cocoa/Windows/XDG portal) with no real
+    // backend in this headless sandbox, so it cannot be scripted the
+    // way a key press can (see request_open_png_file_dialog's own doc
+    // comment) - **NOT VERIFIED — ENVIRONMENT LIMITATION** for the
+    // dialog itself; everything downstream of "a real file path was
+    // chosen" (validation, copy, catalog entry, live-reload,
+    // persistence) is exercised for real here.
+    const bool verify_skin = std::getenv("LCU_VERIFY_SKIN") != nullptr;
+    bool verify_skin_done = false;
 
     // Headless verification hook for per-movement chunk streaming
     // (Phase 16): if set, holds MoveForward down for this many real
@@ -2384,6 +2497,7 @@ int main() {
     std::function<lcu::ui::MenuScreen()> build_pause_screen;
     std::function<lcu::ui::MenuScreen()> build_options_screen;
     std::function<lcu::ui::MenuScreen()> build_controls_screen;
+    std::function<lcu::ui::MenuScreen()> build_skins_screen;
 
     build_pause_screen = [&]() -> lcu::ui::MenuScreen {
         lcu::ui::MenuScreen screen;
@@ -2396,6 +2510,8 @@ int main() {
         screen.items.push_back({"Steuerung", "",
                                  [&]() { pending_menu_action = [&]() { menu_stack.push(build_controls_screen()); }; },
                                  nullptr});
+        screen.items.push_back(
+            {"Skins", "", [&]() { pending_menu_action = [&]() { menu_stack.push(build_skins_screen()); }; }, nullptr});
         screen.items.push_back({"Beenden", "", [&]() { quit_requested = true; }, nullptr});
         return screen;
     };
@@ -2515,6 +2631,64 @@ int main() {
             };
         };
         screen.items.push_back(std::move(reset));
+
+        lcu::ui::MenuItem back;
+        back.label = "Zurueck";
+        back.on_activate = [&]() {
+            options.save(options_path);
+            LCU_LOG_INFO("Saved options to \"{}\"", options_path);
+            pending_menu_action = [&]() { menu_stack.pop(); };
+        };
+        screen.items.push_back(std::move(back));
+
+        return screen;
+    };
+
+    build_skins_screen = [&]() -> lcu::ui::MenuScreen {
+        lcu::ui::MenuScreen screen;
+        screen.title = "Skins";
+
+        // Same real "record it, apply it after this callback returns"
+        // rebuild pattern build_options_screen's own schedule_rebuild
+        // uses - re-selecting the just-picked row so the refreshed
+        // "AUSGEWAEHLT" marker below lands next to whichever skin is
+        // now actually active, a real (if simple) form of live preview:
+        // the player's own third-person model (when visible behind this
+        // translucent pause screen) updates immediately too, since
+        // apply_skin() above touches the one real `skin_texture` handle
+        // every subsequent frame's render already reads.
+        const auto schedule_rebuild = [&]() {
+            pending_menu_action = [&]() {
+                const lcu::usize index = menu_stack.top().selected_index;
+                menu_stack.pop();
+                menu_stack.push(build_skins_screen());
+                menu_stack.select_index(index);
+            };
+        };
+
+        for (lcu::usize i = 0; i < skin_catalog.size(); ++i) {
+            const lcu::assets::SkinEntry& entry = skin_catalog.entry_at(i);
+            lcu::ui::MenuItem item;
+            item.label = entry.name;
+            item.value_text = (i == current_skin_index) ? "AUSGEWAEHLT" : "";
+            item.on_activate = [&, i, schedule_rebuild]() {
+                apply_skin(i);
+                schedule_rebuild();
+            };
+            screen.items.push_back(std::move(item));
+        }
+
+        lcu::ui::MenuItem load_own;
+        load_own.label = "Eigenen Skin laden...";
+        load_own.on_activate = [&]() {
+            if (skin_upload_pending) {
+                LCU_LOG_INFO("A skin upload dialog is already open");
+                return;
+            }
+            skin_upload_pending = true;
+            lcu::platform::request_open_png_file_dialog(window);
+        };
+        screen.items.push_back(std::move(load_own));
 
         lcu::ui::MenuItem back;
         back.label = "Zurueck";
@@ -3180,6 +3354,38 @@ int main() {
             action();
         }
 
+        // Real Phase 62.3 "Load own skin..." async result (see the
+        // Skins screen's own "Eigenen Skin laden..." row above) - polled
+        // every frame regardless of whether the Skins screen is still
+        // open (the real OS dialog can outlive a quick ESC/Zurueck), so
+        // a result that arrives after the player already left the
+        // screen still lands (just without live visual feedback there).
+        if (skin_upload_pending) {
+            if (const auto dialog_result = lcu::platform::poll_open_png_file_dialog_result()) {
+                skin_upload_pending = false;
+                if (dialog_result->has_value()) {
+                    const auto add_result = skin_catalog.add_from_file(**dialog_result);
+                    if (add_result.ok) {
+                        if (const auto index = skin_catalog.index_of_name(add_result.entry.name)) {
+                            apply_skin(*index);
+                        }
+                        LCU_LOG_INFO("Skin upload succeeded: \"{}\" from \"{}\"", add_result.entry.name,
+                                     **dialog_result);
+                        if (!menu_stack.empty() && menu_stack.top().title == "Skins") {
+                            const lcu::usize index = menu_stack.top().selected_index;
+                            menu_stack.pop();
+                            menu_stack.push(build_skins_screen());
+                            menu_stack.select_index(index);
+                        }
+                    } else {
+                        LCU_LOG_WARN("Skin upload rejected: {}", add_result.error);
+                    }
+                } else {
+                    LCU_LOG_INFO("Skin upload dialog cancelled, or no real dialog backend is available here");
+                }
+            }
+        }
+
         const bool paused = !menu_stack.empty();
 
         // Set inside the !paused block below (from the real raycast hit
@@ -3297,6 +3503,61 @@ int main() {
                             elapsed >= kVerifyHealthEatAtSeconds &&
                                 elapsed < kVerifyHealthEatAtSeconds + kVerifyEdgePulseSeconds);
         }
+
+        if (verify_skin && !verify_skin_done) {
+            verify_skin_done = true;
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: initial skin=\"{}\" (index={})", options.skin_name, current_skin_index);
+
+            // Real apply_skin() live-reload exercise: switch to a
+            // different builtin preset.
+            if (const auto alex_index = skin_catalog.index_of_name("Alex")) {
+                apply_skin(*alex_index);
+                LCU_LOG_INFO("LCU_VERIFY_SKIN: after apply_skin(Alex) skin=\"{}\" (index={})", options.skin_name,
+                             current_skin_index);
+            }
+
+            // Real SkinCatalog::add_from_file() exercise - a real
+            // temporary PNG, written via stb_image_write (test/verify-
+            // only use, see third_party/CMakeLists.txt's own
+            // StbImageWriteImpl target), stands in for a real user-
+            // selected file (the OS dialog itself can't be scripted
+            // headlessly - see verify_skin's own doc comment above).
+            const std::filesystem::path verify_png =
+                std::filesystem::temp_directory_path() / "lcu_verify_skin_upload.png";
+            std::vector<lcu::u8> verify_pixels(static_cast<lcu::usize>(lcu::assets::kSkinWidth) *
+                                                lcu::assets::kSkinHeight * 4);
+            for (lcu::usize i = 0; i < verify_pixels.size(); i += 4) {
+                verify_pixels[i + 0] = 200;
+                verify_pixels[i + 1] = 40;
+                verify_pixels[i + 2] = 220;
+                verify_pixels[i + 3] = 255;
+            }
+            const int wrote =
+                stbi_write_png(verify_png.string().c_str(), static_cast<int>(lcu::assets::kSkinWidth),
+                                static_cast<int>(lcu::assets::kSkinHeight), 4, verify_pixels.data(),
+                                static_cast<int>(lcu::assets::kSkinWidth) * 4);
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: wrote synthetic upload PNG to \"{}\" (ok={})", verify_png.string(),
+                         wrote != 0);
+
+            const auto add_result = skin_catalog.add_from_file(verify_png.string());
+            if (add_result.ok) {
+                if (const auto uploaded_index = skin_catalog.index_of_name(add_result.entry.name)) {
+                    apply_skin(*uploaded_index);
+                }
+                LCU_LOG_INFO("LCU_VERIFY_SKIN: upload succeeded, skin=\"{}\" (index={}, catalog_size={})",
+                             options.skin_name, current_skin_index, skin_catalog.size());
+            } else {
+                LCU_LOG_WARN("LCU_VERIFY_SKIN: upload failed: {}", add_result.error);
+            }
+
+            // Real menu-screen construction exercise - proves the Skins
+            // screen actually builds a row per catalog entry (plus
+            // "Load own skin..." and "Zurueck") without crashing.
+            const lcu::ui::MenuScreen skins_screen = build_skins_screen();
+            LCU_LOG_INFO("LCU_VERIFY_SKIN: Skins screen has {} rows (expected {})", skins_screen.items.size(),
+                         skin_catalog.size() + 2);
+        }
+
         const auto now = std::chrono::steady_clock::now();
         const lcu::f32 delta_seconds = std::chrono::duration<lcu::f32>(now - last_tick).count();
         last_tick = now;
@@ -4313,8 +4574,17 @@ int main() {
                     idle ? std::sin(npc_animation_time * kNpcIdleHeadWobbleFrequency) * kNpcIdleHeadWobbleAmplitude
                          : 0.0f;
                 const lcu::f32 npc_walk_phase = idle ? 0.0f : npc_animation_time * kNpcWalkCycleFrequency;
-                submit_character_model(renderer, skin_texture, sky_program, view, proj, pos, npc_yaw,
-                                        idle_head_pitch, npc_walk_phase, draw_calls);
+                // Real, per-entity fixed skin (Phase 62) - assigned once
+                // at spawn (see game::components::NpcAppearance's own
+                // doc comment), never the player's own live-reloadable
+                // skin_texture.
+                const auto* appearance = entity_registry.get_component<game::components::NpcAppearance>(entity);
+                const lcu::u32 preset_index =
+                    appearance != nullptr
+                        ? appearance->skin_preset_index % static_cast<lcu::u32>(npc_skin_textures.size())
+                        : 0;
+                submit_character_model(renderer, npc_skin_textures[preset_index], sky_program, view, proj, pos,
+                                        npc_yaw, idle_head_pitch, npc_walk_phase, draw_calls);
 
                 ++entity_count;
             }
@@ -4731,6 +5001,9 @@ int main() {
     renderer.destroy_texture(atlas_texture);
     renderer.destroy_texture(font_atlas_texture);
     renderer.destroy_texture(skin_texture);
+    for (const bgfx::TextureHandle& npc_skin_texture : npc_skin_textures) {
+        renderer.destroy_texture(npc_skin_texture);
+    }
 #endif
 
     LCU_LOG_INFO("Day/night: time_of_day={:.3f} sky_light_scale={:.3f}", day_night_cycle.time_of_day(),

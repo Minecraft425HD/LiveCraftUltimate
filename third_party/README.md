@@ -11,6 +11,9 @@ vendored as committed source.
 | GoogleTest | v1.15.2 | BSD-3-Clause | github.com/google/googletest | CMake (FetchContent) | `tests` |
 | bgfx.cmake (bx/bimg/bgfx) | v1.159.9485-575 | BSD-2-Clause (bgfx/bx/bimg) | github.com/bkaradzic/bgfx.cmake | CMake (FetchContent), community wrapper around upstream GENie build | `engine/rendering`, `client` |
 | zstd | v1.5.7 | BSD-3-Clause (dual-licensed, also GPLv2) | github.com/facebook/zstd | CMake (FetchContent, `SOURCE_SUBDIR build/cmake`), static lib only (`ZSTD_BUILD_PROGRAMS`/`_TESTS`/`_SHARED` off) | `engine/serialization` chunk save/load |
+| Lua | v5.4.7 | MIT | github.com/lua/lua | FetchContent_Populate (no upstream CMakeLists) + hand-rolled `onelua.c` amalgamation static lib | `engine/scripting`, `engine/modding` |
+| Google Benchmark | v1.9.1 | Apache-2.0 | github.com/google/benchmark | CMake (FetchContent) | `tools/benchmark` |
+| stb (stb_image.h, stb_image_write.h) | master tip, commit `2c980bb5` (no version tags exist upstream) | public domain / MIT (dual-licensed, upstream's own choice) | github.com/nothings/stb | FetchContent_Populate (no build system at all - single-header, `*_IMPLEMENTATION` defined once by the one real consumer) | `engine/assets::SkinCatalog` (Phase 62 real PNG skin-file decode); PNG encode is test-fixture-only |
 
 Planned, not yet added (pulled in when the system that needs them is
 actually implemented — see `DECISIONS.md`):
