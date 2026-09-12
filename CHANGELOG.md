@@ -37,6 +37,46 @@ already committed under that name, so this work is Phase 74 here.
   rebuild both configs; a real headless `LCU_MAX_FRAMES=60` run clean
   on both.
 
+#### Bug 2: left-click still doesn't break blocks
+
+- **Symptom**: holding left-click never breaks a block; no "Requesting
+  break" (networked) log line.
+- **Investigation**: read the full chain end to end - `KeyBindings::
+  reset_to_defaults` binds `Interact` to `kMouseLeftKey` (correct);
+  `DesktopInputBackend::update`/`physical_key_is_down` reads `SDL_
+  GetMouseState`'s `SDL_BUTTON_LMASK` bit for it (correct); `client/
+  main.cpp`'s real gameplay block reaches the `interact_held`/`break_
+  ready`/`break_request_sent` logic in normal single-player play
+  (correct) - the exact same downstream logic `LCU_VERIFY_BREAK_PLACE`'s
+  own synthetic input already proves works (reconfirmed this session:
+  `Breaking block at world (-84, 0, -85)`). No logic bug found.
+- **Root cause of "can't reproduce", not of the bug itself**: a direct,
+  standalone experiment (pushing a real `SDL_EVENT_MOUSE_BUTTON_DOWN`
+  via `SDL_PushEvent`, draining it with `SDL_PollEvent`, then calling
+  `SDL_GetMouseState`) proved this sandbox's SDL dummy video driver
+  never reflects a synthetic click in `SDL_GetMouseState` at all
+  (`buttons=0` every time, even though the pushed event really was
+  queued and dequeued) - the same class of "no real hardware here" gap
+  this project already documents for GPU/display, now confirmed for
+  mouse state too. No in-process test in this environment can ever
+  observe a synthetic click.
+- **Fix**: none applied - per this phase's own "kein Fix ohne
+  Reproduktion" rule, no speculative change was made to code already
+  read and found correct. Instead, new `LCU_DEBUG_INPUT=1` env var logs
+  `raw_interact_down`/`suppress_click_for_recapture`/`interact_held`/
+  `relative_mouse_mode`/`hit_something` once per real second, so the
+  next real Mac run localizes the actual failure to one specific link
+  instead of guessing. See DECISIONS.md for the full investigation,
+  including one related-but-unconfirmed observation (`Window::set_
+  relative_mouse_mode`'s state can go stale on an SDL failure) that was
+  deliberately left unfixed for the same reason.
+- **Verification**: `LCU_DEBUG_INPUT=1` confirmed logging real state
+  once per second in a real headless run (`raw_interact_down=false`,
+  matching this environment's own confirmed "no real mouse hardware"
+  limitation). **NOT VERIFIED — ENVIRONMENT LIMITATION** for the actual
+  reported symptom; needs a real Mac run with `LCU_DEBUG_INPUT=1` to
+  make further progress.
+
 ### Phase 73
 
 - **Rollback of Phases 67-72** (backface/frustum/occlusion culling,

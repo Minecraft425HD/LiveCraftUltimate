@@ -4593,3 +4593,90 @@ of fixing their own expectation helpers - rejected as papering over a
 real gap in what those tests actually modeled, when the real function
 they're testing now has a real height-dependent branch they'd silently
 stop covering.
+
+## 2026-09-12 — Phase 74 Bug 2: this sandbox's SDL dummy video driver cannot reproduce a real mouse click at all (confirmed by direct experiment), so a diagnostic log replaces a speculative fix
+
+**Context:** a second real Mac test reported "left click still doesn't
+break blocks" - the exact bug report explicitly asked for a synthetic
+`SDL_EVENT_MOUSE_BUTTON_DOWN`-driven verification ("push the event,
+expect 'Requesting break' in the log").
+
+**Investigation, in order:** read every real link in the chain from a
+physical click to a broken block. (1) `KeyBindings::reset_to_defaults()`
+binds `Action::Interact` to `kMouseLeftKey` - correct. (2)
+`DesktopInputBackend::update`'s `physical_key_is_down` reads
+`SDL_GetMouseState`'s `SDL_BUTTON_LMASK` bit for `kMouseLeftKey` -
+correct, and the early `key == kMouseLeftKey` branch means the mouse
+case never falls through into the keyboard-array indexing (no
+out-of-bounds risk there either). (3) `client/main.cpp`'s real gameplay
+block (`if (!paused && !inventory_open && !workbench_open)`) reaches
+the raycast + `interact_held`/`break_ready`/`break_request_sent` logic
+in normal single-player play with no menu open - the exact same logic
+`LCU_VERIFY_BREAK_PLACE`'s own synthetic `input.set_down(Interact,
+true)` already independently proves correct on every real run this
+whole project's history (most recently reconfirmed this same session:
+`Breaking block at world (-84, 0, -85)`). No logic bug found anywhere
+in this chain.
+
+**Real, direct experiment - this environment cannot verify a real
+click at all:** wrote a standalone program (outside the repo) linking
+this project's own fetched SDL3 build, under `SDL_VIDEODRIVER=dummy`
+(this sandbox's own real headless driver): created a window, pushed a
+real `SDL_EVENT_MOUSE_BUTTON_DOWN` (and, in a second attempt, a
+preceding `SDL_EVENT_WINDOW_MOUSE_ENTER` + `SDL_EVENT_MOUSE_MOTION`
+too) via `SDL_PushEvent`, drained the queue with `SDL_PollEvent`
+(confirming the events really were queued and dequeued - the button-
+down event's own type value, 1025, appeared in the pumped output), then
+called `SDL_GetMouseState`. Result: `buttons=0` every time, and the
+motion event's own target position never took effect either
+(`pos=(0,0)`). This proves `SDL_GetMouseState` on the dummy driver
+reads real backend/device state, not the event queue - pushing
+synthetic events updates what `SDL_PollEvent` returns but never what
+`SDL_GetMouseState` reports, so no in-process test in this sandbox, no
+matter how it's written, can ever make `physical_key_is_down(kMouseLeft
+Key)` observe a synthetic click. This is the same class of gap this
+project already documents extensively for "no real GPU/display" -
+extended here to "no real mouse hardware state either."
+
+**Decision: add a real diagnostic tool instead of a speculative fix.**
+Per this phase's own explicit rule ("kein Fix ohne Reproduktion"), and
+since the actual application code was read in full and found
+structurally correct, no source change was made to "fix" a bug that
+can't be reproduced here. Instead, a new `LCU_DEBUG_INPUT=1` env var
+logs `raw_interact_down`/`suppress_click_for_recapture`/`interact_held`/
+`relative_mouse_mode`/`hit_something` once per real second - so the
+*next* real Mac run localizes the actual failure to one specific link
+(SDL itself never reporting the click vs. `suppress_click_for_recapture`
+wrongly staying true vs. something else) instead of guessing blind
+again. Confirmed working in this sandbox: it correctly logs
+`raw_interact_down=false` every real second (matching the real,
+expected "no real mouse hardware here" state confirmed by the
+experiment above), proving the log line itself fires and reads real
+state rather than a placeholder.
+
+**One related, but explicitly NOT applied, observation:** `Window::
+set_relative_mouse_mode` unconditionally sets `relative_mouse_mode_ =
+enabled` even when the underlying `SDL_SetWindowRelativeMouseMode` call
+returns failure (only logged, never surfaced to the caller) - in
+principle this could make `window.relative_mouse_mode()` claim
+"captured" when the OS never actually captured the mouse, in turn
+never letting the real "click while free re-captures it" safety valve
+(`suppress_click_for_recapture`) retry. This was NOT changed: in this
+sandbox the SDL call actually succeeds even under the dummy driver (no
+`SDL_SetWindowRelativeMouseMode failed` warning appears in any real
+run), so this path has never been observed to fail here, and changing
+it on pure speculation would violate this phase's own "no fix without
+reproduction" rule. Recorded here so a real Mac test result that shows
+that specific warning firing has a documented, ready lead to follow up
+on.
+
+**Alternatives considered:** shipping the `Window::set_relative_mouse_
+mode` state-tracking fix anyway as a "can't hurt" hardening - rejected,
+since an unverified change to real mouse-capture behavior is exactly
+the kind of speculative fix this phase's own rule exists to prevent,
+and it cannot be tested here either way; adding the diagnostic as a
+one-shot `LCU_LOG_INFO` on the very first Interact-down edge instead of
+a real per-second report - rejected, since a one-shot log would miss
+the case where the click never registers at all (nothing to log an
+edge from) and would give strictly less information than the
+continuous per-second state dump.

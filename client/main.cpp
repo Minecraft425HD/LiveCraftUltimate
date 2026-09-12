@@ -2508,6 +2508,28 @@ int main() {
     // etc.), not just that the Action exists.
     const bool verify_hud = std::getenv("LCU_VERIFY_HUD") != nullptr;
 
+    // Real diagnostic logging for Bug 2 (Phase 74 Mac test: "left click
+    // never breaks") - this headless sandbox's own SDL dummy video
+    // driver was directly confirmed (via a standalone experiment
+    // pushing real SDL_EVENT_MOUSE_BUTTON_DOWN events) to never update
+    // SDL_GetMouseState's own bitmask at all, so the real click path
+    // cannot be reproduced/verified here no matter what the actual
+    // application code does - see DECISIONS.md's own Phase 74 entry.
+    // Every step of the real chain (KeyBindings::reset_to_defaults's
+    // Interact->kMouseLeftKey binding, DesktopInputBackend::update's own
+    // SDL_GetMouseState-based polling, the break_progress/is_break_
+    // ready/break_request_sent logic downstream) was read and is
+    // structurally correct, and the downstream half is already proven
+    // working via LCU_VERIFY_BREAK_PLACE's own synthetic input.set_down
+    // path - so this real per-second log line is a real diagnostic tool
+    // for the *next* real Mac run, not a "fix": it reports exactly
+    // where the real chain stands (raw Interact resolution, the
+    // recapture-suppression flag, and relative-mouse-mode state) so a
+    // real failure can be localized to one specific link instead of
+    // guessed at blind.
+    const bool debug_input = std::getenv("LCU_DEBUG_INPUT") != nullptr;
+    lcu::f32 debug_input_log_accumulator_seconds = 0.0f;
+
     const bool verify_break_place = std::getenv("LCU_VERIFY_BREAK_PLACE") != nullptr;
     const auto verify_break_place_start = std::chrono::steady_clock::now();
     const bool verify_craft = std::getenv("LCU_VERIFY_CRAFT") != nullptr;
@@ -4376,6 +4398,17 @@ int main() {
             // above for why switching targets/releasing resets it and
             // why break_request_sent exists.
             const bool interact_held = input.is_down(lcu::platform::Action::Interact) && !suppress_click_for_recapture;
+            if (debug_input) {
+                debug_input_log_accumulator_seconds += delta_seconds;
+                if (debug_input_log_accumulator_seconds >= 1.0f) {
+                    debug_input_log_accumulator_seconds = 0.0f;
+                    LCU_LOG_INFO(
+                        "LCU_DEBUG_INPUT: raw_interact_down={} suppress_click_for_recapture={} interact_held={} "
+                        "relative_mouse_mode={} hit_something={}",
+                        input.is_down(lcu::platform::Action::Interact), suppress_click_for_recapture, interact_held,
+                        window.relative_mouse_mode(), hit.has_value());
+                }
+            }
             if (hit && interact_held) {
                 if (breaking_block && same_block(*breaking_block, hit->world)) {
                     breaking_progress_seconds += delta_seconds;
