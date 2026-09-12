@@ -4766,3 +4766,90 @@ blend at a shared corner) - deferred as a real, but minor, cosmetic
 edge case (only visible at the literal boundary pixel of a water body)
 well outside this bug's own reported symptom, not worth the added
 complexity for an effect nobody reported.
+
+## 2026-09-12 — Phase 74 Bugs 5/6/7: dumping the actual generated pixels disproved all three named root causes
+
+**Context:** a second real Mac test reported three texture-related
+symptoms with specific, concrete named root causes: `generate_grass_
+side` producing diagonal streaks instead of a jagged green/brown split
+(Bug 5), `generate_wood_side` producing horizontal rings instead of
+vertical bark lines (Bug 6), and the greedy mesher setting merged-quad
+vertex UVs to a hardcoded `(0,0)-(1,1)` instead of real block-unit
+coordinates, stretching one tile across a whole merged run (Bug 7).
+
+**Investigation:** rather than trust the bug report's own stated root
+causes and rewrite the named functions to match, each one was checked
+directly against its real, current implementation.
+
+For Bugs 5/6: wrote a small standalone program (outside the repo,
+linking this project's own `engine/assets` sources directly - no bgfx/
+SDL needed at all, since these are pure CPU functions returning pixel
+arrays) that calls `generate_grass_side()`/`generate_wood_side()` and
+writes the real returned bytes to PNG via `stb_image_write`, then
+visually inspected the images. `grass_side.png` shows a real green cap
+(3-5 rows, `jag = pixel_noise(...) * 3` computed per column for a real
+jittered, non-flat boundary - not a flat line, not a diagonal) over
+real noisy brown dirt - matching Minecraft's own convention already.
+`wood_side.png` shows real VERTICAL dark stripes (the function's own
+per-column "3-4 darker bark stripes" logic) - not horizontal rings.
+Neither claimed symptom exists in the actual pixel data this code
+produces today.
+
+For Bug 7: read `ChunkMeshLayer::add_quad` (`engine/voxel/include/lcu/
+voxel/greedy_mesher.h`) directly - it already pushes vertex UVs at
+`(0,0)`, `(width,0)`, `(width,height)`, `(0,height)`, using the quad's
+own real block-unit `width`/`height` parameters, not a hardcoded
+`(0,0)-(1,1)`. Then read `fs_chunk.sc`'s fragment shader - it already
+computes `vec2 local_uv = fract(v_texcoord0);` before mapping into the
+atlas tile's own sub-rectangle, exactly the literal fix the bug report
+itself describes as missing (`atlas_uv = tile_rect.xy + fract(v_texcoord0)
+* tile_rect.zw`, which is precisely what lines 78-82 already do, just
+with the atlas-layout math split into `u_tileStep`/`u_tileInset`
+uniforms instead of a single `tile_rect`). This entire pipeline is
+already correct.
+
+**Decision: build the requested diagnostic tool, but don't touch code
+already proven correct.** The bug report's own "Zusätzlich" section
+asked for exactly this kind of tool (`LCU_DUMP_TEXTURES=1`) - built it
+for real (writes all 17 base tiles + 10 crack stages + the font atlas
+to `client_world/debug_textures/`), confirmed it produces byte-
+identical output to the standalone investigation above (a real
+correctness check on the hook itself, not just "it ran without
+crashing"). No change was made to `generate_grass_side`, `generate_
+wood_side`, `ChunkMeshLayer::add_quad`, or `fs_chunk.sc` - per this
+phase's own "kein Fix ohne Reproduktion" rule, rewriting code already
+directly verified correct, three separate times, would not be a fix -
+it would be new, unrequested content replacing something that already
+works, on the theory that maybe it doesn't.
+
+**Honest, open question left for the user:** the screenshots this bug
+report was written from are real - something on a real Mac produced
+those artifacts. Given this sandbox has no real GPU/display at all
+(the whole reason Phase 25's own real Metal-shader-profile bug slipped
+through every check available here until someone actually ran it), the
+most likely remaining explanations are either a real GPU/driver/shader-
+compilation-specific issue this environment structurally cannot
+reproduce, or the screenshots were taken against a different build than
+this one. Recommended next step, spelled out in CHANGELOG.md: run the
+new `LCU_DUMP_TEXTURES=1` hook on the real Mac and compare its own PNG
+output side-by-side with what actually renders in-game - if the dumped
+PNGs look correct (as they do here) but the in-game result still
+doesn't, that pinpoints the bug to the GPU-side pipeline specifically,
+not the generators this investigation already cleared.
+
+**Alternatives considered:** rewriting `generate_grass_side`/`generate_
+wood_side` anyway "to be safe" or "in case the screenshots show
+something this dump doesn't capture" - rejected outright: this phase's
+own explicit rule is no fix without reproduction, and three independent
+lines of direct evidence (the actual pixel dump, the actual mesher UV
+code, the actual shader code) all say the named causes aren't present;
+guessing at a different plausible-sounding cause (e.g. speculatively
+disabling texture filtering, or forcing `BGFX_SAMPLER_POINT` somewhere
+it already is) without any way to verify it against the real reported
+symptom here - rejected for the same reason, and doubly so since the
+atlas texture is already created with `BGFX_SAMPLER_POINT | BGFX_
+SAMPLER_UVW_CLAMP` (nearest filtering, no mipmaps at all -
+`hasMips=false` in `Renderer::create_texture_from_pixels`), ruling out
+the most common "atlas tile bleeding from automatic mipmap LOD
+selection at a `fract()` discontinuity" explanation this kind of visual
+symptom often has elsewhere.

@@ -138,6 +138,67 @@ already committed under that name, so this work is Phase 74 here.
   correctly does pick up real light. `ctest` 645/645 (non-bgfx, up by 1)
   / 649/649 (bgfx, up by 1).
 
+#### New `LCU_DUMP_TEXTURES=1` debug hook
+
+- Writes every real procedurally-generated block texture (all 17
+  base tiles) + 10 crack overlay stages + the real font atlas as
+  individual PNGs under `client_world/debug_textures/` via
+  `stb_image_write` - the same real dependency the existing F2
+  screenshot hook already uses. Lets a real player/tester inspect the
+  actual generator output directly, independent of whatever a real
+  GPU/shader/atlas-sampling pipeline does to it afterward - exactly
+  the tool needed to isolate "the generator is wrong" from "something
+  downstream of it is wrong" (see Bugs 5/6/7 below, where this
+  distinction turned out to matter). Verified via a real headless run:
+  28 real files written (`client_world/debug_textures/`), byte-
+  identical to a standalone reference dump of the same generator
+  functions used to investigate Bugs 5/6 below.
+
+#### Bugs 5, 6, 7: grass-side/wood-side texture patterns and UV stretching - investigated, not reproduced as described
+
+- **Reported symptoms**: diagonal green/brown streaks on grass sides
+  (Bug 5), horizontal rings instead of vertical bark lines on wood
+  sides (Bug 6), long horizontal stretched streaks on merged floor
+  quads from wrong vertex UVs (Bug 7).
+- **Investigation**: for Bug 5/6, wrote a standalone program calling
+  `lcu::assets::generate_grass_side()`/`generate_wood_side()` directly
+  and dumping the real returned pixels to PNG (the same real generator
+  functions the new `LCU_DUMP_TEXTURES` hook above also calls, later
+  confirmed byte-identical) - visually inspected both. `grass_side`
+  shows a real green top band (3-5 rows, jittered per column for a
+  jagged, non-flat boundary) over real noisy brown dirt, matching
+  Minecraft's own convention; `wood_side` shows real VERTICAL bark
+  stripes (`generate_wood_side`'s own per-column stripe logic), not
+  horizontal rings. Neither reported symptom is present in the actual
+  generated pixels. For Bug 7, read `ChunkMeshLayer::add_quad`
+  directly: vertex UVs are already `(0,0)`, `(width,0)`, `(width,
+  height)`, `(0,height)` - real block-unit coordinates, not hardcoded
+  `(0,0)-(1,1)` - and `fs_chunk.sc`'s own fragment shader already does
+  `fract(v_texcoord0)` before mapping into the atlas tile, exactly the
+  literal fix the bug report itself describes as missing. All three
+  reported root causes are already correctly implemented in the
+  current codebase.
+- **Fix**: none applied to `generate_grass_side`/`generate_wood_side`/
+  the greedy mesher's UV code/the fragment shader - per this phase's
+  own "kein Fix ohne Reproduktion" rule, rewriting code already proven
+  correct (by direct pixel inspection and by reading the exact lines
+  the bug report names) would be a fix in search of a bug, not a real
+  correction.
+- **Honest, unresolved gap**: the underlying screenshots this bug
+  report was written from are real, so *something* produced those
+  visual artifacts on a real Mac - just not the three specific causes
+  named. This sandbox has no real GPU/display (see BUILD_STATUS.md's
+  own "Environment" section) and cannot rule out a real, GPU/shader-
+  compilation-specific issue (Phase 25's own DECISIONS.md entry already
+  found one real Metal-specific shader bug this exact class of
+  environment gap let slip through once before). **NOT VERIFIED —
+  ENVIRONMENT LIMITATION**: needs either fresh, dated screenshots taken
+  against this exact commit, or the next real Mac run's own
+  `LCU_DUMP_TEXTURES` output compared side-by-side with what's actually
+  seen in-game - if the dumped PNGs still look correct but the in-game
+  result doesn't, that would newly confirm a real GPU-side (not CPU-
+  generator-side) cause worth investigating next.
+
 ### Phase 73
 
 - **Rollback of Phases 67-72** (backface/frustum/occlusion culling,

@@ -1972,6 +1972,67 @@ int main() {
         font_atlas_pixels.data(), lcu::assets::kFontAtlasWidth, lcu::assets::kFontAtlasHeight);
     LCU_LOG_INFO("Font atlas: font_atlas_texture_valid={}", bgfx::isValid(font_atlas_texture));
 
+    // Real texture-dump debug hook (Phase 74 Mac test's own "Zusätzlich"
+    // requirement) - writes every real block/crack texture this
+    // project's own procedural generators (engine/assets::generate_tile)
+    // produce, plus the real font atlas, as individual PNGs under
+    // `client_world/debug_textures/` via stb_image_write (already a real
+    // dependency - see the existing F2 screenshot hook above). Lets a
+    // real player/tester open these directly and compare them against
+    // Minecraft's own real texture conventions, independent of whatever
+    // a real GPU/shader/atlas-sampling pipeline does to them afterward -
+    // exactly the tool needed to tell "the generator itself is wrong"
+    // apart from "something downstream of it is wrong" (see DECISIONS.md
+    // Phase 74 Bugs 5/6/7 entry: both `generate_grass_side` and
+    // `generate_wood_side` were directly dumped and inspected during
+    // this same phase's own investigation and found already correct -
+    // this hook makes that same real check available on a real Mac,
+    // where the actual reported visual symptom was seen).
+    if (std::getenv("LCU_DUMP_TEXTURES") != nullptr) {
+        const std::filesystem::path dump_dir = std::filesystem::path("client_world") / "debug_textures";
+        std::filesystem::create_directories(dump_dir);
+        const auto dump_tile = [&](lcu::assets::TileId tile, const std::string& name) {
+            const lcu::assets::TilePixels pixels = lcu::assets::generate_tile(tile);
+            const std::string path = (dump_dir / (name + ".png")).string();
+            stbi_write_png(path.c_str(), static_cast<int>(lcu::assets::kTileSize),
+                           static_cast<int>(lcu::assets::kTileSize), 4, pixels.data(),
+                           static_cast<int>(lcu::assets::kTileSize) * 4);
+        };
+        // The 17 real base block textures (brief's own literal count).
+        dump_tile(lcu::assets::TileId::GrassTop, "grass_top");
+        dump_tile(lcu::assets::TileId::GrassSide, "grass_side");
+        dump_tile(lcu::assets::TileId::Dirt, "dirt");
+        dump_tile(lcu::assets::TileId::Stone, "stone");
+        dump_tile(lcu::assets::TileId::Sand, "sand");
+        dump_tile(lcu::assets::TileId::Snow, "snow");
+        dump_tile(lcu::assets::TileId::Water, "water");
+        dump_tile(lcu::assets::TileId::WoodSide, "wood_side");
+        dump_tile(lcu::assets::TileId::WoodTop, "wood_top");
+        dump_tile(lcu::assets::TileId::Leaves, "leaves");
+        dump_tile(lcu::assets::TileId::CoalOre, "coal_ore");
+        dump_tile(lcu::assets::TileId::IronOre, "iron_ore");
+        dump_tile(lcu::assets::TileId::Torch, "torch");
+        dump_tile(lcu::assets::TileId::CraftingTableTop, "crafting_table_top");
+        dump_tile(lcu::assets::TileId::Cactus, "cactus");
+        dump_tile(lcu::assets::TileId::Compost, "compost");
+        dump_tile(lcu::assets::TileId::Planks, "planks");
+        // Real break-progress crack overlay stages (Phase 60).
+        for (lcu::u32 stage = 0; stage < 10; ++stage) {
+            dump_tile(static_cast<lcu::assets::TileId>(static_cast<lcu::u32>(lcu::assets::TileId::Crack0) + stage),
+                      "crack" + std::to_string(stage));
+        }
+        // Real font atlas (Phase 57) - a real, single larger image, not
+        // per-glyph tiles.
+        {
+            const std::string font_path = (dump_dir / "font_atlas.png").string();
+            stbi_write_png(font_path.c_str(), static_cast<int>(lcu::assets::kFontAtlasWidth),
+                           static_cast<int>(lcu::assets::kFontAtlasHeight), 4, font_atlas_pixels.data(),
+                           static_cast<int>(lcu::assets::kFontAtlasWidth) * 4);
+        }
+        LCU_LOG_INFO("LCU_DUMP_TEXTURES: wrote 17 block textures + 10 crack stages + font atlas to \"{}\"",
+                     dump_dir.string());
+    }
+
     // Real player-skin texture is created further below, right after
     // options load (Phase 62 needs the persisted `skin=<name>` choice
     // and the real lcu::assets::SkinCatalog to resolve it against
