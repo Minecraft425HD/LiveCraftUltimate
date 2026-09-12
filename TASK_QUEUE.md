@@ -2679,6 +2679,42 @@ per-frame wall-clock cost difference between `dev-bgfx` and `dev-
 nobgfx` on this specific scene - see DECISIONS.md and PROJECT_STATE.md
 Known Limitations.
 
+## Phase 73 — Rollback culling/LOD/render-distance, restore clean Phase 66 baseline
+
+- [x] 73.1 Inventory: 6 commits belong to Phases 67-72
+  (`3dca80a` backface culling, `97161f7` frustum culling, `92eebcb`
+  occlusion culling, `1f72c2c` LOD rendering, `76d4d7d` render
+  distance/pre-loading, `cfb99c4` docs+perf report), confirmed
+  contiguous right after Phase 66's own commit with nothing interleaved.
+- [x] 73.2 Rollback: `git reset --hard` to the commit right after Phase
+  66 - `git log` now ends at Phase 66, `git status` clean, force-pushed
+  to bring the remote branch in line. Confirmed `engine/rendering/
+  frustum.*`/`occlusion_culler.*`/`lod_mesher.*` no longer exist;
+  `client/main.cpp` has no culling/pre-loading/render-distance code;
+  `Options` has no `render_distance`/`lod_distance`/`keep_chunks_
+  loaded`; `World` has no `adopt_generated_chunk`; `VoxelServer` has no
+  `--pre-generate-radius`.
+- [x] 73.3 Build + test: clean rebuild in both configs, `ctest`
+  647/647 (bgfx) / 639/639 (non-bgfx), a real headless
+  `LCU_MAX_FRAMES=60` run clean on both.
+- [x] 73.4 Verified the surviving Phase 66-era fixes: grass top/side/
+  bottom textures (present), UV tiling on merged quads (present),
+  single-column tree crowns (present) - all three genuinely intact, not
+  assumed. Found and fixed one real, previously-undocumented gap:
+  submerged terrain never got real sand (grass rendered straight
+  through the water above it) - never implemented in any prior phase
+  (Phase 37's own DECISIONS.md already named this a known, deferred
+  gap). Fixed in `generate_terrain_chunk`; new `Worldgen` unit test;
+  two existing tests corrected for the real underwater case they'd
+  been silently missing.
+- [x] 73.5 Committed as "Phase 73: rollback culling/LOD/render-distance,
+  restore clean Phase 66 baseline".
+
+No new culling/LOD/pre-loading/render-distance option, and no other Mac
+bugs (mouse, click, water sorting, NPC collision) were touched - out of
+scope for this phase by explicit instruction. See DECISIONS.md and
+BUILD_STATUS.md for the full real evidence.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

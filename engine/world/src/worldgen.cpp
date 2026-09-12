@@ -408,7 +408,26 @@ void generate_terrain_chunk(voxel::Chunk& chunk, voxel::ChunkCoord coord, u32 se
             const i32 world_x = coord.x * static_cast<i32>(kEdge) + static_cast<i32>(lx);
             const i32 height = terrain_height(seed, world_x, world_z);
             const Biome biome = biome_at(seed, world_x, world_z);
-            const SurfaceBlocks surface_blocks = surface_blocks_for(biome, biome_blocks);
+            // Real underwater/beach sand (Phase 73.4 fix) - a column
+            // whose own terrain surface sits at or below sea level is
+            // submerged (see the `world_y <= kSeaLevel` water fill
+            // below), so its surface/subsurface blocks become real sand
+            // (reusing `desert_surface`/`desert_subsurface`, the same
+            // real sand block every biome's own desert already uses -
+            // no separate "beach sand" block id exists, and Minecraft's
+            // own lakebed/shoreline sand isn't biome-dependent either)
+            // instead of that biome's normal grass/dirt/snow, which
+            // would otherwise be a real, visible seam (grass growing
+            // underwater) at every below-sea-level column regardless of
+            // biome. This was a real, previously undocumented gap - no
+            // prior phase in this project's history ever implemented
+            // it (Phase 37's own DECISIONS.md entry explicitly notes
+            // "no sand shoreline transition" as a known, deferred gap
+            // at the time) - not a regression from the Phase 67-72
+            // rollback.
+            const SurfaceBlocks surface_blocks =
+                height <= kSeaLevel ? SurfaceBlocks{biome_blocks.desert_surface, biome_blocks.desert_subsurface}
+                                     : surface_blocks_for(biome, biome_blocks);
             // Vegetation (Phase 41) never grows on a below-sea-level
             // (underwater) column - only decided once per column, not
             // once per cell, since it's the same answer for every Y.

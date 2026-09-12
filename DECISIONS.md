@@ -4509,3 +4509,87 @@ click path) - rejected as weaker evidence than driving the actual
 player-facing interaction, and this project's own established pattern
 (`LCU_VERIFY_INVENTORY`/`LCU_VERIFY_WORKBENCH`) already favors real
 click-driven headless verification for grid crafting.
+
+## 2026-09-12 — Phase 73: rolling back Phases 67-72 outright (`git reset --hard`) instead of `git revert`, and a real underwater-sand gap found while re-verifying the Phase 66 baseline
+
+**Context:** Phases 67-72 (backface/frustum/occlusion culling, LOD, a
+live render-distance/pre-loading system, and their own docs/perf-report
+phase) were built and verified entirely in this headless, GPU-less
+sandbox - every number in their own CHANGELOG/BUILD_STATUS entries was
+real, but real on a Noop bgfx backend with no actual rasterizer to
+stress. On a real Mac, the combined result regressed rather than
+improved: FPS dropped below 30 while moving, and sky artifacts appeared
+at distance, on top of every pre-existing Mac bug (mouse, click, water
+sorting, NPC collision) still being unfixed. The user's own call: stop
+building more performance machinery on top of an unverified-on-real-
+hardware base, roll all of it back, and get a flat, clean, actually-
+playable baseline first.
+
+**Decision (`git reset --hard`, not `git revert`):** the user's own
+spec named both as options but gave an explicit, checkable success
+criterion - "`git log` endet bei Phase 66" (the log ends at Phase 66).
+A `git revert` of 6 commits leaves all 6 (plus 6 new revert commits)
+permanently in history; `git log` would show Phase 66, then Phases
+67-72, then 6 "Revert ..." commits - it would never "end at Phase 66".
+Only a hard reset to the commit immediately after Phase 66 (and before
+Phase 67) satisfies that literally. Confirmed via `git log`/`git show`
+that those 6 commits (`3dca80a`..`cfb99c4`) sit directly and
+contiguously after Phase 66's own commit with nothing interleaved, so
+resetting to it removes exactly those 6 and nothing else - not a
+guess, verified before running the destructive command. Since this
+branch was already pushed, the reset was followed by a force-push to
+bring the remote in line - the explicit, spelled-out request to roll
+the branch back to a named commit has no non-destructive path to a
+shared remote once that remote already carries the commits being
+removed.
+
+**Real bug found while executing 73.4 (verify the remaining Phase 66
+fixes are intact):** re-reading `generate_terrain_chunk` to confirm
+grass textures/UV tiling/tree crowns were still present surfaced that
+a submerged column (terrain height `<= kSeaLevel`) was never given
+real sand - it kept its normal biome surface/subsurface straight
+through the real water sitting above it, so a below-sea-level column
+still generated grass-over-dirt (or snow-over-dirt) visible right
+through the water layer. Checked the full git history (not just the
+current tree) via `git log --all --grep`/`git log --all -p`: this was
+never implemented in any phase, ever - Phase 37's own DECISIONS.md
+entry (sea level + water) already named "no sand shoreline transition"
+as a known, deferred gap at the time it shipped, and nothing since ever
+closed it. Not a regression the Phase 67-72 rollback caused - a real,
+pre-existing gap this phase's own verification work happened to
+surface. Fixed narrowly (reusing `desert_surface`/`desert_subsurface`,
+the same real sand block every biome's own desert already uses, rather
+than inventing a new "beach sand" block id) since 73's own explicit
+scope is "fix a Phase 66 fix if missing/broken, touch nothing else."
+
+**A real regression this fix itself introduced, caught before
+committing:** two existing worldgen tests (`SurfaceLayerIsExactlyOne
+BlockThickAtTheHeight`, `GenerateTerrainChunkMatchesTerrainHeight
+ColumnByColumn`) computed their own expected surface/subsurface block
+purely from `Biome`, with no awareness of the new underwater override -
+one of their own real test columns (seed 5, world (0,0)) turned out to
+already be a submerged one, so the fix broke that test the moment it
+landed (a real, observed `ctest` failure, not a hypothetical one).
+Fixed by threading the column's own `height` into `expected_surface_
+for`/`expected_subsurface_for` and mirroring the real code's own
+`height <= kSeaLevel` check there too, rather than picking a different
+test seed to dodge the case - the test helpers should model the real
+function's actual behavior, not a stale subset of it.
+
+**Alternatives considered:** `git revert` (rejected above - can't meet
+the user's own literal "log ends at Phase 66" requirement); cherry-
+picking only the "good parts" of Phases 67-72 (the LOD/culling code
+never got a chance to prove itself good or bad on real hardware, and
+partially reverting a tightly-coupled 6-commit sequence - `runtime_
+load_radius` alone, say, without the culling that was measured against
+it - would leave an inconsistent, unverified middle state; a clean full
+rollback is the simpler, safer baseline to rebuild performance work
+from later, one small step at a time); inventing a dedicated `game:
+beach_sand` block instead of reusing `desert_surface`/`desert_
+subsurface` - rejected as unnecessary new content for a phase whose own
+explicit scope is "restore/fix the Phase 66 baseline," not add blocks;
+picking a different test seed/column for the two broken tests instead
+of fixing their own expectation helpers - rejected as papering over a
+real gap in what those tests actually modeled, when the real function
+they're testing now has a real height-dependent branch they'd silently
+stop covering.

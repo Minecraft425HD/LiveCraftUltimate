@@ -99,8 +99,24 @@ plant/harvest interactions, and real harvest drops)**, and **Phase 65
 the real 2x2/3x3 crafting grid via a new click-driven headless hook,
 plus the real discovery and documentation that the older Phase-23
 quick-craft shortcut structurally can't represent either recipe)** are
-done - see TASK_QUEUE.md for per-phase detail as each of the remaining
-1 phase lands. See
+done - closing out that fifth user-directed program in full (Phase 66
+itself was a real, no-code documentation-consolidation pass over
+Phases 58-65 - see its own README.md bullets). **Phase 73 (rollback)**:
+a sixth user-directed program (Phases 67-72: a real culling cascade -
+backface, frustum, occlusion - plus LOD and a live render-distance/
+pre-loading system) was built and fully verified in this headless,
+GPU-less sandbox, but regressed real performance on an actual Mac (FPS
+below 30 while moving, visible sky artifacts at distance) on top of
+every pre-existing Mac bug still being unfixed - the user rolled the
+whole program back (`git reset --hard` to the commit right after Phase
+66; `git log` now ends there again, matching the state this paragraph
+describes) rather than layer more unverified-on-real-hardware
+performance work on top. One real, previously undocumented gap
+(submerged terrain never got real sand, visible as grass growing
+underwater) was found and fixed while re-verifying the restored
+baseline was intact - see DECISIONS.md's own Phase 73 entry. Future
+performance work restarts from this clean baseline, one small,
+independently-verified step at a time. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -1332,10 +1348,12 @@ zero warnings/errors. `ctest` 393/393 (bgfx, up from 392) / 390/390
 Honestly scoped: **what water actually looks like on a real
 GPU/display is still NOT VERIFIED — ENVIRONMENT LIMITATION**; water
 renders as a solid-looking blue block, no transparency; no waves/
-current/buoyancy/swimming physics; no beach/sand shoreline transition;
-sky light still stops entirely at water's surface (treated opaque like
-any other solid block, an honest consequence of the existing binary
-light model).
+current/buoyancy/swimming physics; ~~no beach/sand shoreline
+transition~~ **fixed in Phase 73** - a submerged column now gets real
+sand for both its surface and subsurface, regardless of biome (see
+DECISIONS.md's own Phase 73 entry); sky light still stops entirely at
+water's surface (treated opaque like any other solid block, an honest
+consequence of the existing binary light model).
 
 **Phase 38 (continental/mountain terrain)**: two genuinely separate
 worldgen noise stages, matching brief section 21's own "kontinental ->

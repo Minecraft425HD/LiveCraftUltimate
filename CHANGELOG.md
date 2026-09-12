@@ -2,7 +2,61 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 73
+
+### Phase 73
+
+- **Rollback of Phases 67-72** (backface/frustum/occlusion culling,
+  LOD, live render distance, async pre-loading, and their own
+  documentation/perf-report phase): on a real Mac, these performance
+  changes caused FPS to drop below 30 while moving and visible sky
+  artifacts at distance, on top of every pre-existing Mac bug still
+  being unfixed - net negative, not net positive. `git reset --hard` to
+  the commit right after Phase 66 (the last commit before Phase 67),
+  removing all 6 Phase 67-72 commits from this branch's history
+  entirely - `git log` now ends at Phase 66 again, and none of
+  `engine/rendering/frustum.*`, `engine/rendering/occlusion_culler.*`,
+  or `engine/rendering/lod_mesher.*` exist in the tree. `client/main.cpp`
+  has no culling/pre-loading/render-distance code; `Options` has no
+  `render_distance`/`lod_distance`/`keep_chunks_loaded` fields;
+  `World` has no `adopt_generated_chunk`; `VoxelServer` has no
+  `--pre-generate-radius`. The goal going forward: a clean, flat-out
+  playable base game first, performance work later in small, real,
+  individually-verified steps - not another all-at-once batch.
+- **Real bug fixed while verifying the remaining Phase 66 baseline is
+  actually intact** (this phase's own 73.4 step): a submerged column
+  (terrain height at or below sea level) rendered its normal biome
+  surface/subsurface (grass-over-dirt, snow-over-dirt) straight through
+  real water above it - grass growing underwater, a real, visible seam
+  at every below-sea-level column regardless of biome. This gap existed
+  in every phase back to Phase 37 (its own DECISIONS.md entry already
+  named it - "no sand shoreline transition" - as a known, deferred
+  item) and was never actually fixed by any prior phase, including the
+  now-reverted 67-72 - not a regression introduced by the rollback.
+  Fixed in `generate_terrain_chunk`: a column whose own height is
+  `<= kSeaLevel` now gets real sand (reusing `desert_surface`/
+  `desert_subsurface`, the same real sand block every biome's own
+  desert already uses) for both its surface and subsurface, regardless
+  of biome. New `Worldgen.BelowSeaLevelColumnGetsRealSandInsteadOf
+  ItsBiomesNormalSurfaceSubsurface` unit test; the two existing tests
+  that assert a column's surface/subsurface block (`SurfaceLayerIs
+  ExactlyOneBlockThickAtTheHeight`, `GenerateTerrainChunkMatchesTerrain
+  HeightColumnByColumn`) were updated to account for the real
+  underwater case too, since one of their own real test columns turned
+  out to already be submerged.
+- Verified the other three items on this phase's own checklist are
+  genuinely intact, not just assumed: real grass top/side/bottom
+  textures (`grass_def.top_texture`/`side_texture`/`bottom_texture`,
+  the underside using the real dirt tile), real per-vertex UV tiling on
+  greedy-merged quads (`add_quad`'s own `{0,0}..{width,height}` vertex
+  UVs), and real single-column tree crowns (`vegetation_at`'s own
+  trunk-then-leaf-cap placement) - all three present and unmodified.
+  No other Mac bugs (mouse, click, water sorting, NPC collision) were
+  touched - those are explicitly out of scope for this phase.
+- `ctest` 647/647 (bgfx) / 639/639 (non-bgfx), both up by 1 from Phase
+  65's own counts (the one new `Worldgen` test). Full clean rebuild in
+  both configs plus a real headless `LCU_MAX_FRAMES=60` run, both
+  confirmed clean.
 
 ### Phase 65
 

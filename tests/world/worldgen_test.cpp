@@ -126,7 +126,15 @@ lcu::voxel::BlockId expected_above_terrain_block(lcu::u32 seed, lcu::i32 world_x
     return lcu::voxel::kAirBlockId;
 }
 
-lcu::voxel::BlockId expected_surface_for(Biome biome) {
+// `height` (Phase 73.4's own real fix: a submerged column - one whose
+// own terrain height sits at or below kSeaLevel - gets real sand for
+// both its surface and subsurface, regardless of biome, mirroring
+// generate_terrain_chunk's own override exactly) - every real caller
+// below already has the column's own height on hand.
+lcu::voxel::BlockId expected_surface_for(Biome biome, lcu::i32 height) {
+    if (height <= lcu::world::worldgen::kSeaLevel) {
+        return kSand;
+    }
     switch (biome) {
         case Biome::Plains:
             return kGrass;
@@ -138,7 +146,10 @@ lcu::voxel::BlockId expected_surface_for(Biome biome) {
     return kGrass;
 }
 
-lcu::voxel::BlockId expected_subsurface_for(Biome biome) {
+lcu::voxel::BlockId expected_subsurface_for(Biome biome, lcu::i32 height) {
+    if (height <= lcu::world::worldgen::kSeaLevel) {
+        return kSand;
+    }
     switch (biome) {
         case Biome::Plains:
             return kDirt;
@@ -308,9 +319,9 @@ TEST(Worldgen, GenerateTerrainChunkMatchesTerrainHeightColumnByColumn) {
                     EXPECT_EQ(block, expected_above_terrain_block(99, world_x, world_y, world_z, height, biome))
                         << "(" << lx << "," << ly << "," << lz << ")";
                 } else if (world_y == height) {
-                    EXPECT_EQ(block, expected_surface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
+                    EXPECT_EQ(block, expected_surface_for(biome, height)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else if (world_y > height - kSubsurfaceDepth) {
-                    EXPECT_EQ(block, expected_subsurface_for(biome)) << "(" << lx << "," << ly << "," << lz << ")";
+                    EXPECT_EQ(block, expected_subsurface_for(biome, height)) << "(" << lx << "," << ly << "," << lz << ")";
                 } else {
                     EXPECT_EQ(block, expected_stone_band_block(99, world_x, world_y, world_z, height))
                         << "(" << lx << "," << ly << "," << lz << ")";
@@ -380,9 +391,9 @@ TEST(Worldgen, SurfaceLayerIsExactlyOneBlockThickAtTheHeight) {
     generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
                             kTestVegetationBlocks);
 
-    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), expected_surface_for(biome));
+    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), expected_surface_for(biome, height));
     EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z),
-              expected_subsurface_for(biome))
+              expected_subsurface_for(biome, height))
         << "block directly beneath the surface should be that biome's subsurface block, not its surface block or "
            "stone";
 }
@@ -440,6 +451,47 @@ TEST(Worldgen, BelowSeaLevelColumnIsFilledWithWaterUpToSeaLevel) {
         EXPECT_EQ(chunk.block_at(local.local.x, local.local.y, local.local.z), lcu::voxel::kAirBlockId)
             << "strictly above sea level should be air, not water";
     }
+}
+
+TEST(Worldgen, BelowSeaLevelColumnGetsRealSandInsteadOfItsBiomesNormalSurfaceSubsurface) {
+    // Phase 73.4's real fix: a submerged column's own surface/subsurface
+    // should be real sand (reusing desert_surface/desert_subsurface,
+    // the same real sand block every biome's own desert already uses),
+    // not that biome's normal grass/dirt/snow - a real, previously
+    // undocumented gap (no prior phase ever implemented this; Phase
+    // 37's own DECISIONS.md entry explicitly notes "no sand shoreline
+    // transition" as a known, deferred gap at the time).
+    constexpr lcu::u32 kSeed = 1;
+
+    lcu::i32 found_x = 0;
+    lcu::i32 found_z = 0;
+    bool found = false;
+    for (lcu::i32 x = 0; x < 200 && !found; ++x) {
+        for (lcu::i32 z = 0; z < 200 && !found; ++z) {
+            if (terrain_height(kSeed, x, z) < lcu::world::worldgen::kSeaLevel) {
+                found_x = x;
+                found_z = z;
+                found = true;
+            }
+        }
+    }
+    ASSERT_TRUE(found) << "no below-sea-level column found in a 200x200 sample - worldgen's height range may have "
+                           "changed";
+
+    const lcu::i32 height = terrain_height(kSeed, found_x, found_z);
+    const auto split = lcu::voxel::world_to_chunk_and_local({found_x, height, found_z}, Chunk::kEdgeLength);
+    const auto split_below = lcu::voxel::world_to_chunk_and_local({found_x, height - 1, found_z}, Chunk::kEdgeLength);
+    ASSERT_EQ(split.chunk, split_below.chunk) << "height and height-1 landed in different chunks - pick a "
+                                                  "different seed/column, or generate both chunks";
+
+    Chunk chunk;
+    generate_terrain_chunk(chunk, split.chunk, kSeed, kTestBiomeBlocks, kStone, kWater, kTestOreBlocks,
+                            kTestVegetationBlocks);
+
+    EXPECT_EQ(chunk.block_at(split.local.x, split.local.y, split.local.z), kSand)
+        << "a submerged column's own surface block should be sand regardless of its biome";
+    EXPECT_EQ(chunk.block_at(split_below.local.x, split_below.local.y, split_below.local.z), kSand)
+        << "a submerged column's own subsurface block should be sand too, not that biome's normal subsurface";
 }
 
 TEST(Worldgen, IsCaveIsDeterministic) {
