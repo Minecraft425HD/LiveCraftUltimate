@@ -2,7 +2,63 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64
+
+### Phase 64
+
+- **Real farming**: `game:farmland` (tilled from grass/dirt, right-
+  click with a hoe on the top face) and `game:wheat` (8 real growth
+  states, planted via seeds on farmland's top face). New procedural
+  `generate_wheat_stage` textures (8 real tiles, sparse pale-green at
+  stage 0 to dense golden-brown at stage 7, same real "one noise field,
+  rising threshold" technique as the Phase 60 crack overlay) mapped
+  onto wheat's own real state via `BlockDefinition::texture_index_
+  offset_by_state` (Phase 63).
+- **Real, documented simplification**: wheat is registered with
+  `has_collision=true` - this project's own raycast targeting is
+  gated entirely on that flag (see `game:water`'s own doc comment), so
+  a non-collidable wheat block would be real-honestly untargetable and
+  unharvestable; the same trade-off `game:torch` already accepts.
+  Rendering stays a full alpha-cutout CUBE (routed into the real
+  alpha-blended `mesh.water` layer via `is_transparent=true`), not real
+  cross/X-shaped crop geometry - the brief's own "cross_block" category
+  is **PARTIAL**, deferred: `mesh_chunk_greedy` has no non-cube
+  rendering path at all today, and building one is real, separate
+  architectural work this phase's own scope doesn't require.
+- **Real growth**: new `game::systems::update_crop_growth` - a real
+  per-random-tick scan (once per real elapsed second) of every loaded
+  wheat block below max growth, gated on real sky-OR-block light >= 9,
+  independently rolling each eligible block against a real chance
+  calibrated so the EXPECTED growth rate is +1 stage per real in-game
+  day (`kCropRandomTickIntervalSeconds / day_length_seconds`). New
+  `LCU_FAST_FARMING=1` dev toggle scales the real elapsed time fed into
+  the growth accumulator (not the probability math itself) so a
+  headless run can observe full 0-7 growth within seconds.
+  Single-player only for now (client-authoritative, matching local
+  `AIWander`'s own real scope split - see DECISIONS.md).
+- **Real harvest**: breaking OR right-clicking mature wheat (state 7)
+  drops a real, uniformly random 1-3 wheat + 1-3 seeds (via new
+  `game::systems::harvest_wheat`); an immature crop drops only 1 real
+  seed. Right-click harvest replants a fresh state-0 wheat immediately.
+  Farmland underneath is never touched by either path, so it honestly
+  stays farmland. Optional real 5%-seed-from-grass bonus drop on top of
+  grass's own normal dirt-item drop.
+- **New items**: `game:wheat_seeds`, `game:wheat`, and a minimal
+  `game:wooden_hoe` (no durability/tool-tier concept - `ItemDefinition`
+  has none; tilling behavior lives in a real side table, same pattern
+  `edible_hunger_restore` already established).
+- New unit tests: `CropGrowthSystem.*` (growth gating, light thresholds,
+  max-state clamp, safe no-op on misconfiguration), `HarvestWheat.*`
+  (drop-count ranges and real randomness), `GenerateWheatStage.*`
+  (coverage growth/superset/maturity-color checks). New `LCU_VERIFY_
+  FARMING` headless hook drives a real till -> plant -> (fast-forwarded)
+  grow -> harvest round trip end-to-end - confirmed via a real, longer
+  headless run (not part of the standard 60-frame regression sweep,
+  which only checks for a clean crash-free shutdown - see DECISIONS.md
+  for a real, newly-discovered timing caveat about that convention).
+  Full regression sweep and a real two-process networked run (farming
+  correctly inert there) both clean. `ctest` 646/646 (bgfx, up from
+  629) / 638/638 (non-bgfx, up from 621).
 
 ### Phase 63
 

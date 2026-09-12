@@ -63,7 +63,24 @@ enum class TileId : u32 {
     Crack7 = 24,
     Crack8 = 25,
     Crack9 = 26,
-    Count = 27,
+    // Real wheat growth-stage tiles (Phase 64, brief section 64's own
+    // "8 Wachstumsstufen") - 8 consecutive slots so `BlockDefinition::
+    // texture_index_offset_by_state` (Phase 63) can map a wheat block's
+    // own real 0-7 state directly onto `WheatStage0 + state` with no
+    // lookup table. Each stage is a transparent base with a growing
+    // real coverage of wheat-colored pixels (see generate_wheat_stage's
+    // own doc comment) - the same real "one noise field, rising
+    // threshold" technique Crack0..Crack9 already established, reused
+    // here for a real growing-crop look instead of growing damage.
+    WheatStage0 = 27,
+    WheatStage1 = 28,
+    WheatStage2 = 29,
+    WheatStage3 = 30,
+    WheatStage4 = 31,
+    WheatStage5 = 32,
+    WheatStage6 = 33,
+    WheatStage7 = 34,
+    Count = 35,
 };
 
 // One real, deterministic (fixed-seed-per-texture, see each .cpp
@@ -97,6 +114,17 @@ TilePixels generate_planks();
 // generation). `generate_tile(TileId::Crack0 + stage)` reaches the
 // same real pixels through the general dispatcher below.
 TilePixels generate_crack(u32 stage);
+
+// Real wheat growth-stage overlay (Phase 64) - `stage` 0-7, an
+// increasingly dense real coverage of wheat-colored pixels (sparse,
+// pale green sprouts at stage 0; dense, golden-brown mature wheat at
+// stage 7) over a transparent base, sampled from the SAME per-pixel
+// noise field at every stage (only the coverage threshold and the
+// real green-to-gold color blend change) - see the .cpp for the exact
+// deterministic generation. `generate_tile(TileId::WheatStage0 +
+// stage)` reaches the same real pixels through the general dispatcher
+// below.
+TilePixels generate_wheat_stage(u32 stage);
 
 // Returns the same TilePixels generate_* above would for `tile`
 // (dispatches on TileId) - the one real call site build_block_atlas_

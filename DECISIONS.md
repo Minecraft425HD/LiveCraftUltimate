@@ -4317,3 +4317,97 @@ whatever `serialize_chunk_to_bytes` produces; a general per-state
 texture lookup table or callback on `BlockDefinition` - rejected as
 speculative complexity ahead of Phase 64 actually specifying what it
 needs.
+
+## 2026-09-12 — Phase 64: rolling growth directly against wheat blocks instead of a uniform random-tick scheduler, wheat traded non-collision for real targetability, single-player-only growth, and a real discovery about this project's own 60-frame verify convention
+
+**Context:** Phase 64 turns Phase 63's block-state foundation into a
+real, playable farming loop: till, plant, grow, harvest.
+
+**Random-tick growth rolls directly against the small set of currently
+-loaded wheat blocks, not a uniform sample of the whole loaded
+volume the way real Minecraft's own random tick literally works.**
+Real Minecraft picks random (x,y,z) positions across every loaded
+sub-chunk each real tick and only *sometimes* lands on something that
+cares; reproducing that exact scheme here would mean building a real
+chunk/sub-chunk random-tick scheduler (with its own sample-count-per-
+tick tuning) whose only real job today would be re-deriving "roughly
+one success per real day" for the one block type that can use it at
+all. `update_crop_growth` instead scans every loaded wheat block
+directly and rolls each one independently against a chance calibrated
+so the EXPECTED rate is exactly 1 stage per real day
+(`kCropRandomTickIntervalSeconds / day_length_seconds`) - the same
+real "random, tick-driven, day-calibrated" requirement with far less
+bookkeeping, while staying genuinely non-deterministic in exactly
+when any one block advances (real Bernoulli trials, not a scheduled
+batch update at day boundaries).
+
+**`game:wheat` is registered with `has_collision=true`, trading away
+real Minecraft's own "you walk straight through crops" for real
+targetability.** This project's own raycast targeting is gated
+entirely on `has_collision` (see `game:water`'s own doc comment: "the
+DDA raycast only ever stops on a block with has_collision=true") -
+this was independently re-derived and confirmed while implementing
+this phase, not assumed. A non-collidable wheat block would therefore
+be real-honestly unbreakable and un-right-clickable, defeating the
+entire point of a harvestable crop - exactly the same real trade-off
+`game:torch` already accepts (real torches aren't solid either, but
+this project needs them targetable to place/break). The player not
+being able to walk through a planted wheat field is a real, visible,
+documented simplification, not an oversight - fixing it properly would
+mean threading a second, interaction-specific predicate through
+`raycast()` alongside the existing collision-only one, real, separate
+plumbing this phase's own scope (a working, growing, harvestable crop)
+doesn't require.
+
+**Crop growth is single-player/client-authoritative only, with no
+server-side mirror.** The brief's own directive doesn't ask for
+networked farming sync, and the exact same real scope split already
+exists for local `AIWander` (client-simulated only when `!networked`;
+the server runs its own authoritative copy for networked play, never
+built for crop growth). Mirroring `update_crop_growth` into
+`server/main.cpp` as a second authoritative tick, plus the real
+`BlockChange` broadcasting a state-only mutation would need, is real,
+separate work this phase's own directive doesn't require - farming in
+networked mode is honestly a no-op today (till/plant/harvest are all
+gated `!networked` too, so a networked player simply can't farm yet,
+rather than farming silently diverging between clients).
+
+**Real, newly-discovered timing caveat about this project's own
+established `LCU_MAX_FRAMES=60` regression-sweep convention:**
+building `LCU_VERIFY_FARMING` (whose own real milestones span up to 20
+real seconds - tilling, planting, real growth ticks, harvesting)
+required directly measuring how much real wall-clock time 60 frames
+actually takes in this sandbox. The answer: as little as ~0.25 real
+seconds (confirmed via `date`-bracketed runs) - meaning several
+existing verify hooks' own later real-time-gated pulses (e.g.
+`LCU_VERIFY_TORCH`'s own placement at real t=1.6s) may never actually
+fire within the standard 60-frame regression sweep this project has
+used throughout every phase's own verification section. This was a
+real, if not phase-64-caused, blind spot in the existing convention -
+the 60-frame regression sweep genuinely proves "starts cleanly, no
+crash, exits cleanly" (a real, meaningful check, and the reason it's
+kept as the standard sweep), but does NOT, by itself, prove that every
+hook's own later real-time-gated milestone actually fired within that
+window. Retroactively re-auditing and re-calibrating every prior
+phase's own verify-hook frame counts is real, separate work outside
+this phase's own scope; `LCU_VERIFY_FARMING` itself was confirmed for
+real with a much higher, explicitly-chosen frame count (100,000,
+~27 real seconds in this sandbox) specifically because its own
+milestones need that much real time - see BUILD_STATUS.md for the
+exact command. This gap is flagged honestly here and in PROJECT_STATE.
+md's Known Limitations rather than silently worked around.
+
+**Alternatives considered:** a real chunk/sub-chunk random-tick
+scheduler matching Minecraft's own exact mechanism - rejected as real,
+disproportionate complexity for one crop type at this project's scale;
+keeping wheat non-collidable and living with it being untargetable -
+rejected as defeating the entire "harvestable crop" requirement;
+threading a second interaction-only predicate through `raycast()` -
+rejected as real, separate plumbing this phase's own scope doesn't
+need, given the `has_collision=true` trade-off already has a real
+precedent (`game:torch`); mirroring crop growth into `server/main.cpp`
+for networked play - rejected as real, separate work the brief doesn't
+ask for; silently raising every existing verify hook's own `LCU_MAX_
+FRAMES` to "fix" the newly-discovered timing gap - rejected as a large,
+unbounded retroactive change outside this phase's own real scope,
+better addressed as its own deliberate pass if/when it matters.

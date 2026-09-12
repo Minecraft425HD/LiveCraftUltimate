@@ -22,6 +22,7 @@
 #include "game/components/position.h"
 #include "game/items/block_item_mapping.h"
 #include "game/systems/ai_wander_system.h"
+#include "game/systems/crop_growth_system.h"
 #include "game/systems/day_night_cycle.h"
 #include "game/systems/item_entity_system.h"
 #include "game/systems/player_vitals_system.h"
@@ -486,6 +487,24 @@ constexpr lcu::f32 kVerifyTorchCyclePrevAt2Seconds = 1.3f;
 constexpr lcu::f32 kVerifyTorchCyclePrevAt3Seconds = 1.4f;
 constexpr lcu::f32 kVerifyTorchPlaceAtSeconds = 1.6f;
 
+// A real, independent headless hook (LCU_VERIFY_FARMING, Phase 64):
+// grants a wooden hoe (real slot 0) and 5 wheat seeds (real slot 1)
+// directly (same synthetic-grant precedent as LCU_VERIFY_TORCH's own
+// torch grant above), tills the real grass block directly below the
+// player (the same default spawn look-straight-down camera pitch
+// every other break/place hook already relies on) into farmland,
+// cycles to the seeds and plants wheat on it, then - relying on
+// LCU_FAST_FARMING=1 also being set for this run to make real growth
+// observable within a real, bounded headless run - waits for real
+// growth ticks to bring it to maturity before right-click-harvesting
+// it. Real timings, not frame counts (the same reasoning LCU_VERIFY_
+// MOVE_SECONDS's own doc comment gives: real crop-growth ticks are
+// keyed to real elapsed wall-clock seconds, not frame count).
+constexpr lcu::f32 kVerifyFarmingTillAtSeconds = 0.2f;
+constexpr lcu::f32 kVerifyFarmingCycleAtSeconds = 0.4f;
+constexpr lcu::f32 kVerifyFarmingPlantAtSeconds = 0.6f;
+constexpr lcu::f32 kVerifyFarmingHarvestAtSeconds = 20.0f;
+
 // A fifth, independent headless hook (LCU_VERIFY_INVENTORY, Phase 49):
 // grants the player 1 game:wood directly (same synthetic-setup
 // precedent as LCU_VERIFY_TORCH's torch grant - nothing in this build's
@@ -599,6 +618,16 @@ constexpr lcu::usize kWorkbenchGridTotalSlotCount = kWorkbenchGridInputSlotCount
 // reproducible headless run.
 constexpr int kAiEntityCount = 3;
 constexpr lcu::u32 kAiRngSeed = 20260909;
+
+// Real, separate seeded RNG for farming randomness (Phase 64: crop
+// growth rolls, harvest drop counts, the optional grass-seed chance) -
+// its own instance rather than reusing ai_rng, matching this project's
+// existing "one real RNG per real, semantically distinct source of
+// randomness" convention (ai_rng is AI-specific; worldgen has its own
+// deterministic hashing elsewhere too). Fixed seed for the same real
+// "deterministic, reproducible headless run" reason ai_rng's own seed
+// is fixed.
+constexpr lcu::u32 kFarmingRngSeed = 20260912;
 
 // Arbitrary (see DayNightCycle's own doc comment) - short enough that a
 // short headless verification run can actually observe the sky light
@@ -919,6 +948,59 @@ int main() {
     dirt_def.color = {0.4f, 0.25f, 0.1f};
     dirt_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
     const lcu::voxel::BlockId dirt_id = block_registry.register_block(dirt_def);
+
+    // Real farming foundation content (Phase 64) - a hoe tills grass/
+    // dirt into this (see the PlaceBlock dispatch below), and seeds are
+    // only plantable on top of it. Reuses the dirt texture/color on
+    // every face except the top (a real, simple "tilled dirt" look
+    // without a dedicated procedural texture, since nothing about this
+    // block's own gameplay depends on a visually distinct side/bottom).
+    lcu::voxel::BlockDefinition farmland_def;
+    farmland_def.namespaced_id = "game:farmland";
+    farmland_def.display_name = "Farmland";
+    farmland_def.is_transparent = false;
+    farmland_def.has_collision = true;
+    farmland_def.hardness = 0.6f;
+    farmland_def.color = {0.35f, 0.22f, 0.09f};
+    farmland_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::Dirt);
+    const lcu::voxel::BlockId farmland_id = block_registry.register_block(farmland_def);
+
+    // Real wheat crop (Phase 64) - is_transparent=true both so light
+    // passes through it (no shadow under a wheat field) and so its
+    // faces route into the real alpha-blended `mesh.water` layer
+    // (Phase 61's own real routing keyed off this exact flag - see
+    // mesh_chunk_greedy's own doc comment) rather than the opaque one,
+    // letting the real transparent background around each growth
+    // stage's own painted pixels (see generate_wheat_stage) actually
+    // show through instead of rendering as a solid brick. `texture_
+    // index_offset_by_state` (Phase 63) maps this block's own real 0-7
+    // growth state directly onto `WheatStage0 + state` - no per-stage
+    // BlockDefinition needed.
+    // Real, documented simplification (see DECISIONS.md): has_
+    // collision=true (real Minecraft crops have none, and the player
+    // walks straight through them) because this project's own raycast
+    // targeting is gated entirely on has_collision (see game:water's
+    // own doc comment: "the DDA raycast only ever stops on a block with
+    // has_collision=true") - a non-collidable wheat block would be
+    // real-honestly untargetable, unbreakable, and un-harvestable by
+    // right-click, defeating the whole point of a harvestable crop. The
+    // exact same simplification game:torch already accepts for the
+    // identical reason (real torches aren't solid either). This also
+    // renders as a full alpha-cutout CUBE, not real cross/X-shaped crop
+    // geometry - the brief's own "cross_block" category is marked
+    // PARTIAL/deferred, since mesh_chunk_greedy has no non-cube
+    // rendering path at all today and building one is a real, separate
+    // architectural undertaking this phase's own real scope (a working,
+    // growing, harvestable crop) doesn't require.
+    lcu::voxel::BlockDefinition wheat_def;
+    wheat_def.namespaced_id = "game:wheat";
+    wheat_def.display_name = "Wheat";
+    wheat_def.is_transparent = true;
+    wheat_def.has_collision = true;
+    wheat_def.hardness = 0.0f;  // instant break, matching every real Minecraft crop.
+    wheat_def.top_texture = static_cast<lcu::u32>(lcu::assets::TileId::WheatStage0);
+    wheat_def.texture_index_offset_by_state = true;
+    const lcu::voxel::BlockId wheat_id = block_registry.register_block(wheat_def);
 
     // Real climate/biome content (Phase 39, brief section 21) - the
     // Desert and Snowy biomes' own surface/subsurface block, standing
@@ -1253,9 +1335,56 @@ int main() {
     bread_item_def.icon_color = {0.75f, 0.55f, 0.25f, 1.0f};
     const lcu::items::ItemId bread_item_id = item_registry.register_item(bread_item_def);
 
+    // Real farming items (Phase 64) - flat icon_color quads, same real
+    // "no procedural texture exists for it yet" honesty apple/bread
+    // above already document.
+    lcu::items::ItemDefinition wheat_seeds_item_def;
+    wheat_seeds_item_def.namespaced_id = "game:wheat_seeds";
+    wheat_seeds_item_def.display_name = "Wheat Seeds";
+    wheat_seeds_item_def.max_stack_size = 64;
+    wheat_seeds_item_def.icon_color = {0.55f, 0.65f, 0.2f, 1.0f};
+    const lcu::items::ItemId wheat_seeds_item_id = item_registry.register_item(wheat_seeds_item_def);
+
+    lcu::items::ItemDefinition wheat_item_def;
+    wheat_item_def.namespaced_id = "game:wheat";
+    wheat_item_def.display_name = "Wheat";
+    wheat_item_def.max_stack_size = 64;
+    wheat_item_def.icon_color = {0.85f, 0.7f, 0.25f, 1.0f};
+    const lcu::items::ItemId wheat_item_id = item_registry.register_item(wheat_item_def);
+
+    // Minimal wood hoe (Phase 64, brief section 64.3's own "minimal,
+    // keine volle Tool-Tier-Sammlung noetig") - a real, plain stackable
+    // item with no durability/tool-tier concept at all (ItemDefinition
+    // itself has none - see its own doc comment), whose only real
+    // behavior ("tills grass/dirt into farmland") lives in the
+    // `tilling_tools` side table below, the same "item semantics via a
+    // side table" pattern `edible_hunger_restore` already established
+    // rather than growing ItemDefinition's own real field list for a
+    // one-off. max_stack_size=1 (a real, if unenforced-elsewhere,
+    // "this is a tool not a material" signal - no stacking-based tool
+    // system exists yet to actually need that distinction honored).
+    lcu::items::ItemDefinition wooden_hoe_item_def;
+    wooden_hoe_item_def.namespaced_id = "game:wooden_hoe";
+    wooden_hoe_item_def.display_name = "Wooden Hoe";
+    wooden_hoe_item_def.max_stack_size = 1;
+    wooden_hoe_item_def.icon_color = {0.6f, 0.4f, 0.2f, 1.0f};
+    const lcu::items::ItemId wooden_hoe_item_id = item_registry.register_item(wooden_hoe_item_def);
+
     const std::unordered_map<lcu::items::ItemId, lcu::f32> edible_hunger_restore{
         {apple_item_id, 4.0f},
         {bread_item_id, 5.0f},
+    };
+
+    // Real "special item behavior on use" side tables (Phase 64) - same
+    // pattern as edible_hunger_restore above: a hoe tills grass/dirt
+    // into farmland; seeds plant wheat (state 0) on farmland. Deliberately
+    // NOT registered in block_item_mapping below - wheat/farmland need
+    // their own real placement/break handling (harvest drops, farmland
+    // staying farmland after harvest), not the generic 1:1 block<->item
+    // path every other block uses.
+    const std::unordered_set<lcu::items::ItemId> tilling_tools{wooden_hoe_item_id};
+    const std::unordered_map<lcu::items::ItemId, lcu::voxel::BlockId> plantable_seeds{
+        {wheat_seeds_item_id, wheat_id},
     };
 
     lcu::items::Inventory player_inventory(kInventorySlotCount);
@@ -2002,6 +2131,24 @@ int main() {
     // positions instead (see remote_entity_interpolators below).
     lcu::ecs::Registry entity_registry;
     std::mt19937 ai_rng(kAiRngSeed);
+
+    // Real farming setup (Phase 64) - crop growth is client-authoritative
+    // single-player-only for now, the same real scope split AI wander
+    // above already has (networked crop-growth sync would need this
+    // same system mirrored into server/main.cpp as its own real
+    // authoritative tick, which nothing in this phase's own directive
+    // requires - see DECISIONS.md). LCU_FAST_FARMING=1 (the brief's own
+    // suggested dev toggle) multiplies the real per-tick growth chance
+    // so a headless verification run can observe real growth within a
+    // handful of seconds instead of a real in-game day.
+    std::mt19937 farming_rng(kFarmingRngSeed);
+    lcu::f32 crop_growth_accumulator = 0.0f;
+    const bool fast_farming = std::getenv("LCU_FAST_FARMING") != nullptr;
+    game::systems::CropGrowthConfig crop_growth_config;
+    crop_growth_config.wheat_id = wheat_id;
+    crop_growth_config.day_length_seconds = kDayLengthSeconds;
+    LCU_LOG_INFO("Farming: fast_farming={}", fast_farming);
+
     if (!networked) {
         for (int i = 0; i < kAiEntityCount; ++i) {
             const lcu::f32 angle = static_cast<lcu::f32>(i) * (6.28318f / static_cast<lcu::f32>(kAiEntityCount));
@@ -2058,6 +2205,33 @@ int main() {
         entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
         LCU_LOG_INFO("Spawned item entity: {} at world ({}, {}, {})",
                      item_registry.definition_of(item_id).namespaced_id, block_pos.x, block_pos.y, block_pos.z);
+    };
+
+    // Real generic "spawn N of one real item at a world position" (Phase
+    // 64) - the same real ECS entity-spawn shape spawn_item_entity_for_
+    // broken_block above already uses, generalized to an arbitrary real
+    // item id/count (harvest drops need up to 3 wheat AND up to 3 seeds
+    // from the SAME broken block, unlike the generic 1-item-per-block
+    // path above). A no-op for count 0 (immature wheat's own "no wheat
+    // dropped" case) rather than spawning an empty/invalid stack.
+    const auto spawn_item_stack_at = [&](lcu::items::ItemId item_id, lcu::u32 count,
+                                          const lcu::voxel::BlockWorldCoord& block_pos) {
+        if (count == 0) {
+            return;
+        }
+        const lcu::math::Vec3 spawn_center{static_cast<lcu::f32>(block_pos.x) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.y) + 0.5f,
+                                            static_cast<lcu::f32>(block_pos.z) + 0.5f};
+        const lcu::ecs::EntityId entity = entity_registry.create_entity();
+        entity_registry.add_component<game::components::Position>(entity, {spawn_center});
+        game::components::ItemEntity item_entity;
+        item_entity.stack = {item_id, count};
+        item_entity.vertical_velocity = game::systems::kItemEntitySpawnUpSpeed;
+        item_entity.pickup_delay_seconds = game::systems::kItemEntityPickupDelaySeconds;
+        entity_registry.add_component<game::components::ItemEntity>(entity, item_entity);
+        LCU_LOG_INFO("Spawned item entity: {} x{} at world ({}, {}, {})",
+                     item_registry.definition_of(item_id).namespaced_id, count, block_pos.x, block_pos.y,
+                     block_pos.z);
     };
 
     // Real death item drop (Phase 51.1: "inventory drops as item
@@ -2283,6 +2457,10 @@ int main() {
     const bool verify_torch = std::getenv("LCU_VERIFY_TORCH") != nullptr;
     const auto verify_torch_start = std::chrono::steady_clock::now();
     bool verify_torch_granted = false;
+
+    const bool verify_farming = std::getenv("LCU_VERIFY_FARMING") != nullptr;
+    const auto verify_farming_start = std::chrono::steady_clock::now();
+    bool verify_farming_granted = false;
 
     const bool verify_inventory = std::getenv("LCU_VERIFY_INVENTORY") != nullptr;
     const auto verify_inventory_start = std::chrono::steady_clock::now();
@@ -3474,6 +3652,29 @@ int main() {
                             elapsed >= kVerifyTorchPlaceAtSeconds &&
                                 elapsed < kVerifyTorchPlaceAtSeconds + kVerifyEdgePulseSeconds);
         }
+        if (verify_farming) {
+            if (!verify_farming_granted) {
+                // Real synthetic grant (same precedent as LCU_VERIFY_
+                // TORCH above) - lands the hoe in real slot 0 and the
+                // seeds in real slot 1 (sequential fill of an otherwise-
+                // empty inventory).
+                player_inventory.add_item(item_registry, {wooden_hoe_item_id, 1});
+                player_inventory.add_item(item_registry, {wheat_seeds_item_id, 5});
+                verify_farming_granted = true;
+            }
+            const lcu::f32 elapsed =
+                std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_farming_start).count();
+            input.set_down(lcu::platform::Action::PlaceBlock,
+                            (elapsed >= kVerifyFarmingTillAtSeconds &&
+                             elapsed < kVerifyFarmingTillAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingPlantAtSeconds &&
+                                 elapsed < kVerifyFarmingPlantAtSeconds + kVerifyEdgePulseSeconds) ||
+                                (elapsed >= kVerifyFarmingHarvestAtSeconds &&
+                                 elapsed < kVerifyFarmingHarvestAtSeconds + kVerifyEdgePulseSeconds));
+            input.set_down(lcu::platform::Action::CycleHotbar,
+                            elapsed >= kVerifyFarmingCycleAtSeconds &&
+                                elapsed < kVerifyFarmingCycleAtSeconds + kVerifyEdgePulseSeconds);
+        }
         if (verify_health) {
             if (!verify_health_setup_done) {
                 // Synthetic setup (see kVerifyHealthFallHeightBlocks' own
@@ -3789,6 +3990,24 @@ int main() {
         } else if (!paused) {
             game::systems::update_ai_wander(entity_registry, ai_wander_config, ai_rng, delta_seconds);
             npc_animation_time += delta_seconds;
+
+            // Real crop growth (Phase 64) - single-player only (see
+            // crop_growth_config's own doc comment above). The same real
+            // "elapsed-seconds accumulator, while-loop drains it"
+            // pattern player_vitals_system's own interval timers use.
+            // LCU_FAST_FARMING scales real elapsed time itself (not the
+            // growth-chance math) - see kFastFarmingTimeScale's own doc
+            // comment.
+            crop_growth_accumulator += fast_farming ? delta_seconds * game::systems::kFastFarmingTimeScale
+                                                     : delta_seconds;
+            while (crop_growth_accumulator >= game::systems::kCropRandomTickIntervalSeconds) {
+                crop_growth_accumulator -= game::systems::kCropRandomTickIntervalSeconds;
+                const auto grown_chunks =
+                    game::systems::update_crop_growth(world, world_light, crop_growth_config, farming_rng);
+                for (const lcu::voxel::ChunkCoord& coord : grown_chunks) {
+                    remesh_and_upload(coord);
+                }
+            }
         }
         // Real pause (Phase 46, brief section 60's menu framework:
         // "game pauses (simulation, audio, network)"): everything from
@@ -4179,6 +4398,16 @@ int main() {
                 const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
                 if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
                     const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                    // Real wheat harvest-by-breaking (Phase 64, brief
+                    // section 64.6): the growth state must be read here,
+                    // BEFORE set_block below clears it back to 0 (set_
+                    // block's own real "fresh placement has no state
+                    // history" behavior - see ChunkStorage's own doc
+                    // comment). Farmland underneath is never touched by
+                    // this at all, so it honestly stays farmland.
+                    const bool broke_wheat = old_id == wheat_id;
+                    const lcu::u8 wheat_state_before_break =
+                        broke_wheat ? target->state_at(split.local.x, split.local.y, split.local.z) : 0;
                     target->set_block(split.local.x, split.local.y, split.local.z, lcu::voxel::kAirBlockId);
                     const auto light_touched =
                         update_lighting_for_edit(split.chunk, split.local, old_id, lcu::voxel::kAirBlockId);
@@ -4197,11 +4426,31 @@ int main() {
                             lcu::audio::distance_attenuation(lcu::math::length(block_center - camera.position), 16.0f);
                         audio_engine.play(break_sound, {pan.left * attenuation, pan.right * attenuation});
                     }
-                    // The broken block hands the player its item - block-break's
-                    // first real item consumer (see DECISIONS.md), a direct
-                    // 1:1 block->item mapping (stone/grass/dirt as of Phase
-                    // 17), not a loot-table system.
-                    spawn_item_entity_for_broken_block(hit->block, hit->world);
+                    if (broke_wheat) {
+                        const auto drops = game::systems::harvest_wheat(wheat_state_before_break, farming_rng);
+                        spawn_item_stack_at(wheat_item_id, drops.wheat_count, hit->world);
+                        spawn_item_stack_at(wheat_seeds_item_id, drops.seed_count, hit->world);
+                    } else {
+                        // The broken block hands the player its item -
+                        // block-break's first real item consumer (see
+                        // DECISIONS.md), a direct 1:1 block->item mapping
+                        // (stone/grass/dirt as of Phase 17), not a loot-
+                        // table system. Wheat/farmland are deliberately
+                        // NOT registered in block_item_mapping (see their
+                        // own registration comments), so this call would
+                        // safely no-op for wheat anyway - the explicit
+                        // branch above exists for the real multi-item
+                        // harvest drop, not to avoid a double-drop bug.
+                        spawn_item_entity_for_broken_block(hit->block, hit->world);
+                        // Optional real 5% seed-from-grass mechanic
+                        // (brief section 64.6's own "optional") - a
+                        // small real bonus chance, independent of the
+                        // grass block's own normal dirt-item drop above.
+                        if (old_id == grass_id &&
+                            std::uniform_real_distribution<lcu::f32>(0.0f, 1.0f)(farming_rng) < 0.05f) {
+                            spawn_item_stack_at(wheat_seeds_item_id, 1, hit->world);
+                        }
+                    }
                 } else {
                     LCU_LOG_DEBUG("Break target's chunk isn't loaded, ignoring");
                 }
@@ -4232,6 +4481,79 @@ int main() {
                 window.set_relative_mouse_mode(false);
                 recompute_workbench_result();
                 LCU_LOG_INFO("Workbench opened");
+            } else if (place_pressed && !networked && hit && tilling_tools.count(selected_stack.item) > 0 &&
+                       (hit->block == grass_id || hit->block == dirt_id) && hit->normal.y > 0.0f) {
+                // Real hoe-till (Phase 64, brief section 64.3): only from
+                // the real TOP face (hit->normal.y > 0), matching real
+                // Minecraft's own hoe interaction - tilling from the side
+                // or below doesn't make sense for a block you're standing
+                // on top of tilling downward into. Single-player only
+                // (see crop_growth_config's own doc comment) - the hoe
+                // itself is never consumed (a real, minimal tool with no
+                // durability concept, matching this phase's own "kein
+                // volles Tool-Tier-System" scope).
+                const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    const lcu::voxel::BlockId old_id = target->block_at(split.local.x, split.local.y, split.local.z);
+                    target->set_block(split.local.x, split.local.y, split.local.z, farmland_id);
+                    const auto light_touched = update_lighting_for_edit(split.chunk, split.local, old_id, farmland_id);
+                    remesh_and_upload(split.chunk);
+                    remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                    hand_swing_elapsed = 0.0f;
+                    LCU_LOG_INFO("Tilled game:farmland at world ({}, {}, {})", hit->world.x, hit->world.y,
+                                 hit->world.z);
+                }
+            } else if (place_pressed && !networked && hit && plantable_seeds.count(selected_stack.item) > 0 &&
+                       hit->block == farmland_id && hit->normal.y > 0.0f) {
+                // Real seed-planting (Phase 64, brief section 64.3):
+                // plants directly above the targeted farmland's own top
+                // face, at real growth state 0. Single-player only, same
+                // real scope as tilling above.
+                const lcu::voxel::BlockId plant_block_id = plantable_seeds.at(selected_stack.item);
+                const lcu::voxel::BlockWorldCoord plant_pos{hit->world.x, hit->world.y + 1, hit->world.z};
+                const auto split = lcu::voxel::world_to_chunk_and_local(plant_pos, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    if (target->block_at(split.local.x, split.local.y, split.local.z) == lcu::voxel::kAirBlockId &&
+                        player_inventory.remove_item(selected_stack.item, 1) == 1) {
+                        target->set_block_with_state(split.local.x, split.local.y, split.local.z, plant_block_id, 0);
+                        const auto light_touched = update_lighting_for_edit(split.chunk, split.local,
+                                                                             lcu::voxel::kAirBlockId, plant_block_id);
+                        remesh_and_upload(split.chunk);
+                        remesh_edit_neighbors(split.chunk, split.local, light_touched);
+                        hand_swing_elapsed = 0.0f;
+                        LCU_LOG_INFO("Planted game:wheat at world ({}, {}, {})", plant_pos.x, plant_pos.y,
+                                     plant_pos.z);
+                    }
+                }
+            } else if (place_pressed && !networked && hit && hit->block == wheat_id) {
+                // Real right-click harvest (Phase 64, brief section
+                // 64.6's own "Ernte (Abbau ODER Rechtsklick auf reifen
+                // Weizen)"): only mature wheat (state == max) actually
+                // harvests - right-clicking immature wheat is a real,
+                // deliberate no-op (falls into this branch and does
+                // nothing further, rather than falling through to
+                // placement/eating, matching real Minecraft's own "right-
+                // click on any wheat never places/eats through it").
+                // Harvesting replants a fresh state-0 wheat immediately
+                // (the real farmland underneath was never touched at
+                // all - "Farmland bleibt nach Ernte Farmland" is
+                // automatically true here since only the wheat block
+                // itself, not what's beneath it, is ever touched).
+                const auto split = lcu::voxel::world_to_chunk_and_local(hit->world, lcu::voxel::Chunk::kEdgeLength);
+                if (lcu::voxel::Chunk* target = world.chunk_at_mutable(split.chunk)) {
+                    const lcu::u8 state = target->state_at(split.local.x, split.local.y, split.local.z);
+                    if (state >= game::systems::kMaxWheatGrowthState) {
+                        const auto drops = game::systems::harvest_wheat(state, farming_rng);
+                        spawn_item_stack_at(wheat_item_id, drops.wheat_count, hit->world);
+                        spawn_item_stack_at(wheat_seeds_item_id, drops.seed_count, hit->world);
+                        target->set_block_with_state(split.local.x, split.local.y, split.local.z, wheat_id, 0);
+                        remesh_and_upload(split.chunk);  // Real state-only change - no lighting/neighbor fixup needed.
+                        hand_swing_elapsed = 0.0f;
+                        LCU_LOG_INFO(
+                            "Harvested mature game:wheat at world ({}, {}, {}) - {} wheat, {} seeds; replanted",
+                            hit->world.x, hit->world.y, hit->world.z, drops.wheat_count, drops.seed_count);
+                    }
+                }
             } else if (place_pressed && selected_edible != edible_hunger_restore.end()) {
                 // Real eating (Phase 51.2): unlike placement/the
                 // crafting-table intercept above, this deliberately

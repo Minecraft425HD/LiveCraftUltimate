@@ -82,16 +82,20 @@ system: 5 real procedural skins, a real `SkinCatalog` that also
 discovers uploaded PNG files, a real "Skins" menu screen with a real
 "Load own skin..." file-picker button wired to `SDL_ShowOpenFileDialog`,
 real options.txt persistence with startup fallback, real live-reload,
-and real independent per-NPC fixed skins)**, and **Phase 63 (the real
+and real independent per-NPC fixed skins)**, **Phase 63 (the real
 farming-foundation block-state system: a parallel per-voxel state
 array on `ChunkStorage`, chunk format v2 with real v1-file backward
 compatibility, a network `ChunkData` wire format that needed zero
 changes since it already carries whatever the upgraded serializer
 produces, and real state-awareness in `mesh_chunk_greedy` - no
 merging across different states, plus an opt-in state-to-texture-index
-mechanism no block uses yet)** are done - see TASK_QUEUE.md
-for per-phase detail as each of the remaining
-3 phases lands. See
+mechanism no block uses yet)**, and **Phase 64 (real farming: `game:
+farmland`/`game:wheat` with 8 real growth stages, real procedural
+growth-stage textures, a real per-random-tick growth system gated on
+light and calibrated to +1 stage per real in-game day, real till/
+plant/harvest interactions, and real harvest drops)** are done - see
+TASK_QUEUE.md for per-phase detail as each of the remaining
+2 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2594,28 +2598,44 @@ None currently tracked.
   arm/left-leg pixels are an unmirrored copy of the same file's own
   right-arm/right-leg pixels (real Minecraft flips this copy; a real,
   documented simplification, see DECISIONS.md).
-- Phase 63's block-state system is a real, tested foundation with no
-  real consumer yet - no block actually uses a non-zero state or sets
-  `BlockDefinition::texture_index_offset_by_state` (Phase 64's wheat is
-  the first real one). Farming itself (crops, growth, harvest) still
-  doesn't exist - see the standing "No farming" exclusion below, now
-  narrowed to "no crop CONTENT yet", not "no state mechanism".
 - **No mobs** — no hostile/passive/neutral entity content of any kind
   (only the pre-existing wandering AI/item entities exist). **No
   redstone** — no wiring/logic-gate/mechanism content. **No
   enchantments/anvil/potions** — no enchanting table, anvil repair, or
   brewing. **No Nether/End** — a single overworld dimension only. **No
   villagers/trading**. **No structures** (out of scope since Phase
-  38-41's own worldgen phases, still true). **No farming** — no crops,
-  no way to grow/harvest food; `game:apple`/`game:bread` (Phase 51)
-  therefore have no survival obtain path, only a direct debug-style
-  grant (`LCU_VERIFY_HEALTH`'s own setup). **No chat/server browser** —
+  38-41's own worldgen phases, still true). **No chat/server browser** —
   networked mode is still connect-by-port only, no in-game text
   communication. All of these are explicit, standing exclusions from
   the current multi-phase directive, not phases that were attempted
-  and fell short. (~~No skin customization~~ **Fixed** (Phase 62): a
-  real, full skin system now exists - see its own Known Limitations
-  entry below.)
+  and fell short. (~~No skin customization~~ **Fixed** (Phase 62).
+  ~~No farming~~ **Fixed** (Phase 64) - wheat/farmland now exist; see
+  their own Known Limitations entries below and DECISIONS.md. `game:
+  apple`'s own debug-style-grant-only obtain path is unaffected -
+  apples still have no real survival source.)
+- Phase 64's real farming has real, documented scope limits: **wheat
+  is solid** (`has_collision=true`, not real Minecraft's walk-through
+  crop) - this project's raycast targeting is gated entirely on that
+  flag (see `game:water`'s own doc comment), so a non-collidable wheat
+  block would be untargetable/unharvestable; the same trade-off `game:
+  torch` already accepts. **Rendering is a full alpha-cutout cube, not
+  real cross/X-shaped crop geometry** - `mesh_chunk_greedy` has no
+  non-cube rendering path at all; the brief's own "cross_block"
+  category is real **PARTIAL**. **Growth is single-player/client-
+  authoritative only** - a networked player can't till/plant/harvest
+  at all yet (no server-side mirror exists, matching local `AIWander`'s
+  own scope split - see DECISIONS.md). A real, newly-discovered timing
+  caveat: this project's standard `LCU_VERIFY_*` regression sweep uses
+  `LCU_MAX_FRAMES=60`, which (confirmed by direct measurement while
+  building `LCU_VERIFY_FARMING`) can complete in well under 1 real
+  wall-clock second in this sandbox - meaning some EXISTING verify
+  hooks' own later real-time-gated pulses may never actually fire
+  within that standard sweep window (a real gap in the established
+  convention, not something Phase 64 caused; retroactively re-auditing
+  every prior hook's own frame count is out of this phase's own scope -
+  see DECISIONS.md). `LCU_VERIFY_FARMING` itself was confirmed for real
+  with a dedicated, much higher frame count instead (see BUILD_STATUS.
+  md for the exact command).
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

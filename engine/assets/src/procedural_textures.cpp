@@ -345,6 +345,40 @@ TilePixels generate_crack(u32 stage) {
     return px;
 }
 
+TilePixels generate_wheat_stage(u32 stage) {
+    TilePixels px{};  // Zero-initialized = fully transparent base.
+    LCU_ASSERT(stage < 8);
+    constexpr u32 kSeed = 300;
+    // Real, monotonically-growing coverage - same real technique as
+    // generate_crack: one fixed noise field, a threshold that rises
+    // with `stage`, so every higher stage's real wheat pixels are a
+    // superset of the stage below (real growth, nothing "un-grows").
+    // Sparse at stage 0 (barely sprouted), nearly filling the tile by
+    // stage 7 (a real, full-looking crop) - Minecraft's own crop
+    // sprites follow the same real "more coverage = more grown" idea.
+    const f32 threshold = 0.12f + static_cast<f32>(stage) * 0.11f;  // stage 0: 12%, stage 7: 89%.
+    // Real green-to-gold color blend as the plant matures - young
+    // wheat is green, ripe wheat is golden-brown, the same real visual
+    // cue Minecraft's own wheat texture uses.
+    const f32 maturity = static_cast<f32>(stage) / 7.0f;
+    const auto lerp_u8 = [](u8 from, u8 to, f32 t) {
+        return clamp_u8(static_cast<f32>(from) + (static_cast<f32>(to) - static_cast<f32>(from)) * t);
+    };
+    const u8 base_r = lerp_u8(90, 195, maturity);
+    const u8 base_g = lerp_u8(150, 165, maturity);
+    const u8 base_b = lerp_u8(55, 60, maturity);
+    for (u32 y = 0; y < kSize; ++y) {
+        for (u32 x = 0; x < kSize; ++x) {
+            if (pixel_noise(kSeed, x, y) < threshold) {
+                set_pixel(px, x, y, noisy_channel(base_r, 0.15f, kSeed + 1, x, y, 5),
+                           noisy_channel(base_g, 0.15f, kSeed + 1, x, y, 6),
+                           noisy_channel(base_b, 0.15f, kSeed + 1, x, y, 7), 255);
+            }
+        }
+    }
+    return px;
+}
+
 TilePixels generate_tile(TileId tile) {
     switch (tile) {
         case TileId::GrassTop:
@@ -392,6 +426,15 @@ TilePixels generate_tile(TileId tile) {
         case TileId::Crack8:
         case TileId::Crack9:
             return generate_crack(static_cast<u32>(tile) - static_cast<u32>(TileId::Crack0));
+        case TileId::WheatStage0:
+        case TileId::WheatStage1:
+        case TileId::WheatStage2:
+        case TileId::WheatStage3:
+        case TileId::WheatStage4:
+        case TileId::WheatStage5:
+        case TileId::WheatStage6:
+        case TileId::WheatStage7:
+            return generate_wheat_stage(static_cast<u32>(tile) - static_cast<u32>(TileId::WheatStage0));
         case TileId::Count:
             break;
     }

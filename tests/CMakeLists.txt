@@ -29,6 +29,7 @@ add_executable(VoxelTests
     game/systems/replication_protocol_test.cpp
     game/systems/item_entity_system_test.cpp
     game/systems/player_vitals_system_test.cpp
+    game/systems/crop_growth_system_test.cpp
     game/items/block_item_mapping_test.cpp
     network/sequence_test.cpp
     network/packet_header_test.cpp

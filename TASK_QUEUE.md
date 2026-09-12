@@ -2610,6 +2610,38 @@ Honestly scoped: this phase is the foundation only - no real block
 sets `texture_index_offset_by_state` or uses a non-zero state yet
 (Phase 64's wheat is the first real consumer).
 
+## Phase 64 — Farming (wheat, growth, harvest)
+
+- [x] Real `game:farmland` (tilled from grass/dirt via a hoe) and
+  `game:wheat` (8 real growth states, planted via seeds).
+- [x] 8 new procedural `generate_wheat_stage` textures mapped onto
+  wheat's own state via `texture_index_offset_by_state`.
+- [x] Real growth: `game::systems::update_crop_growth` - per-random-
+  tick scan gated on light >= 9, calibrated to +1 stage/real day;
+  `LCU_FAST_FARMING=1` scales real elapsed time for fast verification.
+- [x] Real harvest: break OR right-click mature wheat drops 1-3 wheat
+  + 1-3 seeds (`game::systems::harvest_wheat`); immature drops 1 seed;
+  right-click harvest replants immediately; farmland stays farmland.
+- [x] Optional real 5% seed-from-grass bonus drop.
+- [x] New items: `game:wheat_seeds`, `game:wheat`, minimal `game:
+  wooden_hoe` (no durability).
+- [x] New unit tests (`CropGrowthSystem.*`, `HarvestWheat.*`,
+  `GenerateWheatStage.*`) and a new `LCU_VERIFY_FARMING` headless hook,
+  confirmed via a real, dedicated longer-than-usual headless run.
+
+`ctest` 646/646 (bgfx, up from 629) / 638/638 (non-bgfx, up from 621).
+
+Honestly scoped: wheat is solid (`has_collision=true`, a real,
+documented trade-off for real raycast targetability - see DECISIONS.
+md); rendering is a full alpha-cutout cube, not real cross/X-shaped
+crop geometry (the brief's own "cross_block" category is real
+**PARTIAL** - `mesh_chunk_greedy` has no non-cube rendering path);
+growth/interactions are single-player/client-authoritative only, no
+networked farming sync yet. `LCU_VERIFY_FARMING` needed a real,
+dedicated `LCU_MAX_FRAMES=100000` run (not the standard 60-frame
+sweep) - see DECISIONS.md for the real, newly-discovered timing
+caveat this uncovered about the project's own established convention.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:
