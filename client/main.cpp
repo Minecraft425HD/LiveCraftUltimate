@@ -87,6 +87,7 @@
 #include "lcu/platform/native_handle.h"
 #include "lcu/rendering/chunk_mesh_upload.h"
 #include "lcu/rendering/frustum.h"
+#include "lcu/rendering/occlusion_culler.h"
 #include "lcu/rendering/renderer.h"
 #include "lcu/rendering/shader_program.h"
 #include "lcu/ui/crafting_table_screen_renderer.h"
@@ -1593,6 +1594,32 @@ int main() {
     // remesh_and_upload's own destroy-before-reupload step doesn't need
     // this since the AABB for the SAME coord never changes on a re-mesh).
     std::unordered_map<lcu::voxel::ChunkCoord, lcu::physics::AABB> chunk_aabb_cache;
+    // Real BFS occlusion culling (Phase 69) - one persistent object for
+    // the whole run (brief section 69.4's own "als permanentes Objekt"),
+    // so its boundary_opacity_mask cache genuinely survives frame to
+    // frame. Declared here (not down with the other LCU_VERIFY_* hooks)
+    // because remesh_and_upload below - which runs during the very
+    // first chunk-load loop, long before the render loop's own verify_
+    // culling declaration - needs to invalidate it on every real chunk
+    // load/edit.
+    lcu::rendering::OcclusionCuller occlusion_culler;
+    // Real cache-reuse (brief section 69.3's own "nur bei Kamerabewegung
+    // neu berechnen"): the render loop below only re-runs the BFS when
+    // the camera has actually moved or turned since the last frame that
+    // computed it.
+    std::unordered_set<lcu::voxel::ChunkCoord> cached_chunks_visible_after_occlusion;
+    bool occlusion_cache_initialized = false;
+    // Real second trigger for the render loop's own cached result set,
+    // alongside camera movement: a block edit/chunk load/unload can
+    // change what's reachable even while the camera itself stays put
+    // (e.g. breaking a wall while standing still) - remesh_and_upload
+    // and the chunk-unload path both set this whenever they invalidate
+    // the culler's own mask cache, so a stale render-loop-level result
+    // set is never served just because the camera didn't move.
+    bool occlusion_world_dirty = true;
+    lcu::math::Vec3 last_occlusion_camera_position{};
+    lcu::f32 last_occlusion_camera_yaw = 0.0f;
+    lcu::f32 last_occlusion_camera_pitch = 0.0f;
 #endif
 
     // Per-chunk light data (brief section 24), fed into meshing since
@@ -1750,6 +1777,15 @@ int main() {
             lcu::physics::AABB{chunk_aabb_min, chunk_aabb_min + lcu::math::Vec3{static_cast<lcu::f32>(kAabbChunkEdge),
                                                                                  static_cast<lcu::f32>(kAabbChunkEdge),
                                                                                  static_cast<lcu::f32>(kAabbChunkEdge)}};
+        // Real OcclusionCuller cache invalidation (Phase 69, brief
+        // section 69.5's own "Block-Edits invalidieren Cache" and
+        // "Chunk-Load invalidiert Cache") - remesh_and_upload is the one
+        // real place both a fresh chunk load AND a post-edit remesh
+        // already funnel through, so invalidating here covers both real
+        // triggers at once, not two separate call sites that could drift
+        // out of sync.
+        occlusion_culler.invalidate_neighbors(coord);
+        occlusion_world_dirty = true;
 #endif
         const lcu::lighting::Light* light_ptr = world_light.find_chunk_light(coord);
         lcu::voxel::ChunkMesh mesh;
@@ -2065,6 +2101,45 @@ int main() {
          static_cast<lcu::f32>(spawn_column.z)});
     lcu::physics::PlayerPhysicsConfig physics_config;
 
+    // Real, deliberate synthetic setup for LCU_VERIFY_CULLING's own
+    // "geschlossener Raum" scenario (Phase 69, brief section 69.6):
+    // `LCU_CULLING_SCENARIO=cave` directly overwrites the real, already-
+    // loaded spawn chunk into solid stone, then carves a real interior
+    // air pocket well clear of every one of its 6 boundary faces (local
+    // 6..9 on every axis, kEdgeLength=16) - so OcclusionCuller's own
+    // boundary_opacity_mask for this one chunk comes out fully sealed
+    // (all 6 bits set) regardless of anything outside it, and BFS from
+    // the camera's own chunk can never escape it. Teleports the player
+    // into the pocket's real center - the same "hook synthesizes exactly
+    // the state a real action would produce" precedent every other
+    // LCU_VERIFY_* hook's own direct world-block seed already uses (see
+    // LCU_VERIFY_WORKBENCH's own crafting-table block overwrite).
+    if (const char* scenario = std::getenv("LCU_CULLING_SCENARIO"); scenario != nullptr && scenario == std::string("cave")) {
+        if (lcu::voxel::Chunk* cave_chunk = world.chunk_at_mutable(spawn_chunk)) {
+            for (lcu::u32 x = 0; x < lcu::voxel::Chunk::kEdgeLength; ++x) {
+                for (lcu::u32 y = 0; y < lcu::voxel::Chunk::kEdgeLength; ++y) {
+                    for (lcu::u32 z = 0; z < lcu::voxel::Chunk::kEdgeLength; ++z) {
+                        cave_chunk->set_block(x, y, z, stone_id);
+                    }
+                }
+            }
+            for (lcu::u32 x = 6; x <= 9; ++x) {
+                for (lcu::u32 y = 6; y <= 9; ++y) {
+                    for (lcu::u32 z = 6; z <= 9; ++z) {
+                        cave_chunk->set_block(x, y, z, lcu::voxel::kAirBlockId);
+                    }
+                }
+            }
+        }
+        constexpr lcu::i32 kCaveEdge = static_cast<lcu::i32>(lcu::voxel::Chunk::kEdgeLength);
+        player.aabb = make_player_aabb({static_cast<lcu::f32>(spawn_chunk.x * kCaveEdge + 7),
+                                         static_cast<lcu::f32>(spawn_chunk.y * kCaveEdge + 6),
+                                         static_cast<lcu::f32>(spawn_chunk.z * kCaveEdge + 7)});
+        remesh_and_upload(spawn_chunk);
+        LCU_LOG_INFO("LCU_CULLING_SCENARIO=cave: sealed chunk ({},{},{}) around the player", spawn_chunk.x,
+                     spawn_chunk.y, spawn_chunk.z);
+    }
+
     // Real player health/hunger (Phase 51) - plain structs, not ECS
     // components, matching PlayerPhysicsState's own placement right
     // above (see each component header's own doc comment for why:
@@ -2180,6 +2255,15 @@ int main() {
                 gpu_water_meshes.erase(it);
             }
             chunk_aabb_cache.erase(coord);
+            // Real OcclusionCuller cache hygiene (Phase 69, brief
+            // section 69.5's own "Chunk-Unload invalidiert Cache") - a
+            // stale mask for an unloaded chunk would otherwise sit in
+            // the map forever, and if the same coordinate is ever
+            // reloaded (e.g. streaming back into range), a fresh
+            // recompute is correct even though real terrain generation
+            // is deterministic and would give the same result anyway.
+            occlusion_culler.invalidate_neighbors(coord);
+            occlusion_world_dirty = true;
 #endif
             // Real map hygiene (WorldLight::remove_chunk_light's own
             // doc comment has named this phase as its real caller
@@ -2203,7 +2287,17 @@ int main() {
     // Start looking mostly straight down so the raycast this vertical
     // slice exercises has a guaranteed target (the ground right below
     // spawn) without needing any look input first - see DECISIONS.md.
-    camera.pitch = -1.4f;
+    // Real, deliberate exception for LCU_CULLING_SCENARIO=cave (Phase
+    // 69): that scenario's own real ceiling-shaft check (see
+    // verify_culling_cave's own doc comment) needs the camera looking
+    // UP at the sealed room's own ceiling instead, or the chunk above
+    // would fail Phase 68's own frustum test regardless of whether a
+    // real portal exists - same sign convention as the default (negative
+    // = down), just the opposite direction.
+    camera.pitch = (std::getenv("LCU_CULLING_SCENARIO") != nullptr &&
+                    std::string(std::getenv("LCU_CULLING_SCENARIO")) == "cave")
+                       ? 1.4f
+                       : -1.4f;
 
     // A handful of wandering AI entities (brief section 60) - a real
     // engine/ecs + game/systems consumer, not just a unit test. Spawned
@@ -2592,6 +2686,25 @@ int main() {
 #if defined(LCU_ENABLE_BGFX)
     const bool verify_culling = std::getenv("LCU_VERIFY_CULLING") != nullptr;
     lcu::f32 culling_log_accumulator_seconds = 0.0f;
+    // Real "Block unter Kamera abbauen -> visible-Zahl steigt um 1"
+    // check (brief section 69.6): only meaningful combined with
+    // LCU_CULLING_SCENARIO=cave (a real, fully sealed starting room -
+    // without it there's no guaranteed single wall to open a portal
+    // through). At a real, fixed elapsed-time point, directly carves a
+    // real vertical shaft from the sealed room's own ceiling all the way
+    // through the chunk's real top boundary (the same "hook synthesizes
+    // exactly the state a real action would produce" precedent every
+    // other LCU_VERIFY_* hook's own direct world-block edit already
+    // uses, e.g. LCU_VERIFY_WORKBENCH's crafting-table block overwrite) -
+    // then real remesh_and_upload/invalidate_neighbors calls apply the
+    // exact same real invalidation path an actual player-driven block
+    // break would trigger, and the next per-second log line shows the
+    // real, resulting higher visible-after-occlusion count.
+    const bool verify_culling_cave =
+        verify_culling && std::getenv("LCU_CULLING_SCENARIO") != nullptr &&
+        std::string(std::getenv("LCU_CULLING_SCENARIO")) == "cave";
+    const auto verify_culling_start = std::chrono::steady_clock::now();
+    bool verify_culling_cave_hole_opened = false;
 #endif
 
     // Headless verification hook for per-movement chunk streaming
@@ -4946,15 +5059,62 @@ int main() {
         // own doc comment for why the order matters for its column-major
         // row-extraction math.
         const lcu::rendering::Frustum frustum = lcu::rendering::Frustum::from_view_projection(proj * view);
+        if (verify_culling_cave && !verify_culling_cave_hole_opened &&
+            std::chrono::duration<lcu::f32>(std::chrono::steady_clock::now() - verify_culling_start).count() >= 2.0f) {
+            // Real "Block unter Kamera abbauen -> visible-Zahl steigt um
+            // 1" check (brief section 69.6) - see verify_culling_cave's
+            // own declaration comment. Carves a real vertical shaft from
+            // the sealed room's own ceiling (local y=10, just above the
+            // pocket) all the way through the chunk's real top boundary
+            // (local y=15) at one interior column - opening a genuine
+            // portal to the chunk above (loaded, all-air, in the initial
+            // load loop - see its own real -Y face never being fully
+            // opaque).
+            if (lcu::voxel::Chunk* cave_chunk = world.chunk_at_mutable(spawn_chunk)) {
+                for (lcu::u32 y = 10; y < lcu::voxel::Chunk::kEdgeLength; ++y) {
+                    cave_chunk->set_block(7, y, 7, lcu::voxel::kAirBlockId);
+                }
+                remesh_and_upload(spawn_chunk);
+                LCU_LOG_INFO("LCU_CULLING_SCENARIO=cave: opened a real shaft through the ceiling");
+            }
+            verify_culling_cave_hole_opened = true;
+        }
         // Real LCU_VERIFY_CULLING counters (Phase 68/69) - real per-frame
         // totals, not sampled/estimated, logged once per real elapsed
-        // second by the verify_culling hook further down. `visible_after_
-        // occlusion` equals `visible_after_frustum` for now (Phase 69's
-        // own BFS occlusion pass doesn't exist yet) - a real, honest
-        // placeholder, not a fabricated number, matching this hook's own
-        // Phase-69-forward log line shape from the start.
+        // second by the verify_culling hook further down.
         lcu::usize culling_chunks_total = 0;
         lcu::usize culling_visible_after_frustum = 0;
+
+        // Real BFS occlusion culling (Phase 69) - see occlusion_culler's
+        // own declaration comment for the cache-reuse condition. Reusing
+        // last frame's result set here is the actual real optimization
+        // brief section 69.3 asks for ("nur bei Kamerabewegung neu
+        // berechnen"), not just documentation - a genuinely unmoved,
+        // unrotated camera with no relevant world edit since skips the
+        // whole BFS this frame. `occlusion_world_dirty` is the second,
+        // equally real trigger: a block edit/chunk load/unload can
+        // change what's reachable even while the camera itself stays
+        // put (see its own declaration comment).
+        const bool occlusion_camera_moved = !occlusion_cache_initialized ||
+                                             camera.position != last_occlusion_camera_position ||
+                                             camera.yaw != last_occlusion_camera_yaw ||
+                                             camera.pitch != last_occlusion_camera_pitch;
+        if (occlusion_camera_moved || occlusion_world_dirty) {
+            const auto camera_chunk_split = lcu::voxel::world_to_chunk_and_local(
+                lcu::voxel::BlockWorldCoord{static_cast<lcu::i64>(std::floor(camera.position.x)),
+                                             static_cast<lcu::i64>(std::floor(camera.position.y)),
+                                             static_cast<lcu::i64>(std::floor(camera.position.z))},
+                lcu::voxel::Chunk::kEdgeLength);
+            cached_chunks_visible_after_occlusion =
+                occlusion_culler.compute(world, block_registry, camera_chunk_split.chunk, frustum);
+            last_occlusion_camera_position = camera.position;
+            last_occlusion_camera_yaw = camera.yaw;
+            last_occlusion_camera_pitch = camera.pitch;
+            occlusion_cache_initialized = true;
+            occlusion_world_dirty = false;
+        }
+        const std::unordered_set<lcu::voxel::ChunkCoord>& chunks_visible_after_occlusion =
+            cached_chunks_visible_after_occlusion;
 
         // Real per-frame draw-call count (Phase 36, brief section 60's
         // debug overlay) - incremented only when a submit_*() call
@@ -5043,17 +5203,17 @@ int main() {
             culling_log_accumulator_seconds += delta_seconds;
             if (culling_log_accumulator_seconds >= 1.0f) {
                 culling_log_accumulator_seconds -= 1.0f;
-                // "visible after occlusion" equals the frustum count
-                // until Phase 69's own real BFS occlusion pass exists -
-                // a real, honest placeholder (this hook's own log line
-                // shape doesn't change once Phase 69 lands, only this
-                // number stops merely mirroring the one before it).
                 LCU_LOG_INFO("Chunks total: {}, visible after frustum: {}, visible after occlusion: {}",
-                             culling_chunks_total, culling_visible_after_frustum, culling_visible_after_frustum);
+                             culling_chunks_total, culling_visible_after_frustum,
+                             chunks_visible_after_occlusion.size());
             }
         }
         for (const auto& [coord, gpu_mesh] : gpu_meshes) {
-            if (!chunks_visible_after_frustum.count(coord)) {
+            // Real occlusion-gated render set (Phase 69) - a real
+            // SUBSET of chunks_visible_after_frustum (compute() itself
+            // never enters a chunk the frustum already rejected), so
+            // testing against it alone is both correct and sufficient.
+            if (!chunks_visible_after_occlusion.count(coord)) {
                 continue;
             }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),
@@ -5079,7 +5239,7 @@ int main() {
         // `gpu_meshes` above) - a real, accepted limitation for large
         // adjacent water bodies, see DECISIONS.md.
         for (const auto& [coord, gpu_water_mesh] : gpu_water_meshes) {
-            if (!chunks_visible_after_frustum.count(coord)) {
+            if (!chunks_visible_after_occlusion.count(coord)) {
                 continue;
             }
             const lcu::math::Mat4 model = lcu::math::Mat4::translation({static_cast<lcu::f32>(coord.x * kEdge),

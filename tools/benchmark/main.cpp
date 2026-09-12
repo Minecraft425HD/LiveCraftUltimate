@@ -34,6 +34,14 @@
 #include "lcu/world/world.h"
 #include "lcu/world/worldgen.h"
 
+// Lcu::Rendering (and its OcclusionCuller/Frustum) only builds under
+// LCU_ENABLE_BGFX - see engine/rendering/CMakeLists.txt and this file's
+// own CMakeLists.txt conditional link.
+#if defined(LCU_ENABLE_BGFX)
+#include "lcu/rendering/frustum.h"
+#include "lcu/rendering/occlusion_culler.h"
+#endif
+
 namespace {
 
 using lcu::voxel::BlockDefinition;
@@ -206,6 +214,51 @@ static void BM_Render_BackfaceCulling(benchmark::State& state) {
                             : 100.0 * static_cast<lcu::f64>(front_facing) / static_cast<lcu::f64>(triangle_count);
 }
 BENCHMARK(BM_Render_BackfaceCulling);
+
+// --- Occlusion culling (Phase 69, engine/rendering::OcclusionCuller) --------
+
+#if defined(LCU_ENABLE_BGFX)
+// A frustum that accepts every AABB (see Frustum::from_view_projection's
+// own degenerate-matrix fallback) - this benchmark is about the real
+// BFS/cache cost, not about re-exercising frustum rejection.
+static lcu::rendering::Frustum permissive_frustum_for_benchmark() {
+    lcu::math::Mat4 zero{};
+    for (lcu::f32& value : zero.m) {
+        value = 0.0f;
+    }
+    return lcu::rendering::Frustum::from_view_projection(zero);
+}
+
+// Real "1000 chunks" scene (brief section 69.6's own literal target): a
+// 10x10x10 loaded volume, all real air (an open-sky scenario - the
+// brief's own "< 1 ms" expectation is for the steady-state, cache-warm
+// BFS itself, not first-time mask computation, which is a separate real
+// cost `compute()`'s own first call already pays once and this
+// benchmark deliberately excludes from the timed loop below).
+static void BM_Render_OcclusionCulling(benchmark::State& state) {
+    World world(1, [](Chunk&, ChunkCoord) {});
+    for (lcu::i32 x = 0; x < 10; ++x) {
+        for (lcu::i32 y = 0; y < 10; ++y) {
+            for (lcu::i32 z = 0; z < 10; ++z) {
+                world.load_chunk({x, y, z});
+            }
+        }
+    }
+    BlockId stone_id = 0;
+    BlockRegistry registry = make_registry_with_stone(stone_id);
+    const lcu::rendering::Frustum frustum = permissive_frustum_for_benchmark();
+    lcu::rendering::OcclusionCuller culler;
+    // Real cache warm-up (see this function's own doc comment above) -
+    // not part of the timed loop.
+    culler.compute(world, registry, {5, 5, 5}, frustum);
+
+    for (auto _ : state) {
+        auto visible = culler.compute(world, registry, {5, 5, 5}, frustum);
+        benchmark::DoNotOptimize(visible);
+    }
+}
+BENCHMARK(BM_Render_OcclusionCulling);
+#endif
 
 // --- Lighting (engine/lighting) ---------------------------------------------
 

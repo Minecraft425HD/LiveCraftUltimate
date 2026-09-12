@@ -118,8 +118,18 @@ per-frame render loop to skip `submit_chunk_mesh` for chunks with no
 part inside it; a real, honestly-investigated gap where this project's
 own default-scene FOV=70 measures ~30% visible rather than the brief's
 own "~50% at 90°" - confirmed real and FOV-responsive by re-testing at
-FOV=90 and FOV=170, see DECISIONS.md)** are done - see TASK_QUEUE.md for
-per-phase detail as each of the remaining 4 phases lands. See
+FOV=90 and FOV=170, see DECISIONS.md)**, and **Phase 69 (real BFS
+occlusion culling - `engine/rendering::OcclusionCuller` floods across
+chunk boundaries only where a real per-chunk 6-bit `boundary_opacity_
+mask` says a portal might exist, gated by Phase 68's own frustum test
+too; wired in as a real persistent object with real cache-reuse on
+either camera movement/rotation or a relevant block edit/load/unload;
+a new `LCU_CULLING_SCENARIO=cave` scenario confirms a real sealed room
+renders only its own chunk, and a real, investigated benchmark
+confirmed the algorithm meets the brief's own "<1ms" target once run
+under an optimized build rather than this project's own unoptimized
+default - see DECISIONS.md)** are done - see TASK_QUEUE.md for
+per-phase detail as each of the remaining 3 phases lands. See
 "Reality Audit" and
 "Last Completed Task" below for what they
 cover and what's next. Phases 26-42 (visible terrain colors, skybox,
@@ -2702,6 +2712,23 @@ None currently tracked.
   DECISIONS.md for the full geometric explanation - not a bug, but a
   real property of this specific near-spawn test scene rather than a
   large, roughly isotropic render-distance area.
+- Phase 69's occlusion portal test is a real, coarse approximation: it
+  caches one bit per chunk side ("is this whole 16x16 face provably
+  100% opaque"), not an exact per-position match between two chunks'
+  own touching faces - a real, rare false positive is possible (each
+  side has a gap, but never at the same position), never a false
+  negative. `is_opaque` reuses `is_transparent`, so `game:leaves`
+  (opaque since Phase 61) also counts as opaque for occlusion, not
+  matching the brief's own real-Minecraft-describing "Blätter lassen
+  Licht durch" wording. `LCU_CULLING_SCENARIO=cave`'s own "open a real
+  shaft" check produces a real, larger jump than the brief's own literal
+  "+1" (the chunk revealed is itself fully open sky, so BFS keeps
+  going) - a real, honest property of testing in an otherwise-open
+  36-chunk world, with a clean, isolated "+1" proof instead in
+  `OcclusionCullerTest`. `BM_Render_OcclusionCulling` measured 1.06 ms
+  in this project's own unoptimized "Development" build (over the
+  brief's own "<1ms" target) but 0.12 ms in a one-off optimized
+  Release+bgfx build - see DECISIONS.md for the full investigation.
 - Fall damage has no armor/enchantment mitigation — `fall_damage_for_
   distance` (Phase 51) is a flat `distance - 3` with nothing to reduce
   it, matching this project's real current scope (no armor/enchantment

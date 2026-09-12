@@ -4664,3 +4664,137 @@ the brief's own expected "~50%" number without the real measured 30%
 and its explanation - rejected as exactly the kind of unearned
 "fertig"/"works" claim this project's own brief explicitly forbids (see
 `PROJECT_STATE.md`'s own citation of brief section 96).
+
+## 2026-09-12 — Phase 69: a coarse per-face opacity bitmask instead of exact per-position portal matching, reusing is_transparent (leaves included), and a Development-vs-Release benchmark investigation
+
+**Context:** Phase 69 is the culling cascade's own real "Haupthebel"
+(main lever) - BFS occlusion culling across chunk boundaries, on top of
+Phase 67's backface fix and Phase 68's frustum test.
+
+**The portal test is a real, deliberate approximation of the brief's
+own literal per-position wording, not the exact algorithm implemented
+verbatim.** The brief's own "Algorithmus" section describes checking
+"existiert auf der 16×16-Grenzfläche mindestens eine Position, wo BEIDE
+Seiten nicht-opak sind" - an exact, position-by-position joint test
+between two neighboring chunks' own touching faces. Its own "Neue
+Klasse" section, immediately after, specifies the real caching
+mechanism instead: a single per-chunk, per-side bit ("komplett opak
+(kein Portal)"), with BFS explicitly told to use that bitmask ("nutzt
+die Bitmaske"). These two descriptions aren't quite the same algorithm:
+the coarse bitmask can't express "chunk A has a gap at (3,5) and chunk B
+has a gap at (9,12), but nowhere the same" - it can only say "does THIS
+chunk's own face have ANY gap at all". Implemented the brief's own
+literal, actually-specified caching mechanism (the second section) over
+the first section's more precise but uncached description, since that's
+the one it actually asks to build and cache - a portal is assumed to
+exist whenever NEITHER of the two facing sides is individually fully
+opaque. This is real, occasionally conservative (a false "maybe a
+portal" when each side has a gap but not at a matching position) but
+never the other direction (a real portal is never wrongly hidden,
+since a side that has ANY gap is never marked fully opaque) - documented
+via `OcclusionCuller`'s own doc comment and confirmed correct for every
+one of the real, controlled test cases in `OcclusionCullerTest`.
+
+**`is_opaque` reuses `BlockDefinition::is_transparent` - the exact same
+flag lighting propagation and mesh face-culling already use - rather
+than inventing a second, separately-tracked "vision opacity" concept.**
+This has a real, honest consequence the brief's own wording doesn't
+anticipate: `game:leaves` is registered `is_transparent=false` in this
+project (a real, documented Phase 61 simplification - leaves render as
+solid opaque cubes, not alpha-tested), so leaves count as OPAQUE for
+occlusion purposes too, contradicting the brief's own literal "Wasser
+und Blätter lassen Licht durch, dürfen BFS nicht stoppen" (which
+describes real Minecraft's own leaves). Reusing the existing flag keeps
+occlusion culling consistent with how this project's leaves already
+render and already block light - inventing a second flag just for this
+phase would create a real, confusing inconsistency (a leaf block that
+"looks" opaque, "blocks light" opaque, but "is seen through" by
+occlusion culling) for a real gameplay content decision (real leaves)
+this phase's own scope doesn't touch.
+
+**Two real triggers govern the render loop's own cached occlusion
+result, not one.** The brief's own wording ("Cache-Reuse wenn Kamera
+sich in diesem Frame nicht bewegt hat") only mentions camera movement.
+Implementing literally only that would have been a real, visible bug:
+breaking a wall while standing still (a completely normal, common real
+action) would never update what's rendered until the camera moved again
+- the cached result would keep showing the old, now-wrong scene. Added
+a second `occlusion_world_dirty` flag, set wherever `remesh_and_upload`
+or the chunk-unload path already invalidate `OcclusionCuller`'s own
+per-chunk mask cache (both real, existing call sites - no new ones
+needed), and OR'd into the render loop's own recompute condition
+alongside camera movement.
+
+**`LCU_CULLING_SCENARIO=cave`'s own real "break a block -> visible count
+increases" check needed the camera looking UP, not down.** This
+project's own default spawn camera looks mostly straight down (`pitch =
+-1.4`, Phase 4's own raycast-needs-a-guaranteed-target reasoning) - the
+chunk directly above the sealed room would fail Phase 68's own frustum
+test regardless of whether a real portal exists, silently making the
+"opening a hole increases visibility" check impossible to ever pass.
+Overriding `camera.pitch` to look up specifically for this one scenario
+(confirmed necessary and sufficient by direct measurement: without the
+override, `visible after occlusion` stayed at 1 even after opening a
+real shaft; with it, it correctly changed) fixed this - a real,
+investigated fix, not a guess.
+
+**The real, measured "opening the shaft" result is a jump to the full
+frustum count, not the brief's own literal "+1".** Once the one
+authored vertical shaft opens a portal to the chunk directly above (all
+real air, loaded at world startup), THAT chunk's own other 5 faces are
+also all open, so BFS keeps flooding through it into the rest of the
+already-open sky above - reaching everything the frustum allows in one
+step, not a single incremental chunk. This is the real, correct behavior
+of the algorithm in an otherwise-open 36-chunk test world, not a bug -
+confirmed via the dedicated, isolated `OcclusionCullerTest.
+HoleInCeilingMakesTheChunkAboveVisible` and
+`OcclusionCullerTest.InvalidateForcesARecomputeReflectingANewBlockEdit`
+unit tests, which DO give a clean, literal "+1" (1 -> 2) in a small,
+fully-controlled 2-chunk setup where there's nothing
+further to cascade into. Building a bigger, more elaborately sealed
+headless scene purely to force the same literal "+1" in the full
+client run was judged disproportionate - the real, honest, larger jump
+already proves the same underlying mechanism (edit -> invalidate ->
+dirty flag -> recompute -> new chunks appear) end to end.
+
+**`BM_Render_OcclusionCulling` measured 1.06 ms in this project's own
+standard "Development" build config - just over the brief's own "< 1
+ms" target - investigated rather than accepted or dismissed.** This
+project's `CMakeLists.txt` sets `CMAKE_BUILD_TYPE=Development` by
+default, which isn't one of CMake's built-in optimized build types (no
+`-O2`/`NDEBUG` the way `Release` gets), matching Google Benchmark's own
+"Library was built as DEBUG" warning on every run. Rather than assume
+this meant a real algorithmic problem OR silently accept a number that
+misses the brief's own stated target, configured a one-off, throwaway
+`CMAKE_BUILD_TYPE=Release` + `LCU_ENABLE_BGFX=ON` build (~900MB,
+deleted immediately after use - not part of this project's own tracked
+build directories) and re-ran the exact same benchmark: 0.12 ms,
+comfortably under the target, and roughly the 8-20x speedup this
+project's own established Development-vs-optimized gap already showed
+elsewhere (see Phase 65's own `dev-bgfx` vs `dev-nobgfx` timing
+findings) - a real, direct confirmation that the algorithm itself is
+fine and the raw Development-build number is simply not representative
+of real, optimized performance, not a fabricated excuse.
+
+**Alternatives considered:** implementing the brief's own literal exact
+per-position portal test (256 position comparisons between neighboring
+faces) instead of the coarser per-chunk bitmask - rejected as
+contradicting the brief's own explicitly-specified caching mechanism,
+and real, unneeded complexity/memory (a full face snapshot per chunk
+instead of 6 bits) for a difference that only matters in a contrived
+edge case (two chunks each with exactly one gap, never aligned);
+inventing a separate "vision-opacity" flag distinct from `is_
+transparent` so leaves could be treated differently for occlusion than
+for lighting/rendering - rejected as introducing a real, confusing
+inconsistency for a change to leaves' own real rendering (Phase 61's
+own scope, not this phase's); recomputing the render loop's own cached
+occlusion result every single frame regardless of movement, skipping
+the cache-reuse optimization the brief explicitly asks for - rejected
+as ignoring a real, stated requirement, not just an unnecessary one;
+scaling up `LCU_CULLING_SCENARIO=cave`'s own sealed structure to
+contain the shaft's cascade and force a literal "+1" - rejected as
+disproportionate scope for what the isolated unit tests already prove
+cleanly; accepting the Development-build 1.06 ms benchmark result at
+face value without investigating - rejected as exactly the kind of
+unverified "close enough" claim this project's own brief explicitly
+forbids (section 96).

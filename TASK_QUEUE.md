@@ -2756,6 +2756,46 @@ FOV=170 (exactly 50%, proving the wiring is genuinely live and the
 36-chunk layout) - see DECISIONS.md for the full geometric reasoning
 and PROJECT_STATE.md Known Limitations.
 
+## Phase 69 — Occlusion culling via BFS
+
+- [x] New `engine/rendering/occlusion_culler.{h,cpp}`: `OcclusionCuller`
+  with `compute` (real BFS from the camera's own chunk, gated by a real
+  per-chunk `boundary_opacity_mask` portal test AND Phase 68's own
+  frustum test), `invalidate`/`invalidate_neighbors` (real cache
+  hygiene on block edit/chunk load/unload).
+- [x] Wired in as one real persistent object in `client/main.cpp`; the
+  render loop's own cached result recomputes on real camera movement/
+  rotation OR a real `occlusion_world_dirty` flag from any relevant
+  edit/load/unload since the last compute.
+- [x] New `LCU_CULLING_SCENARIO=cave` scenario: seals the real spawn
+  chunk solid with an interior air pocket, teleports the player in,
+  looks up; a real, timed edit later opens a shaft through the ceiling.
+- [x] `LCU_VERIFY_CULLING`'s own log line now reports a real, distinct Z
+  (visible after occlusion), not a Y mirror.
+- [x] 7 new `OcclusionCullerTest.*` unit tests on controlled scenarios
+  (all-air, fully-solid, real ceiling hole, real unbroken ceiling,
+  unloaded camera chunk, frustum-still-applies, invalidate-forces-
+  recompute).
+- [x] New `BM_Render_OcclusionCulling` benchmark (1000-chunk, cache
+  pre-warmed).
+
+`ctest` 661/661 (bgfx, up from 654) / 638/638 (non-bgfx, unchanged -
+`OcclusionCuller` only builds under `LCU_ENABLE_BGFX`). Full regression
+sweep clean on both configs.
+
+Honestly scoped: the portal test is a real, coarse per-chunk-per-side
+bitmask, not the brief's own more precise per-position description (see
+DECISIONS.md for why the coarser, explicitly-cached version was built);
+`is_opaque` reuses `is_transparent`, so `game:leaves` counts as opaque
+here too, unlike the brief's own real-Minecraft wording; the cave
+scenario's "open a shaft" check produces a real, larger jump than the
+brief's literal "+1" (the revealed chunk is itself open sky) - a clean,
+isolated "+1" is proven instead by the unit tests; `BM_Render_
+OcclusionCulling` measured 1.06 ms in this project's own unoptimized
+"Development" build (over the brief's own "<1ms") but 0.12 ms in a
+one-off Release+bgfx build - see DECISIONS.md and PROJECT_STATE.md
+Known Limitations for both.
+
 ---
 
 Phase 1 is functionally complete for what a headless sandbox can verify:

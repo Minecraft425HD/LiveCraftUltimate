@@ -2,7 +2,65 @@
 
 All notable changes to this project are recorded here, newest first.
 
-## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68
+## Unreleased — Phase 0 / Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 / Phase 10 / Phase 11 / Phase 12 / Phase 13 / Phase 14 / Phase 15 / Phase 16 / Phase 17 / Phase 18 / Phase 19 / Phase 20 / Phase 21 / Phase 22 / Phase 23 / Phase 24 / Phase 25 / Phase 26 / Phase 27 / Phase 28 / Phase 29 / Phase 30 / Phase 31 / Phase 33 / Phase 34 / Phase 35 / Phase 36 / Phase 37 / Phase 38 / Phase 39 / Phase 40 / Phase 41 / Phase 42 / Phase 43 / Phase 44 / Phase 45 / Phase 46 / Phase 47 / Phase 48 / Phase 49 / Phase 50 / Phase 51 / Phase 52 / Phase 53 / Phase 54 / Phase 55 / Phase 56 / Phase 57 / Phase 58 / Phase 59 / Phase 60 / Phase 61 / Phase 62 / Phase 63 / Phase 64 / Phase 65 / Phase 66 / Phase 67 / Phase 68 / Phase 69
+
+### Phase 69
+
+- **Real BFS occlusion culling** (the culling cascade's own main lever):
+  new `engine/rendering::OcclusionCuller` - starting from the camera's
+  own chunk, floods across chunk boundaries only where a real "portal"
+  might exist (a shared boundary face that isn't provably 100% opaque
+  on at least one side), gated by both this real portal test and Phase
+  68's own frustum test. A chunk buried behind solid rock in every
+  direction (a real cave/mine) is never rendered at all, even if it's
+  inside the frustum.
+- Real per-chunk `boundary_opacity_mask` cache (6 bits/chunk, bit i =
+  side i provably 100% opaque) computed lazily on first BFS visit;
+  `invalidate`/`invalidate_neighbors` discard it on block edit/chunk
+  load/chunk unload. `is_opaque` reuses the exact same `is_transparent`
+  flag lighting/meshing already use - real, honest consequence: `game:
+  leaves` (registered `is_transparent=false` since Phase 61) counts as
+  opaque here too, not matching the brief's own literal "Wasser und
+  Blätter lassen Licht durch" wording (which describes real Minecraft's
+  leaves, not this project's own already-simplified ones).
+- Wired into `client/main.cpp` as one real persistent `OcclusionCuller`
+  object; the render loop's own cached result set is only recomputed
+  when the camera has moved/turned OR a relevant block edit/chunk load/
+  unload happened since the last computation (real cache-reuse, brief
+  section 69.3's own "nur bei Kamerabewegung neu berechnen" plus a
+  second, equally necessary trigger for edits while the camera stands
+  still).
+- New `LCU_CULLING_SCENARIO=cave` headless scenario: seals the real
+  spawn chunk into solid stone with a small interior air pocket (well
+  clear of every boundary face) and teleports the player into it - a
+  real, deterministic "closed room" test the brief's own Verifikation
+  section asks for, plus a real, timed "open a real vertical shaft
+  through the ceiling" edit demonstrating the cache correctly picks up
+  live world changes (measured: sealed room baseline `visible after
+  occlusion: 1`; after opening the shaft, the count jumps to the frustum
+  count since the chunk above is fully open sky, not the brief's own
+  literal "+1" - a real, honestly-documented consequence of testing in
+  an otherwise-open 36-chunk world, not a bug; see DECISIONS.md, and see
+  the new `OcclusionCullerTest.*` unit tests below for a clean, isolated
+  "+1" proof instead).
+- 7 new `OcclusionCullerTest.*` unit tests (all-air reaches everything,
+  fully-solid-world-with-camera-inside sees only itself, a real hole in
+  the ceiling makes the chunk above reachable, a real unbroken ceiling
+  doesn't, an unloaded camera chunk gives an empty result, the frustum
+  test still applies even through a real portal, and invalidate forces
+  a real recompute after an edit).
+- New `BM_Render_OcclusionCulling` benchmark: a real 10x10x10 (1000-
+  chunk) all-air scene, cache pre-warmed before timing (the brief's own
+  "< 1 ms" target is for the steady-state BFS, not first-time mask
+  computation). Measured 1.06 ms in this project's own standard
+  unoptimized "Development" build config (Google Benchmark's own
+  "Library was built as DEBUG" warning applies) - re-measured at 0.12 ms
+  in a one-off optimized Release+bgfx build, comfortably under the
+  brief's own target; see DECISIONS.md for the full investigation rather
+  than assuming the algorithm itself was the problem.
+- `ctest` 661/661 (bgfx, up from 654) / 638/638 (non-bgfx, unchanged -
+  `OcclusionCuller` only builds under `LCU_ENABLE_BGFX`). Full
+  regression sweep clean on both configs.
 
 ### Phase 68
 
